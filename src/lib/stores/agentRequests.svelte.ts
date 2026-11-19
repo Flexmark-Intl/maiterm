@@ -897,13 +897,24 @@ function createAgentRequestsStore() {
   /** Rust-filed (Hive) cards already announced in this window. */
   const announced = new Set<string>();
 
+  /** A read has come back: until then an empty list says nothing (a failed one doesn't count). */
+  let loaded = $state(false);
+
   async function refresh() {
-    requests = await commands.listAgentRequests().catch(() => requests);
+    try {
+      requests = await commands.listAgentRequests();
+      loaded = true;
+    } catch {
+      /* the last list stands; the sweep reads again */
+    }
     const me = getCurrentWindow().label;
     for (const r of unannouncedHiveCards(requests.filter((x) => x.window_label === me), announced)) announce(r);
   }
 
   return {
+    get loaded(): boolean {
+      return loaded;
+    },
     /** Waiting for the human, oldest first — this window's only: windows are isolated, and the
      *  window that filed a request is the one that carries it out. Rust's list is app-wide (the
      *  phone sees them all). */

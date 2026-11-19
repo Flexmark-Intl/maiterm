@@ -18,7 +18,7 @@ export function fixedRows(hive: Hive, name: string): SettingRow[] {
     { label: 'Goal', value: hive.goal || '(none)' },
     {
       label: 'Landing',
-      value: hive.landing_mode === 'integration' ? `Integration branch hive/${hive.slug}, you approve each land` : 'Land to Base',
+      value: hive.landing_mode === 'integration' ? `Into the branch hive/${hive.slug}; you approve its land into Base` : 'Land to Base',
       note: 'Fixed at creation: it is a branch topology. A different mode means a new Hive.',
     },
   ];

@@ -199,11 +199,7 @@ async fn fetch_once(host_key: &str, ssh_args: &str, session_id: &str, transcript
 
     // Mux over the bridge tunnel's master — never become one (a dead socket falls
     // through to a plain BatchMode connection, which key-auth hosts still satisfy).
-    let mut cmd_args = crate::commands::ssh_tunnel::mux_client_args(host_key);
-    for arg in ssh_args.split_whitespace() {
-        cmd_args.push(arg.to_string());
-    }
-    cmd_args.push(script);
+    let cmd_args = crate::commands::ssh_tunnel::mux_argv(host_key, ssh_args, script);
 
     let output = match tokio::time::timeout(
         tokio::time::Duration::from_secs(20),

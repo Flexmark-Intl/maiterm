@@ -4,8 +4,8 @@
 //!
 //! - the config rule (§8.1), in any mode: after every repo's step 1 and check, any catch the human
 //!   hasn't approved as it stands means one card for the whole land (`driver::advance_all`);
-//! - Landing = Ask me (base mode), and every land in the integration mode (§8.3): the card is
-//!   filed at `hiveLand`, before step 1, pinned per repo.
+//! - Landing = Ask me, in either mode (§7.4, §8.3): the card is filed at `hiveLand`, before
+//!   step 1, pinned per repo.
 //!
 //! While a card waits the land holds no lock and no temporary worktree (plan D4), and nothing is
 //! held from the worker (plan D5: the pinned shas protect the land). `tested` and `base_before`
@@ -37,14 +37,15 @@ pub const WHY_CONFIG: &str = "config";
 pub const WHY_ASK: &str = "ask";
 pub const WHY_INTEGRATION: &str = "integration";
 
-/// The integration mode and Landing = Ask me ask before step 1 (§8.3, §7.4).
+/// Landing = Ask me asks before step 1 (§7.4), in either mode: the integration mode's land into
+/// the Hive's branch is the queen's unless the human set Ask me (Darryl, 2026-11-18, §8.3).
 pub fn asks_first(hive: &Hive) -> Option<&'static str> {
-    if hive.is_integration() {
-        Some(WHY_INTEGRATION)
-    } else if hive.checkpoints.get("landing").is_some_and(|c| c == "ask") {
-        Some(WHY_ASK)
-    } else {
+    if !hive.checkpoints.get("landing").is_some_and(|c| c == "ask") {
         None
+    } else if hive.is_integration() {
+        Some(WHY_INTEGRATION)
+    } else {
+        Some(WHY_ASK)
     }
 }
 
@@ -242,7 +243,7 @@ pub(crate) async fn await_human<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
     .await;
     ctx.window.decisions_changed(&caller.workspace_id);
     let what = match why {
-        WHY_INTEGRATION => "every land in this Hive's integration mode is theirs".to_string(),
+        WHY_INTEGRATION => "the Landing checkpoint is Ask me, so every land into this Hive's branch is theirs".to_string(),
         WHY_ASK => "the Landing checkpoint is Ask me".to_string(),
         _ => {
             let files: Vec<String> = land.repos.iter().filter(|r| r.config_unapproved()).map(|r| format!("{}: {}", r.folder, driver::files_line(&r.config_hits))).collect();
@@ -276,7 +277,7 @@ pub(crate) struct Decision {
 }
 
 impl Decision {
-    fn where_from(&self) -> &'static str {
+    pub(crate) fn where_from(&self) -> &'static str {
         if self.by == "phone" { " from their phone" } else { "" }
     }
 }
@@ -328,6 +329,10 @@ pub(crate) async fn approved<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, d
     }
     if d.kind != KIND {
         ctx.window.settle_request(&d.id, false, "maiTerm can't carry out this kind of Hive request in this build".to_string());
+        return Outcome::Gone;
+    }
+    if super::branch::is_branch(d) {
+        super::branch::approved(ctx, caller, d).await;
         return Outcome::Gone;
     }
     let task_id = arg(&d.args, "task_id").to_string();
@@ -398,6 +403,10 @@ pub(crate) async fn approved<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, d
 pub(crate) async fn closed<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, d: &Decision, status: &str) -> Option<Outcome> {
     if d.kind == super::undo::KIND {
         return super::undo::closed(ctx, caller, d, status).await;
+    }
+    if super::branch::is_branch(d) {
+        super::branch::closed(ctx, caller, d, status).await;
+        return None;
     }
     let dir = worker::task_dir(&caller.paths, arg(&d.args, "task_id")).ok()?;
     let w = blocking(move || worker::read_worker(&dir)).await.ok()?;
@@ -504,7 +513,7 @@ pub fn refile_pending(state: &Arc<crate::state::AppState>, handle: &tauri::AppHa
         .iter()
         .map(|c| {
             let window = crate::hive::rpc::AppWindow { app: state.clone(), handle: handle.clone(), label: c.label.clone() };
-            refile_in(&window, c) + super::undo::refile_in(&window, c)
+            refile_in(&window, c) + super::undo::refile_in(&window, c) + super::branch::refile_in(&window, c)
         })
         .sum();
     if n > 0 {

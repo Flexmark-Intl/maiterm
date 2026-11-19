@@ -697,71 +697,78 @@ fn merge_json(
         .map_err(|e| format!("parsing {}: {e}", source.display()))?;
     let src_obj = src.as_object().ok_or_else(|| format!("{} is not a JSON object", source.display()))?;
 
-    // `read_to_string(..).ok()` alone cannot tell "no file yet" from "the file is there and we
-    // could not read it", and those need opposite answers: the first seeds, the second must
-    // never seed. `symlink_metadata` answers it without following — a symlink here is drift the
-    // caller has already unlinked, and following one would reach the user's real file.
-    let dest_present = fs::symlink_metadata(dest).is_ok();
-    let existing = fs::read_to_string(dest).ok();
-    if dest_present && existing.is_none() {
-        return Err(format!(
-            "{} exists but could not be read — refusing to reseed it",
-            dest.display()
-        ));
-    }
-    let mut out = match existing.as_deref().map(serde_json::from_str::<serde_json::Value>) {
-        Some(Ok(serde_json::Value::Object(o))) => o,
-        // **A destination that EXISTS but does not parse is not seeded over.** Seeding means
-        // "copy the user's file minus identity", which for an existing account silently
-        // replaces its `oauthAccount` and its own project state — the exact "two accounts, one
-        // email" failure this strategy exists to prevent, with no displaced copy to recover
-        // from. Unreadable is transient far more often than it is terminal: a partial read of a
-        // concurrent write by the `claude` process that co-owns this file looks identical. So
-        // refuse, and let the next reconcile try again.
-        //
-        // Seeding stays correct for an ABSENT destination, which is a new account root.
-        Some(_) => {
+    // maiTerm's other edits of this file (the Hive's trust writes) wait, and a write by anyone
+    // between this read and the replace (a running `claude`) makes it read again rather than
+    // drop that write (util/json_file.rs).
+    let _serial = crate::util::json_file::write_lock();
+    for _ in 0..5 {
+        let before = crate::util::json_file::stamp(dest);
+        // `read_to_string(..).ok()` alone cannot tell "no file yet" from "the file is there and we
+        // could not read it", and those need opposite answers: the first seeds, the second must
+        // never seed. `symlink_metadata` answers it without following — a symlink here is drift the
+        // caller has already unlinked, and following one would reach the user's real file.
+        let dest_present = fs::symlink_metadata(dest).is_ok();
+        let existing = fs::read_to_string(dest).ok();
+        if dest_present && existing.is_none() {
             return Err(format!(
-                "{} exists but is not readable JSON — refusing to reseed it, which would \
-                 replace this account's identity with the user's",
+                "{} exists but could not be read — refusing to reseed it",
                 dest.display()
-            ))
+            ));
         }
-        None => {
-            let mut seeded = src_obj.clone();
-            for k in exclude {
-                seeded.remove(*k);
-            }
-            seeded
-        }
-    };
-
-    for k in resync {
-        match src_obj.get(*k) {
-            Some(v) => {
-                out.insert((*k).to_string(), v.clone());
+        let mut out = match existing.as_deref().map(serde_json::from_str::<serde_json::Value>) {
+            Some(Ok(serde_json::Value::Object(o))) => o,
+            // **A destination that EXISTS but does not parse is not seeded over.** Seeding means
+            // "copy the user's file minus identity", which for an existing account silently
+            // replaces its `oauthAccount` and its own project state — the exact "two accounts, one
+            // email" failure this strategy exists to prevent, with no displaced copy to recover
+            // from. Unreadable is transient far more often than it is terminal: a partial read of a
+            // concurrent write by the `claude` process that co-owns this file looks identical. So
+            // refuse, and let the next reconcile try again.
+            //
+            // Seeding stays correct for an ABSENT destination, which is a new account root.
+            Some(_) => {
+                return Err(format!(
+                    "{} exists but is not readable JSON — refusing to reseed it, which would \
+                     replace this account's identity with the user's",
+                    dest.display()
+                ))
             }
             None => {
-                out.remove(*k);
+                let mut seeded = src_obj.clone();
+                for k in exclude {
+                    seeded.remove(*k);
+                }
+                seeded
+            }
+        };
+
+        for k in resync {
+            match src_obj.get(*k) {
+                Some(v) => {
+                    out.insert((*k).to_string(), v.clone());
+                }
+                None => {
+                    out.remove(*k);
+                }
             }
         }
-    }
-    // `exclude` applies ONLY when seeding from the user's file. Re-applying it here would strip
-    // the identity the runtime wrote for THIS account on every reconcile — deleting the very
-    // thing this strategy exists to keep separate. Caught by a test rather than by a user
-    // wondering why their account forgot itself.
+        // `exclude` applies ONLY when seeding from the user's file. Re-applying it here would strip
+        // the identity the runtime wrote for THIS account on every reconcile — deleting the very
+        // thing this strategy exists to keep separate. Caught by a test rather than by a user
+        // wondering why their account forgot itself.
 
-    let rendered = serde_json::to_string_pretty(&serde_json::Value::Object(out))
-        .map_err(|e| format!("rendering {}: {e}", dest.display()))?;
-    if existing.as_deref() == Some(rendered.as_str()) {
-        return Ok(false);
+        let rendered = serde_json::to_string_pretty(&serde_json::Value::Object(out))
+            .map_err(|e| format!("rendering {}: {e}", dest.display()))?;
+        if existing.as_deref() == Some(rendered.as_str()) {
+            return Ok(false);
+        }
+        // Write through a temp file in the same directory: a half-written config root is worse than
+        // an unchanged one, and the runtime may be reading this file as we go.
+        if crate::util::json_file::replace_if_unchanged(dest, before, rendered.as_bytes()).map_err(|e| format!("replacing {}: {e}", dest.display()))? {
+            return Ok(true);
+        }
     }
-    // Write through a temp file in the same directory: a half-written config root is worse than
-    // an unchanged one, and the runtime may be reading this file as we go.
-    let tmp = dest.with_extension("maiterm-tmp");
-    fs::write(&tmp, &rendered).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
-    fs::rename(&tmp, dest).map_err(|e| format!("replacing {}: {e}", dest.display()))?;
-    Ok(true)
+    Err(format!("{} kept changing while being merged", dest.display()))
 }
 
 /// The env changes a newly spawned tab needs for every runtime the user has an active account

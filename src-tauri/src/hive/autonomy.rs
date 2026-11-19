@@ -6,7 +6,7 @@
 //! question does, and only the human's answer (`hive_blocker_answered`) changes the checkpoint.
 //!
 //! Offers are category `offer`: never a precedent, never a streak. `interfaces` has no Rust signal,
-//! so it is never offered (plan D15); Landing in the integration mode is always the human's.
+//! so it is never offered (plan D15). Landing is earned in either mode (2026-11-18, §8.3).
 //! `finals` is counted from the coordinator's own `galleryTag` final/rejected decisions (step 8b),
 //! which the human can override (a gallery pick that changes one is an override), so it can be
 //! handed back; under Ask me the coordinator's finals are recommendations and the human's picks
@@ -53,7 +53,8 @@ pub fn ms(at: &str) -> Option<i64> {
 
 /// Checkpoints maiTerm may offer (§7.6): only what Rust sees decided.
 pub fn earnable(hive: &Hive, key: &str) -> bool {
-    matches!(key, PLAN | QUESTIONS | PERMISSIONS | FINALS) || (key == LANDING && !hive.is_integration())
+    let _ = hive;
+    matches!(key, PLAN | QUESTIONS | PERMISSIONS | FINALS | LANDING)
 }
 
 /// The checkpoint an `offer` line is about.

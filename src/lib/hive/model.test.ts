@@ -215,7 +215,7 @@ describe('hiveOwnsPromptIn', () => {
 
   it('a missing checkpoint key reads as its default for the landing mode', () => {
     expect(checkpointAsks({ landing_mode: 'base', checkpoints: {} }, 'landing')).toBe(false);
-    expect(checkpointAsks({ landing_mode: 'integration', checkpoints: {} }, 'landing')).toBe(true);
+    expect(checkpointAsks({ landing_mode: 'integration', checkpoints: {} }, 'landing')).toBe(false);
     expect(checkpointAsks({ landing_mode: 'integration', checkpoints: { plan: 'ask' } }, 'plan')).toBe(true);
     expect(checkpointFor('trust')).toBeNull();
   });

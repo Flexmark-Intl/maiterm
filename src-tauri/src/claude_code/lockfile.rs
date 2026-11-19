@@ -177,37 +177,48 @@ fn expected_mcp_entry(port: u16, auth: &str) -> serde_json::Value {
     })
 }
 
-/// Atomically set `mcpServers.<key>` to `entry`, preserving the rest of the file.
+/// Atomically set `mcpServers.<key>` to `entry`, preserving the rest of the file. Through
+/// `json_file`, like every maiTerm edit of `.claude.json`: the Hive's trust writes edit the same
+/// file, and a rename from a copy read before one of them would drop it.
 fn put_mcp_entry(path: &PathBuf, entry: serde_json::Value) -> Result<(), String> {
-    let mut settings: serde_json::Value = if path.exists() {
-        let raw = fs::read_to_string(path).map_err(|e| format!("Cannot read settings.json: {}", e))?;
-        serde_json::from_str(&raw).unwrap_or(serde_json::json!({}))
-    } else {
-        serde_json::json!({})
+    let apply = |settings: &mut serde_json::Value| -> Result<(), String> {
+        let mcp_servers = settings
+            .as_object_mut()
+            .ok_or("settings.json is not an object")?
+            .entry("mcpServers")
+            .or_insert(serde_json::json!({}));
+        mcp_servers[mcp_server_key()] = entry.clone();
+        // Rebrand migration: drop the legacy aiterm/aiterm-dev key for this flavor so
+        // the rename doesn't leave a stale duplicate server behind in ~/.claude.json.
+        if let Some(obj) = mcp_servers.as_object_mut() {
+            obj.remove(legacy_mcp_server_key());
+        }
+        Ok(())
     };
-
-    let mcp_servers = settings
-        .as_object_mut()
-        .ok_or("settings.json is not an object")?
-        .entry("mcpServers")
-        .or_insert(serde_json::json!({}));
-
-    mcp_servers[mcp_server_key()] = entry;
-    // Rebrand migration: drop the legacy aiterm/aiterm-dev key for this flavor so
-    // the rename doesn't leave a stale duplicate server behind in ~/.claude.json.
-    if let Some(obj) = mcp_servers.as_object_mut() {
-        obj.remove(legacy_mcp_server_key());
+    if !path.exists() {
+        let mut settings = serde_json::json!({});
+        apply(&mut settings)?;
+        let json = serde_json::to_vec_pretty(&settings).map_err(|e| e.to_string())?;
+        let _serial = crate::util::json_file::write_lock();
+        crate::util::json_file::replace_if_unchanged(path, None, &json).map_err(|e| format!("Cannot update settings.json: {}", e))?;
+        return Ok(());
     }
-
-    let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    // Atomic write
-    let tmp = path.with_extension("json.aiterm-tmp");
-    fs::write(&tmp, &json).map_err(|e| format!("Cannot write settings tmp: {}", e))?;
-    fs::rename(&tmp, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("Cannot update settings.json: {}", e)
-    })?;
-    Ok(())
+    let mut failed = None;
+    crate::util::json_file::update_file(path, |raw| {
+        // A file that doesn't parse may be the `claude` CLI's half-written save: never written
+        // over (it would keep only `mcpServers`); the 30 s re-assert tries again.
+        let Ok(mut settings) = serde_json::from_slice::<serde_json::Value>(raw) else {
+            failed = Some("~/.claude.json isn't valid JSON right now, so it was left alone".to_string());
+            return None;
+        };
+        if let Err(e) = apply(&mut settings) {
+            failed = Some(e);
+            return None;
+        }
+        serde_json::to_vec_pretty(&settings).ok()
+    })
+    .map_err(|e| format!("Cannot update settings.json: {}", e))?;
+    failed.map_or(Ok(()), Err)
 }
 
 /// Write an `mcpServers.aiterm` entry into ~/.claude.json so Claude
@@ -314,31 +325,25 @@ fn remove_mcp_settings() -> Result<(), String> {
         return Ok(());
     }
 
-    let raw = fs::read_to_string(&path).map_err(|e| format!("Cannot read settings.json: {}", e))?;
-    let mut settings: serde_json::Value =
-        serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
-
-    if let Some(mcp_servers) = settings.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
+    // Through `json_file` (see `put_mcp_entry`).
+    let changed = crate::util::json_file::update_file(&path, |raw| {
+        // Unparseable: left alone (see `put_mcp_entry`). Nothing to remove: no write.
+        let mut settings: serde_json::Value = serde_json::from_slice(raw).ok()?;
+        let mcp_servers = settings.get_mut("mcpServers").and_then(|v| v.as_object_mut())?;
         mcp_servers.remove(mcp_server_key());
         // Also strip the legacy aiterm/aiterm-dev key (rebrand migration).
         mcp_servers.remove(legacy_mcp_server_key());
         // Remove the mcpServers key entirely if now empty
         if mcp_servers.is_empty() {
-            settings.as_object_mut().unwrap().remove("mcpServers");
+            settings.as_object_mut()?.remove("mcpServers");
         }
-    } else {
-        return Ok(()); // Nothing to remove
+        serde_json::to_vec_pretty(&settings).ok()
+    })
+    .map_err(|e| format!("Cannot update settings.json: {}", e))?;
+
+    if changed {
+        log::info!("Removed {} MCP server from ~/.claude.json", mcp_server_key());
     }
-
-    let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    let tmp = path.with_extension("json.aiterm-tmp");
-    fs::write(&tmp, &json).map_err(|e| format!("Cannot write settings tmp: {}", e))?;
-    fs::rename(&tmp, &path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("Cannot update settings.json: {}", e)
-    })?;
-
-    log::info!("Removed {} MCP server from ~/.claude.json", mcp_server_key());
     Ok(())
 }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { askCount, autonomyLabel, CHECKPOINT_ROWS, formFor, lockedReason, toSave, validateForm } from './autonomy';
+import { askCount, autonomyLabel, CHECKPOINT_ROWS, formFor, toSave, validateForm } from './autonomy';
 import type { Hive } from '$lib/tauri/types';
 
 const hive = (over: Partial<Hive> = {}) => ({ landing_mode: 'base', checkpoints: {}, settings: {}, ...over }) as Pick<Hive, 'landing_mode' | 'checkpoints' | 'settings'>;
@@ -12,20 +12,16 @@ describe('the Autonomy form', () => {
     expect(f.minutes).toBe(10);
     expect(formFor(hive()).minutes).toBe(5);
     expect(formFor(hive({ settings: { autonomy: { prompt_timeout_secs: 20, daily_digest: true } } })).minutes).toBe(1);
-    expect(formFor(hive({ landing_mode: 'integration' })).values.landing).toBe('ask');
+    expect(formFor(hive({ landing_mode: 'integration' })).values.landing, 'the queen lands into the branch').toBe('coordinator');
     expect(CHECKPOINT_ROWS.map((r) => r.key)).toEqual(['plan', 'questions', 'permissions', 'landing', 'finals', 'interfaces', 'settings']);
     expect(formFor(hive({ checkpoints: { settings: 'coordinator' } })).values.settings, 'handed over').toBe('coordinator');
   });
 
-  it('keeps Landing at Ask me in the integration mode', () => {
+  it('lets Landing be either in the integration mode', () => {
     const integ = hive({ landing_mode: 'integration' });
-    expect(lockedReason(integ, 'landing')).toContain('Landing stays Ask me');
-    expect(lockedReason(integ, 'plan')).toBeNull();
-    expect(lockedReason(hive(), 'landing')).toBeNull();
     const f = formFor(integ);
-    expect(validateForm(integ, f)).toBeNull();
-    expect(validateForm(integ, { ...f, values: { ...f.values, landing: 'coordinator' } })).toContain('Landing stays Ask me');
-    expect(validateForm(hive(), { ...formFor(hive()), values: { ...formFor(hive()).values, landing: 'coordinator' } })).toBeNull();
+    expect(validateForm(integ, { ...f, values: { ...f.values, landing: 'coordinator' } })).toBeNull();
+    expect(validateForm(integ, { ...f, values: { ...f.values, landing: 'ask' } })).toBeNull();
   });
 
   it('checks the timeout and the values', () => {
@@ -52,7 +48,7 @@ describe('the Autonomy form', () => {
     const handed = { settings: 'coordinator' };
     expect(autonomyLabel(hive({ checkpoints: handed }))).toBe('Queen decides');
     expect(autonomyLabel(hive())).toBe(`You decide 1 of ${of}`);
-    expect(autonomyLabel(hive({ landing_mode: 'integration', checkpoints: handed }))).toBe(`You decide 1 of ${of}`);
+    expect(autonomyLabel(hive({ landing_mode: 'integration', checkpoints: handed }))).toBe('Queen decides');
     expect(autonomyLabel(hive({ checkpoints: { plan: 'ask', questions: 'ask' } }))).toBe(`You decide 3 of ${of}`);
   });
 });

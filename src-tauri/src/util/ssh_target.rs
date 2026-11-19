@@ -72,9 +72,10 @@ fn switch_for(flag: char) -> Option<&'static str> {
 impl SshTarget {
     /// Read an ssh command as stored or typed: `ssh …`, an ssh by another name (`/usr/bin/ssh`,
     /// `autossh -M 0 …`), or the bare args (`-p 2222 ews@nova`). A remote command after the
-    /// destination is ignored.
+    /// destination is ignored. `ssh_command` is shell words (`util::ssh_words`).
     pub fn parse(ssh_command: &str) -> Result<SshTarget, String> {
-        let mut words: Vec<&str> = ssh_command.split_whitespace().collect();
+        let owned = super::ssh_words::split(ssh_command);
+        let mut words: Vec<&str> = owned.iter().map(String::as_str).collect();
         let autossh = match words.first() {
             Some(w) => {
                 let base = w.rsplit('/').next().unwrap_or(w);
@@ -135,12 +136,7 @@ impl SshTarget {
 
     /// Groups watched files by connection (the poller's one ssh per host).
     pub fn key(&self) -> String {
-        let mut k = self.opts.join(" ");
-        if !k.is_empty() {
-            k.push(' ');
-        }
-        k.push_str(&self.dest);
-        k
+        super::ssh_words::join(self.opts.iter().chain([&self.dest]))
     }
 
     fn base(&self, cmd: &mut Command, connect_timeout: u32) {
@@ -217,11 +213,11 @@ fn matching_tunnel<'a>(ssh_command: &str, keys: &'a [String]) -> Option<&'a Stri
 /// any case), as the frontend's `cleanSshCommand` stores them.
 pub fn without_control_master(args: &str) -> String {
     let is_cm = |o: &str| o.to_ascii_lowercase().starts_with("controlmaster=");
-    let words: Vec<&str> = args.split_whitespace().collect();
+    let words = super::ssh_words::split(args);
     let mut out: Vec<&str> = Vec::new();
     let mut i = 0;
     while i < words.len() {
-        let w = words[i];
+        let w = words[i].as_str();
         if w == "-o" && words.get(i + 1).is_some_and(|o| is_cm(o)) {
             i += 2;
             continue;
@@ -233,12 +229,13 @@ pub fn without_control_master(args: &str) -> String {
         out.push(w);
         i += 1;
     }
-    out.join(" ")
+    super::ssh_words::join(out)
 }
 
 /// The args of an ssh command, without a leading ssh program (and autossh's own options).
-fn without_program(cmd: &str) -> String {
-    let mut words = cmd.split_whitespace().peekable();
+pub(crate) fn without_program(cmd: &str) -> String {
+    let all = super::ssh_words::split(cmd);
+    let mut words = all.iter().map(String::as_str).peekable();
     let Some(first) = words.peek().copied() else { return String::new() };
     let base = first.rsplit('/').next().unwrap_or(first);
     if base != "ssh" && base != "autossh" {
@@ -254,7 +251,7 @@ fn without_program(cmd: &str) -> String {
             out.push(w);
         }
     }
-    out.join(" ")
+    super::ssh_words::join(out)
 }
 
 #[cfg(test)]
@@ -317,5 +314,20 @@ mod tests {
         // Still a different host when anything that says where differs.
         assert_eq!(matching_tunnel("-o ControlMaster=no -p 2222 ews@nova", &keys), None);
         assert_eq!(without_control_master("-o ControlMaster=no -oControlMaster=auto -t ews@nova"), "-t ews@nova");
+    }
+
+    #[test]
+    fn a_path_with_a_space_is_one_word_in_every_spelling() {
+        let keys = vec!["-i '/Users/me/My Keys/id' ews@nova".to_string()];
+        // The captured line of a session maiTerm started (argv joined as shell words)...
+        let captured = "-t -o ControlMaster=no -i '/Users/me/My Keys/id' ews@nova 'export MAITERM_TAB_ID=x; cd /a && exec $SHELL -l'";
+        assert_eq!(matching_tunnel(captured, &keys), Some(&keys[0]));
+        // ...and what a human typed, quoted their own way.
+        assert_eq!(matching_tunnel(r#"ssh -i "/Users/me/My Keys/id" ews@nova"#, &keys), Some(&keys[0]));
+        assert_eq!(matching_tunnel(r"ssh -i /Users/me/My\ Keys/id ews@nova", &keys), Some(&keys[0]));
+        let t = SshTarget::parse(captured).unwrap();
+        assert_eq!((t.dest.as_str(), t.opts.as_slice()), ("ews@nova", ["-o".to_string(), "IdentityFile=/Users/me/My Keys/id".to_string()].as_slice()));
+        assert_eq!(without_program("'/opt/my ssh/ssh' -p 2 h"), "-p 2 h");
+        assert_eq!(t.key(), "-o 'IdentityFile=/Users/me/My Keys/id' ews@nova");
     }
 }

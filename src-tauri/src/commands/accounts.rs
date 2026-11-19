@@ -2245,7 +2245,7 @@ pub async fn bind_remote_account(
 async fn run_ssh(ssh_args: &str, script: &str, stdin_data: Option<&str>) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
 
-    let mut args: Vec<String> = vec![
+    let args: Vec<String> = vec![
         "-o".into(),
         "ControlMaster=no".into(),
         "-o".into(),
@@ -2258,13 +2258,9 @@ async fn run_ssh(ssh_args: &str, script: &str, stdin_data: Option<&str>) -> Resu
         // No tty: nothing about this is interactive, and a tty would echo stdin back at us.
         "-T".into(),
     ];
-    args.extend(
-        ssh_args
-            .trim_start_matches("ssh ")
-            .split_whitespace()
-            .map(str::to_string),
-    );
-    args.push(script.to_string());
+    // Shell words, without the user's tty switches (which would override `-T`):
+    // `ssh_tunnel::ssh_argv`, as every ssh maiTerm makes for itself.
+    let args = crate::commands::ssh_tunnel::ssh_argv(args, ssh_args.trim_start_matches("ssh "), [script]);
 
     let mut child = tokio::process::Command::new("ssh")
         .args(&args)

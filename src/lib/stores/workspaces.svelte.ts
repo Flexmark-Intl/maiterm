@@ -448,6 +448,16 @@ function createWorkspacesStore() {
               }
             }
 
+            // Shrink an ssh command an earlier build let grow behind a shell alias
+            // (`withoutAliasedCopies`, tauri/commands.ts). Here rather than where it is read:
+            // the auto-resume command is read raw in a dozen places and wins over the restore
+            // context. In the MIRROR only, on every load: `setTabAutoResumeContext` also turns
+            // auto-resume on, so writing the shrunk command back would re-arm a tab the human
+            // disabled. The saved copy shrinks when something next saves the tab's context
+            // (the autosave tick for a live ssh tab, the human for auto-resume).
+            if (tab.auto_resume_ssh_command) tab.auto_resume_ssh_command = commands.cleanSshCommand(tab.auto_resume_ssh_command);
+            if (tab.restore_ssh_command) tab.restore_ssh_command = commands.cleanSshCommand(tab.restore_ssh_command);
+
             if (migrated) {
               await commands.setTabAutoResumeContext(
                 ws.id, pane.id, tab.id,

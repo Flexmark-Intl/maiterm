@@ -79,7 +79,7 @@
   import { hivePrompts } from '$lib/stores/hivePrompts.svelte';
   import HiveMemoryView from './HiveMemoryView.svelte';
   import HiveNeedsYou from './HiveNeedsYou.svelte';
-  import { cardTask, needsYouCount, needsYouQueue, type HiveAsker } from '$lib/hive/needsYou';
+  import { cardTask, needsYouCount, needsYouQueue, queenAsks, type HiveAsker } from '$lib/hive/needsYou';
   import { followUpsStore } from '$lib/stores/followUps.svelte';
   import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
   import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
@@ -307,6 +307,32 @@
     else open({ workspaceId, tabId: a.tabId });
   }
   const cardByTask = $derived(new Map(cards.map((c) => [c.worker.task_id, c])));
+
+  // ── The queen's decisions are answered under Needs you, not in her chat (§4.8): a long one in
+  // her dock covered the messages that led to it. A NEW one brings Needs you up beside her chat,
+  // unless the human is typing somewhere that view would hide (a worker's column, Memory). What
+  // was already waiting when this Hive was opened moves nothing. ──
+  const queenAskKeys = $derived(queenAsks(needs));
+  const queenAsking = $derived(queenAskKeys.length > 0);
+  let seenQueenAsks: { ws: string; keys: Set<string> } | null = null;
+  $effect(() => {
+    const keys = queenAskKeys;
+    const ws = workspaceId;
+    // At launch the view mounts before the tasks and requests arrive: seeding then would take
+    // what was already waiting for new.
+    if (!tasksStore.loaded || !agentRequestsStore.loaded) return;
+    untrack(() => {
+      const seen = seenQueenAsks?.ws === ws ? seenQueenAsks.keys : null;
+      seenQueenAsks = { ws, keys: new Set(keys) };
+      if (!seen || !keys.some((k) => !seen.has(k)) || typingOutsideQueen()) return;
+      hiveView.setView(ws, 'needs');
+    });
+  });
+  function typingOutsideQueen(): boolean {
+    const el = document.activeElement as HTMLElement | null;
+    if (!el || !colsEl?.contains(el) || el.closest('.coord')) return false;
+    return el.isContentEditable || el.matches('textarea, input, select');
+  }
 
   // ── The coordinator's width (380–560 px) and the rail's (200–240 px), kept per viewer (§4.1).
   // Worker columns share what's left (flex, no drag of their own). ──
@@ -665,6 +691,9 @@
     if (detail.tabId && detail.tabId === coordId) {
       hiveView.setCoordCollapsed(workspaceId, false);
       hiveView.focus(workspaceId, 'coordinator');
+      // A notice about something she waits on (`focus`, waitingStore.openOnTab): her decisions
+      // and approvals are answered under Needs you, beside her chat.
+      if (detail.focus || queenAsking) hiveView.setView(workspaceId, 'needs');
       requestAnimationFrame(() => column?.focusComposer());
       flash = true;
       if (flashTimer) clearTimeout(flashTimer);
@@ -1083,7 +1112,7 @@
           </div>
           <div class="ro">
             <span class="k">Lands to</span>
-            <Tooltip text={hive.landing_mode === 'integration' ? `Each land goes to hive/${hive.slug}, with your approval` : 'Each land goes straight to the base branch'}>
+            <Tooltip text={hive.landing_mode === 'integration' ? `Each land goes to the Hive's branch, hive/${hive.slug}` : 'Each land goes straight to the base branch'}>
               <span class="v">{hive.landing_mode === 'integration' ? `hive/${hive.slug}` : 'Base'}</span>
             </Tooltip>
           </div>
@@ -1217,6 +1246,7 @@
         emptyText="This Hive has no queen tab."
         gallery={hive ? { hiveId: hive.id, workspaceId } : null}
         composerPlaceholder={hive?.status === 'done' ? 'This Hive is done. Send a message to wake it.' : undefined}
+        decisionElsewhere={showNeeds ? null : { label: 'She is waiting on your decision: open Needs you', onopen: () => hiveView.setView(workspaceId, 'needs') }}
       >
         {#snippet header()}
           <span class="role">queen</span>

@@ -938,8 +938,8 @@ function createAgentMeshStore() {
       return !!ws && localMembersOf(ws).some((m) => m.tabId === tabId);
     },
 
-    /** Are these two tabs agents on one mesh (linked meshes count)? The cheap form of "is b in
-     *  a's roster": it reads only these two tabs' agent state, never the whole roster's, so a
+    /** Is b an agent member of the mesh a sits in (linked meshes count)? The cheap form of "is b
+     *  in a's roster": it reads only b's agent state, never the whole roster's, so a
      *  derived list that asks it (the waiting corners) doesn't re-run on every agent's hook
      *  event (docs/tasks.md §3.1.3; root CLAUDE.md, hook-event reactivity). */
     areMeshPeers(a: string, b: string): boolean {
@@ -947,10 +947,10 @@ function createAgentMeshStore() {
       const wa = meshWorkspaceForTab(a);
       const wb = meshWorkspaceForTab(b);
       if (!wa || !wb || meshKeyOf(wa) !== meshKeyOf(wb)) return false;
-      const tab = (ws: Workspace, id: string) => ws.panes.flatMap((p) => p.tabs).find((t) => t.id === id);
-      const ta = tab(wa, a);
-      const tb = tab(wb, b);
-      return !!ta && !!tb && isAgentMember(ta) && isAgentMember(tb);
+      // Only b must be a member: like the roster and the router, a needs only to sit in the
+      // mesh (an unnamed tab there can still send, so it can still file a card for a peer).
+      const tb = wb.panes.flatMap((p) => p.tabs).find((t) => t.id === b);
+      return !!tb && isAgentMember(tb);
     },
 
     /** Resolve a peer the way sendToBridgedAgent does (handle, role, bare tab name on a linked

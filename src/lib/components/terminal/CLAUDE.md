@@ -217,6 +217,22 @@ stored command, or hands it to maiTerm's own `ssh` (the MCP bridge tunnel, remot
 file), goes through `sshArgsOf`, which drops the program and autossh's `-M`/`-f` — ssh reads `-M`
 as master mode, so `-M 0` would make `0` the host.
 
+**An ssh command is shell words, never whitespace-split.** Rust reads the foreground ssh's argv
+(`KERN_PROCARGS2` / `/proc/<pid>/cmdline`, `util/proc_argv.rs`) and joins it with
+`util/ssh_words.rs`, which quotes only a word that needs it; `ps` is the fallback, flagged
+`foreground_lossy`. So `ssh -i "/Users/me/My Keys/id" ews@nova` arrives as
+`-i '/Users/me/My Keys/id' ews@nova`. Read one through `splitWords` (`utils/shellWords.ts`) in
+TS and `ssh_words::split` in Rust, and build keys with `joinWords`/`ssh_words::join`: the two
+sides must spell a key alike. Compare two hosts with `sameSshHost` / `watch::same_host`, never
+`==` against a stored string: a `due.host` or Files root persisted before quoting may be spelled
+the old way (`-o SendEnv=LC_*`, now `-o 'SendEnv=LC_*'`), and approvals accept that spelling
+too (`watch::follow_up_approved`). `cleanSshCommand` finds maiTerm's remote command by word
+value, so it is stripped however ssh received it (one word, re-split by a wrapper's `$@`, or
+cmd.exe's literal quotes), and never keeps a word naming `MAITERM_` in the remote command —
+found as `watch::parse_ssh` finds it (`remoteCommandIndex`), so the user's own options before
+or after the host (`ews@nova -o SendEnv=MAITERM_*`) are kept. Every word with a backslash is
+quoted, a Windows path too: bare, Git Bash and WSL eat it. Split on whitespace, that command connected every maiTerm-made ssh to the host `Keys/id`.
+
 ### Remote CWD Detection
 
 Priority: OSC 7 (if not stale) → prompt pattern heuristic.

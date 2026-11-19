@@ -98,15 +98,16 @@ impl Default for Timing {
 }
 
 /// Where to connect: the tunnel's own key (it names the ControlMaster socket) and the connect
-/// args (`watch::connect_args` form, never a whole command line).
-///
-/// `ssh_args` is a list of whitespace-separated words, as it is everywhere maiTerm keeps an
-/// ssh command (the tunnels, the mirror, watch scripts): the command is read back from the
-/// process table, where argv's quoting is already gone. A word holding a space (`-F "/a b/c"`)
-/// can't be carried; `proto::ssh_args` splits it into argv words itself, never through a shell.
+/// args (`watch::connect_args` form, never a whole command line). `proto::ssh_args` splits the
+/// args into argv words itself, never through a shell.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Target {
     pub tunnel_key: String,
+    /// Shell words (`util::ssh_words`), read only through `ssh_words::split`: a word with a
+    /// space in it is quoted (`-i '/Users/me/My Keys/id' ews@nova`), so a whitespace split
+    /// connects somewhere else. The tab's command they come from is read from the ssh's argv
+    /// (`pty::manager::ssh_command_line`); only where that can't be read is it the `ps` line,
+    /// which joins argv with spaces and is right only while no word holds whitespace.
     pub ssh_args: String,
 }
 
@@ -130,7 +131,7 @@ pub fn tunnel_lookup(state: &Arc<crate::state::AppState>) -> Lookup {
             .ssh_tunnels
             .read()
             .values()
-            .find(|t| crate::watch::connect_args(&t.host_key) == host)
+            .find(|t| crate::watch::same_host(&t.host_key, host))
             .map(|t| Target { tunnel_key: t.host_key.clone(), ssh_args: crate::watch::connect_args(&t.ssh_args) })
             .unwrap_or_else(|| Target { tunnel_key: host.to_string(), ssh_args: host.to_string() })
     })

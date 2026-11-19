@@ -24,6 +24,7 @@ import type {
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
 import { savedCwd } from '$lib/stores/relocateFallback';
+import { parseWordSpans, quoteWord, type WordSpan } from '$lib/utils/shellWords';
 import type { AgentBridge, AgentRequest, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, FollowUp, ClaudeSetupReport, MailinkDevice, MailinkPairingPayload, MeshTopic, MoveTargetWindow, Pane, Preferences, ScrollInfo, SearchResult, Service, ShellInfo, SplitDirection, Tab, Task, Workstream, FrameMeta, WatchStatus, WindowData, Workspace, WorkspaceNote } from './types';
 
 // Terminal commands
@@ -33,7 +34,142 @@ export async function spawnTerminal(ptyId: string, tabId: string, cols: number, 
 
 export interface PtyInfo {
   cwd: string | null;
+  /** The foreground ssh's command, as shell words (`utils/shellWords`) read from its argv. */
   foreground_command: string | null;
+  /** It came from `ps` instead (argv unreadable): a word with a space in it may be split. */
+  foreground_lossy?: boolean;
+}
+
+/** The words of `s` with their spans: shell words, or — for an old string a quote leaves
+ *  unbalanced (a lossy `ps` line naming `Bob's Keys`) — whitespace runs, as it was read before. */
+function wordSpansOf(s: string): WordSpan[] {
+  return parseWordSpans(s) ?? Array.from(s.matchAll(/\S+/g), m => ({ value: m[0], start: m.index!, end: m.index! + m[0].length }));
+}
+
+/**
+ * maiTerm's own remote command (what `buildSshCommand` appends), matched against WORD VALUES
+ * joined with single spaces, from some word to the end. However ssh received it — one quoted
+ * word (the usual capture), several words (a wrapper whose unquoted `$@` re-splits it, or a
+ * `ps` line), or several words with the quotes left in (cmd.exe, which doesn't quote with `'`)
+ * — its values read the same, and this finds where it starts.
+ */
+const INJECTED_TAIL = /^'?(?:export\s+MAITERM_TAB_ID=|\[ -r ~\/\.maiterm\/|cd\s).*exec\s+'?\$?SHELL'?\s+-l'?$/s;
+
+/** ssh's options that take an argument (OpenSSH's getopt string, as `watch.rs` has them). */
+const SSH_ARG_FLAGS = 'bceilmopBDEFIJLOPQRSwW';
+const SSH_ARG_FLAG = new RegExp(`[${SSH_ARG_FLAGS}]`);
+
+/**
+ * Where the remote command starts among ssh args (no program), read as ssh's getopt reads them —
+ * the whole walk of `watch::parse_ssh`, whose index `watch::remote_command_index` must match
+ * (`REMOTE_AT` in sshArgsRoundTrip.test.ts is asserted on both sides). OpenSSH keeps reading
+ * options AFTER the destination (`ssh ews@nova -o SendEnv=X -p 2222`), so the remote command
+ * starts at the first plain word after the destination that isn't an option's argument, or
+ * after `--`. `values.length` when there is none.
+ */
+export function remoteCommandIndex(values: string[]): number {
+  return sshWalk(values).remote;
+}
+
+/**
+ * `remoteCommandIndex`'s walk, which also notes the tty switches it passes, as edits: word index
+ * to the word without its `t`s, or null when nothing is left. Only options are read, never an
+ * option's argument nor the remote command. ssh reads a cluster flag by flag (`-xtt` is
+ * `-x -t -t`) up to the first flag that takes an argument, which takes the rest: so `-xtt`
+ * becomes `-x` and `-tp22` becomes `-p22`, while `-Et` is untouched (its `t` is `-E`'s argument).
+ */
+function sshWalk(values: string[]): { remote: number; tty: Map<number, string | null> } {
+  const tty = new Map<number, string | null>();
+  let dest = false;
+  for (let i = 0; i < values.length; i++) {
+    const w = values[i];
+    if (w === '--') return { remote: dest ? i + 1 : Math.min(i + 2, values.length), tty };
+    if (!w.startsWith('-') || w === '-') {
+      // The first plain word is the destination; one after it starts the remote command.
+      if (dest) return { remote: i, tty };
+      dest = true;
+      continue;
+    }
+    // A cluster (`-xCp2222`): its argument is the rest of the word, or else the next word.
+    const flags = w.slice(1);
+    const arg = flags.search(SSH_ARG_FLAG);
+    const head = arg < 0 ? flags : flags.slice(0, arg);
+    const rest = arg < 0 ? '' : flags.slice(arg);
+    const kept = head.replace(/t/g, '');
+    if (kept !== head) tty.set(i, kept || rest ? `-${kept}${rest}` : null);
+    if (arg === flags.length - 1) i++;
+  }
+  return { remote: values.length, tty };
+}
+
+/**
+ * `args` without its tty switches (`-t`, `-t -t`, `-tt`), and nothing else: only options, never
+ * an option's argument or the remote command. The user's `-t` belongs in the command they retype
+ * (`cleanSshCommand` keeps it), but not in maiTerm's own ssh. Those pass `-T`, and ssh reads
+ * options left to right, so a later `-t` asks for a tty (`-t -t` forces one). A tty on
+ * `cat > path` or `sh -s` turns bytes into keystrokes: 0x03 becomes SIGINT, LF becomes CRLF,
+ * and no EOF ever arrives.
+ */
+function withoutTty(args: string): string {
+  const words = wordSpansOf(args);
+  const { tty } = sshWalk(words.map(w => w.value));
+  if (!tty.size) return args;
+  // Words left alone keep the spelling they came with; a trimmed cluster is spelled anew.
+  const out: string[] = [];
+  words.forEach((w, i) => {
+    if (!tty.has(i)) out.push(args.slice(w.start, w.end));
+    else if (tty.get(i) !== null) out.push(quoteWord(tty.get(i)!));
+  });
+  return out.join(' ');
+}
+
+/** The index of the first word of maiTerm's injected remote command, or `words.length`. */
+function injectedFrom(words: WordSpan[]): number {
+  for (let i = 1; i < words.length; i++) {
+    if (INJECTED_TAIL.test(words.slice(i).map(w => w.value).join(' '))) return i;
+  }
+  return words.length;
+}
+
+/**
+ * ssh args (no program) without maiTerm's own `-t -o ControlMaster=no` where a SHELL ALIAS pushed
+ * it away from the front. maiTerm types `ssh -t -o ControlMaster=no <stored>`, and with
+ * `alias ssh='ssh -x -C'` the process table shows `ssh -x -C -t -o ControlMaster=no -x -C host`:
+ * the alias's words, maiTerm's flags, then the stored command, which already begins with the
+ * alias's words from the first connection. Stripping maiTerm's flags only right after the program
+ * stored that whole line, so every restart added another copy, and each spelling is its own
+ * tunnel key: one host got several tunnels on one remote port, which knock each other out (106
+ * bridge failures in one launch, 2026-11-18).
+ *
+ * So for each `-o ControlMaster=no` among the options (never in the remote command), with the
+ * `-t` right before it: when the words in front of it are repeated right after it they are the
+ * alias's copy and go too, otherwise only maiTerm's flags go. Repeated until none is left, which
+ * is also what shrinks the commands already saved that way. Only the exact `ControlMaster=no`
+ * maiTerm writes: a user's own setting is theirs, and so is a `-t` that isn't beside it.
+ */
+function withoutAliasedCopies(words: WordSpan[]): WordSpan[] {
+  for (;;) {
+    const values = words.map(w => w.value);
+    const end = remoteCommandIndex(values);
+    let at = -1;
+    for (let k = 1; k + 1 < end; k++) {
+      if (values[k] === '-o' && values[k + 1] === 'ControlMaster=no') {
+        at = k;
+        break;
+      }
+    }
+    if (at < 0) return words;
+    // Nothing in front (`lead` 0) is the same case with an alias that adds only `-t`: the
+    // caller's one `-t` went to the alias's, and this pair is maiTerm's.
+    const lead = values[at - 1] === '-t' ? at - 1 : at;
+    const aliased = values.slice(0, lead).every((v, k) => values[at + 2 + k] === v);
+    words = aliased ? words.slice(at + 2) : [...words.slice(0, lead), ...words.slice(at + 2)];
+  }
+}
+
+/** Kept words, in the spelling they had (the user's own quoting, `~` and all). */
+function rawOf(s: string, words: WordSpan[]): string {
+  return words.map(w => s.slice(w.start, w.end)).join(' ');
 }
 
 /**
@@ -56,16 +192,25 @@ function sshProgramOf(cmd: string): string | null {
  * everything that reads a host out of it or hands it to maiTerm's own `ssh` (the MCP bridge's
  * tunnel, remote files, a share file). A stored command keeps the user's ssh program in front
  * when it isn't plain `ssh` (`cleanSshCommand`); this drops it, and autossh's own options with
- * it — ssh reads `-M` as master mode, so `-M 0` would make `0` the host.
+ * it — ssh reads `-M` as master mode, so `-M 0` would make `0` the host. It drops the user's
+ * tty switches too (`withoutTty`): every caller is maiTerm's own, non-interactive ssh (the
+ * tunnel and its bridge env, the account token push, host parsing and reconnect keys, the
+ * editor's scp, a share file), never the line a human's session is typed from.
  */
 export function sshArgsOf(cmd: string): string {
   const program = cmd.match(SSH_PROGRAM)?.[0];
-  if (!program) return cmd.trim();
-  let rest = cmd.slice(program.length).trim();
-  if (/(?:^|\/)autossh$/.test(program)) {
-    rest = rest.replace(/(?:^|\s)-M\s*\S+/g, '').replace(/(?:^|\s)-f(?=\s|$)/g, '').trim();
+  if (!program) return withoutTty(cmd.trim());
+  const rest = cmd.slice(program.length).trim();
+  if (!/(?:^|\/)autossh$/.test(program)) return withoutTty(rest);
+  // By word, never by regex over the line: `-M` inside a quoted path is not autossh's.
+  const words = wordSpansOf(rest);
+  const kept: WordSpan[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const v = words[i].value;
+    if (v === '-M') i++;
+    else if (v !== '-f' && !v.startsWith('-M')) kept.push(words[i]);
   }
-  return rest;
+  return withoutTty(rawOf(rest, kept));
 }
 
 /** A stored (cleaned) ssh command as the human would type it: `ssh ews@nova`, or with the
@@ -77,8 +222,11 @@ export function sshCommandLine(cmd: string): string {
 /**
  * Strip previously-injected flags and remote commands from an SSH command
  * retrieved from the process tree, then normalize to just the user@host
- * portion (with any non-standard flags). Strips `ssh` prefix, `-t`,
- * `-o ControlMaster=...`, and `cd ... && exec $SHELL -l` suffixes.
+ * portion (with any non-standard flags). Strips the `ssh` prefix, the `-t` and
+ * `-o ControlMaster=...` buildSshCommand puts right after the program (or further in, behind
+ * a shell alias's own options: `withoutAliasedCopies`, which also shrinks a stored command
+ * with no program in front), and maiTerm's own remote command (`… && exec $SHELL -l`). Every
+ * other word the user typed is kept as typed.
  *
  * A program other than plain `ssh` (a full path, autossh) is KEPT in front — `/usr/bin/ssh
  * ews@nova`, `autossh -M 0 ews@nova` — so a clone or reconnect runs the user's program
@@ -90,11 +238,27 @@ export function sshCommandLine(cmd: string): string {
 export function cleanSshCommand(cmd: string): string {
   const program = sshProgramOf(cmd);
   if (program) {
-    const rest = cmd.slice(program.length).trim();
+    let rest = cmd.slice(program.length).trim();
+    // autossh's own options (`-M 0`, `-f`) can come before maiTerm's flags; they are kept, and
+    // the flags after them are cleaned in the place buildSshCommand would put them.
+    let own = '';
+    if (/(?:^|\/)autossh$/.test(program)) {
+      const lead = rest.match(/^(?:(?:-M\s*\S+|-f)(?:\s+|$))*/)![0];
+      own = lead.trim();
+      rest = rest.slice(lead.length);
+    }
     const cleaned = rest ? cleanSshCommand(`ssh ${rest}`) : '';
-    return cleaned ? `${program} ${cleaned}` : program;
+    return [program, own, cleaned].filter(Boolean).join(' ');
   }
-  if (!cmd.match(/^ssh\s/)) return cmd;
+  if (!cmd.match(/^ssh\s/)) {
+    // A STORED command (no program) that an earlier build let grow behind a shell alias: see
+    // `withoutAliasedCopies`. Nothing else without a program is touched.
+    if (cmd.startsWith('-') && / -o ControlMaster=no /.test(cmd)) {
+      const words = wordSpansOf(cmd);
+      return rawOf(cmd, withoutAliasedCopies(words));
+    }
+    return cmd;
+  }
   // Remove our injected remote command. The MAITERM_TAB_ID forms MUST be stripped first:
   // the plain patterns below would match from ` cd …` onwards and leave a dangling
   // `'export MAITERM_TAB_ID=…;` behind, which then accumulates on every clone/restore
@@ -125,25 +289,47 @@ export function cleanSshCommand(cmd: string): string {
   cleaned = cleaned.replace(/\s+(?:export\s+MAITERM_TAB_ID=|\[ -r ~\/\.maiterm\/).*exec\s+\$?SHELL\s+-l\s*$/, '');
   // Pre-export form (stored commands from earlier builds, and ps output for them).
   cleaned = cleaned.replace(/\s+cd\s+.*?&&\s+exec\s+\$?SHELL\s+-l\s*$/, '');
-  // Remove only flags that buildSshCommand re-injects
-  cleaned = cleaned.replace(/\s+-t(?=\s|$)/g, '');
-  cleaned = cleaned.replace(/\s+-o\s+ControlMaster=\S+/g, '');
-  // Remove any bare ControlMaster=... leftover (malformed from previous cycles)
-  cleaned = cleaned.replace(/\s+ControlMaster=\S+/g, '');
-  // Strip the `ssh` prefix — we store just user@host with any remaining flags
-  cleaned = cleaned.replace(/^ssh\s+/, '');
-  // Deduplicate single-letter flags (e.g. -x -C -x -C → -x -C)
-  const parts = cleaned.split(/\s+/);
-  const seen = new Set<string>();
-  const deduped: string[] = [];
-  for (const part of parts) {
-    if (/^-[a-zA-Z]$/.test(part)) {
-      if (seen.has(part)) continue;
-      seen.add(part);
-    }
-    deduped.push(part);
+  // The rest by WORD (shell words, as Rust reads it — `utils/shellWords`), never by regex over
+  // the line: `-i '/Users/me/My Keys/id'` is two words, and a `-t` inside a quoted path is not
+  // a flag. Kept words keep the spelling they came with.
+  const all = wordSpansOf(cleaned);
+  const injected = injectedFrom(all);
+  const words = all.slice(0, injected);
+  // buildSshCommand adds `-t` only with a remote command of its own, so a `-t` is maiTerm's only
+  // when that command was there (whether the regexes above or `injectedFrom` found it).
+  const hadRemote = cleaned !== cmd || injected < all.length;
+  // The `ssh` prefix — we store just user@host with any remaining flags. Then only what
+  // buildSshCommand itself put there, where it puts it: right after the program, `-t` (with a
+  // remote command) and `-o ControlMaster=no` — repeated, as earlier builds let them pile up,
+  // and with any bare `ControlMaster=…` those cycles left. Nothing else: the user's own `-t`,
+  // `-t -t` or `-tt` is theirs, and a `-t` in the remote command (`tmux attach -t main`) is
+  // part of it. Nor is any user switch folded (`-v -v` is more verbose, `-M -M` asks first).
+  let i = words[0]?.value === 'ssh' ? 1 : 0;
+  let ownT = hadRemote;
+  for (;;) {
+    const at = (k: number) => words[i + k]?.value;
+    if (ownT && at(0) === '-t') {
+      // One `-t`: builds before ControlMaster typed `ssh -t host '…'`.
+      ownT = false;
+      i += 1;
+    } else if (at(0) === '-o' && at(1)?.startsWith('ControlMaster=')) i += 2;
+    else if (at(0)?.startsWith('ControlMaster=')) i += 1;
+    else break;
   }
-  return deduped.join(' ');
+  const kept = withoutAliasedCopies(words.slice(i));
+  // Last resort: whatever spelling slipped past the above, a stored command never carries
+  // maiTerm's env — it is written to disk, retyped into clones and shown on fork cards, and
+  // MAITERM_AUTH is a credential. In the REMOTE COMMAND only, cut at the first word that names
+  // one, with an `export` before it. The user's own options are theirs, before the host or after
+  // it (`ews@nova -o SendEnv=MAITERM_*`), and cutting there would lose the host, an option's
+  // argument (a dangling `-o` swallows the next remote command) or a later `-p 2222`.
+  const remote = remoteCommandIndex(kept.map(w => w.value));
+  let cut = kept.findIndex((w, i) => i >= remote && w.value.includes('MAITERM_'));
+  if (cut >= 0) {
+    if (cut - 1 >= remote && /^'?export$/.test(kept[cut - 1].value)) cut--;
+    kept.length = cut;
+  }
+  return rawOf(cleaned, kept);
 }
 
 /**

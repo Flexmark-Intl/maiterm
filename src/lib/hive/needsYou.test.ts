@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentRequest, HivePromptRoute, Task, TaskBlocker } from '$lib/tauri/types';
 import type { PendingApproval } from '$lib/stores/followUps.svelte';
-import { cardTask, needsYouCount, needsYouQueue, type NeedsYouInput } from './needsYou';
+import { cardTask, needsYouCount, needsYouQueue, queenAsks, type NeedsYouInput } from './needsYou';
 
 const blocker = (asked_at: string, kind: TaskBlocker['kind'] = 'decision'): TaskBlocker => ({ kind, question: 'Which store?', options: [], asked_at, asked_by: 'agent' });
 const task = (id: string, tab: string | null, b: TaskBlocker | null = null): Task => ({
@@ -82,5 +82,19 @@ describe('Hive Needs you', () => {
     expect(cardTask([ownBlocked, sub], 't1', 'w1')).toBe(ownBlocked);
     expect(cardTask([own], 't1', 'w1')).toBe(own);
     expect(cardTask([own, sub], 't1', null)).toBe(own);
+  });
+
+  it("the queen's own decisions and approvals are hers; a worker's, a held one and an open prompt are not", () => {
+    const req = (id: string, tab_id: string) => ({ id, tab_id, status: 'pending', requested_at: 1 }) as AgentRequest;
+    const tasks = [task('mine', 'c', blocker('2026-10-26T09:00:00Z')), task('t1', 'w1', blocker('2026-10-26T08:00:00Z'))];
+    const q = needsYouQueue(input({
+      tasks,
+      requests: [req('land', 'c'), req('wland', 'w1')],
+      agent: (t) => (t === 'c' ? { state: 'permission' } : null),
+    }));
+    expect(queenAsks(q)).toEqual(['r:land', 'b:mine@2026-10-26T09:00:00Z']);
+    // The same task asked again is a new decision.
+    const again = needsYouQueue(input({ tasks: [task('mine', 'c', blocker('2026-10-26T11:00:00Z'))] }));
+    expect(queenAsks(again)).toEqual(['b:mine@2026-10-26T11:00:00Z']);
   });
 });

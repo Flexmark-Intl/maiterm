@@ -100,9 +100,10 @@ pub(crate) fn osc_is_local(host: Option<&str>, local_host: &str) -> bool {
 /// injects. That says how the session was started, not where it goes: kept, it made the
 /// place's host a spelling no stored command has (the frontend compares the cleaned one), and
 /// a second helper for the same host as a hand-typed `ssh ews@nova` tab.
-fn host_of_command(cmd: &str) -> Option<String> {
-    let rest = cmd.trim().split_once(char::is_whitespace).map(|(_, r)| r).unwrap_or("");
-    let h = crate::watch::connect_args(&crate::util::ssh_target::without_control_master(rest));
+pub(crate) fn host_of_command(cmd: &str) -> Option<String> {
+    // Shell words (`util::ssh_words`): a program path with a space in it is still one word.
+    let rest = crate::util::ssh_words::join(crate::util::ssh_words::split(cmd).iter().skip(1));
+    let h = crate::watch::connect_args(&crate::util::ssh_target::without_control_master(&rest));
     (!h.is_empty()).then_some(h)
 }
 

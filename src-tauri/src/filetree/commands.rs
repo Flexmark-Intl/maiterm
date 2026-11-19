@@ -248,7 +248,7 @@ fn remote_cwd_holders(state: &AppState, host: &str) -> Vec<(String, String, Stri
         .ssh_tunnels
         .read()
         .values()
-        .filter(|t| crate::watch::connect_args(&t.host_key) == host)
+        .filter(|t| crate::watch::same_host(&t.host_key, host))
         .flat_map(|t| t.tab_ids.iter().cloned())
         .collect();
     if tabs.is_empty() {

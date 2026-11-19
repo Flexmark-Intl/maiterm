@@ -1599,6 +1599,18 @@ pub(crate) fn prepare_in(data: &parking_lot::RwLock<AppData>, job: &Job, paths: 
             deny: deny.iter().map(|d| Ok(super::settings::DenyPath { path: named(&d.path)?, dir: d.dir })).collect::<Result<_, String>>()?,
             own_ports: ports.clone(),
             reach_ports: reach,
+            // A builder's job (its tests, its land check) reaches the local databases the human
+            // chose, as its shell does (§6.7); the profile takes their realpaths.
+            reach_sockets: if w.is_reviewer() {
+                Vec::new()
+            } else {
+                // One the profile can't name is dropped alone, never the whole job's profile.
+                super::change::launch_sockets(&hive)
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .filter(|p| std::fs::canonicalize(p).is_ok_and(|r| r == *p) && super::job_sandbox::sb_path(p).is_ok())
+                    .collect()
+            },
         })
     })()
     .map_err(release)?;

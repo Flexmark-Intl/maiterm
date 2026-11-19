@@ -52,13 +52,16 @@ const DROPPED_WITH_ARG: [&str; 4] = ["-L", "-R", "-D", "-W"];
 const DROPPED: [&str; 6] = ["-N", "-f", "-M", "-n", "-t", "-T"];
 
 /// The connect args a helper (or fallback shell) uses: the tab's own, without forwards or
-/// session flags.
+/// session flags. `ssh_args` is shell words (`util::ssh_words`): `-i '/Users/me/My Keys/id'`
+/// is two args, never four.
 pub fn clean_connect_args(ssh_args: &str) -> Vec<String> {
-    let words: Vec<&str> = ssh_args.split_whitespace().collect();
+    // Tty switches inside a cluster too (`-xtt` → `-x`): after mux_client_args' `-T`, a `-t`
+    // here would ask for a tty on the helper's binary stdin and stdout.
+    let words = crate::watch::without_tty(crate::util::ssh_words::split(ssh_args));
     let mut out = Vec::new();
     let mut i = 0;
     while i < words.len() {
-        let w = words[i];
+        let w = words[i].as_str();
         if DROPPED_WITH_ARG.contains(&w) {
             i += 2;
             continue;
@@ -67,7 +70,7 @@ pub fn clean_connect_args(ssh_args: &str) -> Vec<String> {
             i += 1;
             continue;
         }
-        out.push(w.to_string());
+        out.push(words[i].clone());
         i += 1;
     }
     out
@@ -408,15 +411,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = dir.join("config");
         std::fs::write(&cfg, "Host *\n  RemoteCommand tmux new -A -s main\n").unwrap();
-        // Connect args are whitespace-separated words everywhere (`Target::ssh_args`), so the
-        // config is named relative to the folder ssh runs in: the temp folder's path may hold a
-        // space (a worker sandbox's does), and no word list can carry one.
-        let connect = "-F config nohost.invalid";
+        // Shell words, as a stored command is: the temp dir can hold a space ("Application
+        // Support"), which split on whitespace sent ssh a config named after its first half.
+        let connect = crate::util::ssh_words::join([cfg.display().to_string().as_str(), "nohost.invalid"]);
+        let connect = format!("-F {connect}");
         let run = |args: Vec<String>| {
             let out = std::process::Command::new("ssh").args(args).current_dir(&dir).stdin(std::process::Stdio::null()).output().unwrap();
             String::from_utf8_lossy(&out.stderr).to_lowercase()
         };
-        let ours = run(ssh_args("nohost.invalid", connect, "true"));
+        let ours = run(ssh_args("nohost.invalid", &connect, "true"));
         // Without the override this OpenSSH (7.6 or later) says exactly that and exits 255.
         let plain = run(["-F", "config", "-o", "BatchMode=yes", "nohost.invalid", "true"].map(String::from).to_vec());
         let _ = std::fs::remove_dir_all(&dir);

@@ -40,8 +40,7 @@ pub fn for_prompt_kind(kind: &str) -> Option<&'static str> {
     }
 }
 
-/// The checkpoints as the human sets them: the seven keys, each `coordinator` or `ask`; Landing
-/// stays Ask me in the integration mode. A key left out keeps its setting, and keys a later build
+/// The checkpoints as the human sets them: the seven keys, each `coordinator` or `ask`. A key left out keeps its setting, and keys a later build
 /// added are kept as they were.
 pub fn validate(hive: &Hive, next: &BTreeMap<String, String>) -> Result<BTreeMap<String, String>, String> {
     let mut out = super::create::default_checkpoints(&hive.landing_mode);
@@ -52,9 +51,6 @@ pub fn validate(hive: &Hive, next: &BTreeMap<String, String>) -> Result<BTreeMap
         }
         if v != COORDINATOR && v != ASK {
             return Err(format!("{} is set to \"coordinator\" or \"ask\", not \"{v}\".", label(k)));
-        }
-        if k == "landing" && v == COORDINATOR && hive.is_integration() {
-            return Err("In the integration mode you approve each land: Landing stays Ask me.".to_string());
         }
         out.insert(k.clone(), v.clone());
     }
@@ -162,7 +158,7 @@ mod tests {
         h.checkpoints.clear();
         assert!(!asks(&h, "permissions") && !asks(&h, "landing"));
         h.landing_mode = LANDING_INTEGRATION.into();
-        assert!(asks(&h, "landing"), "integration lands are always asked");
+        assert!(!asks(&h, "landing"), "the queen lands into the Hive's branch by default");
         h.checkpoints.insert("questions".into(), ASK.into());
         assert!(asks(&h, "questions"));
         assert!(!asks(&h, "unknown"));
@@ -194,8 +190,7 @@ mod tests {
         assert!(validate(&h, &[("landing".to_string(), ASK.to_string())].into()).is_ok());
 
         let integ = hive(LANDING_INTEGRATION);
-        let e = validate(&integ, &[("landing".to_string(), COORDINATOR.to_string())].into()).unwrap_err();
-        assert!(e.contains("Landing stays Ask me"), "{e}");
+        assert!(validate(&integ, &[("landing".to_string(), ASK.to_string())].into()).is_ok(), "a Hive may still ask for each land into its branch");
         assert_eq!(describe_changes(&validate(&h, &BTreeMap::new()).unwrap(), &out), vec!["workers\u{2019} permission prompts: Ask me"]);
         assert_eq!((clamp_timeout(5), clamp_timeout(300), clamp_timeout(99_999)), (60, 300, 3600));
     }
@@ -211,7 +206,7 @@ mod tests {
         let h = apply(&mut data, "main", &id, "questions", ASK).unwrap().unwrap();
         assert!(asks(&h, "questions") && asks(data.windows[0].workspaces[0].hive.as_ref().unwrap(), "questions"));
         assert!(apply(&mut data, "main", &id, "questions", ASK).unwrap().is_none(), "already so");
-        assert!(apply(&mut data, "main", &id, "landing", COORDINATOR).unwrap_err().contains("Landing stays Ask me"));
+        assert!(asks(&apply(&mut data, "main", &id, "landing", ASK).unwrap().unwrap(), "landing"), "set either way in the integration mode");
         assert!(apply(&mut data, "other", &id, "plan", ASK).is_err());
     }
 }

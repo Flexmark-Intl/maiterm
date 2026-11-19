@@ -10,6 +10,8 @@ export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 /** `change::MAX_CAP` and `MAX_WORKER_HOSTS`. */
 export const MAX_CAP = 64;
 export const MAX_WORKER_HOSTS = 50;
+/** `change::MAX_WORKER_SOCKETS`. */
+export const MAX_WORKER_SOCKETS = 10;
 
 /** Who is a chat on the phone: `keep_off_phone` and `workers_on_phone`, as one choice. The
  *  "nobody" choice is fixed at Create (its coordinator was made off the phone). */
@@ -22,6 +24,7 @@ export interface ChangeForm {
   workerModel: string;
   workerEffort: string;
   hosts: string[];
+  sockets: string[];
   pushAfterLand: boolean;
   phone: PhoneChoice;
 }
@@ -36,6 +39,7 @@ export function formFor(hive: Fields): ChangeForm {
     workerModel: hive.models.worker.model,
     workerEffort: hive.models.worker.effort,
     hosts: [...(hive.settings?.worker_hosts ?? [])],
+    sockets: [...(hive.settings?.worker_sockets ?? [])],
     pushAfterLand: hive.push_after_land,
     phone: hive.settings?.workers_on_phone ? 'all' : 'coordinator',
   };
@@ -48,6 +52,26 @@ export function addHost(hosts: string[], raw: string): { hosts: string[] } | { e
   if (hosts.includes(n.host)) return { error: `${n.host} is already on the list.` };
   if (hosts.length >= MAX_WORKER_HOSTS) return { error: `Workers may reach at most ${MAX_WORKER_HOSTS} hosts beyond the package registries.` };
   return { hosts: [...hosts, n.host] };
+}
+
+/** `change::is_database_socket_name`: a Postgres, MySQL or Redis socket's name, and only that. */
+export function isDatabaseSocketName(name: string): boolean {
+  const pg = /^\.s\.PGSQL\.(\d{1,5})$/.exec(name);
+  if (pg) return true;
+  return /^(mysqld|mysql|redis)[A-Za-z0-9_-]*\.sock$/i.test(name);
+}
+
+/** A socket path typed into the list, as it would be kept, or why not (`change::check_socket`). */
+export function addSocket(sockets: string[], raw: string): { sockets: string[] } | { error: string } {
+  const s = raw.trim();
+  const parts = s.split('/');
+  if (!s.startsWith('/') || /["\\\u0000-\u001f\u007f-\u009f]/.test(s) || parts.some((p) => p === '..' || p === '.')) return { error: `"${s}" isn't a full path to a socket, such as /tmp/.s.PGSQL.5432.` };
+  if (!isDatabaseSocketName(parts[parts.length - 1] ?? '')) {
+    return { error: `${s} isn't named like a database's socket (.s.PGSQL.<port>, mysql.sock, redis.sock), so workers can't be given it: other local sockets reach far more than a database.` };
+  }
+  if (sockets.includes(s)) return { error: `${s} is already on the list.` };
+  if (sockets.length >= MAX_WORKER_SOCKETS) return { error: `Workers may reach at most ${MAX_WORKER_SOCKETS} local database sockets.` };
+  return { sockets: [...sockets, s] };
 }
 
 export function validateForm(f: ChangeForm): string | null {
@@ -68,6 +92,10 @@ export function toChange(hive: Fields, f: ChangeForm): HiveSettingsChange | null
   const removed = was.hosts.filter((h) => !f.hosts.includes(h));
   if (added.length) c.add_hosts = added;
   if (removed.length) c.remove_hosts = removed;
+  const addedSockets = f.sockets.filter((s) => !was.sockets.includes(s));
+  const removedSockets = was.sockets.filter((s) => !f.sockets.includes(s));
+  if (addedSockets.length) c.add_sockets = addedSockets;
+  if (removedSockets.length) c.remove_sockets = removedSockets;
   if (f.pushAfterLand !== was.pushAfterLand) c.push_after_land = f.pushAfterLand;
   if (f.phone !== was.phone) c.workers_on_phone = f.phone === 'all';
   return Object.keys(c).length ? c : null;

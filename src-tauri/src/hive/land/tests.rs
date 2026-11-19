@@ -1436,7 +1436,10 @@ async fn landing_ask_files_the_card_before_step_1() {
 
 #[tokio::test]
 async fn integration_mode_merges_exactly_the_approved_sha_no_ff_though_the_branch_moved_on() {
-    let rig = Rig::with("integration", &["web"], |h| h.landing_mode = LANDING_INTEGRATION.into());
+    let rig = Rig::with("integration", &["web"], |h| {
+        h.landing_mode = LANDING_INTEGRATION.into();
+        h.checkpoints.insert("landing".into(), "ask".into());
+    });
     let repo = rig.repo("web").to_path_buf();
     // The coordinator's read copy holds hive/ship, as the Hive's layout makes it.
     let rc = rig.caller.paths.coordinator_worktree("web");
@@ -1573,6 +1576,7 @@ async fn a_partly_landed_land_whose_card_goes_with_a_new_report_keeps_what_lande
 async fn integration_mode_logs_no_merge_commit_for_a_pin_the_branch_already_has_and_says_which_repos_go_unchecked() {
     let rig = Rig::with("integration-noop", &["web", "api"], |h| {
         h.landing_mode = LANDING_INTEGRATION.into();
+        h.checkpoints.insert("landing".into(), "ask".into());
         h.folders[0].land_check = Some("true".into());
     });
     for name in ["web", "api"] {
@@ -1798,9 +1802,37 @@ async fn the_coordinators_undo_of_config_files_a_card_and_the_humans_own_undo_go
     rig.assert_no_leftovers();
 }
 
+/// Darryl, 2026-11-18: in the integration mode the queen lands into the Hive's branch on her own
+/// (Landing = Coordinator, the default); Base is untouched, and an undo of her land is hers too.
+#[tokio::test]
+async fn integration_mode_lands_into_the_hives_branch_without_a_card_by_default() {
+    let rig = Rig::with("integration-queen", &["web"], |h| h.landing_mode = LANDING_INTEGRATION.into());
+    let repo = rig.repo("web").to_path_buf();
+    let rc = rig.caller.paths.coordinator_worktree("web");
+    fs::create_dir_all(rc.parent().unwrap()).unwrap();
+    git(&repo, &["worktree", "add", "-q", "-b", "hive/ship", rc.to_str().unwrap(), "main"]);
+    let main0 = rig.main_tip("web");
+    let w = rig.reported("feat", &["web"], "feat.rs", "f\n");
+    let out = rig.land(&w).await.unwrap();
+    assert_ne!(out["state"], STATE_AWAITING_HUMAN, "no card: {out}");
+    assert!(rig.seen.lock().unwrap().filed.is_empty(), "nothing filed for the human");
+    let tip = git(&repo, &["rev-parse", "refs/heads/hive/ship"]);
+    assert_ne!(tip, main0, "hive/ship moved");
+    assert_eq!(rig.main_tip("web"), main0, "Base untouched");
+    let line = rig.log()[0].clone();
+    assert_eq!((line.target.as_str(), line.by.as_str()), ("hive/ship", "coordinator"));
+    rig.undo(&line.id).await.expect("her own land is hers to undo");
+    assert!(git(&repo, &["ls-tree", "--name-only", "refs/heads/hive/ship", "feat.rs"]).is_empty(), "reverted on hive/ship");
+    assert_eq!(rig.main_tip("web"), main0, "Base still untouched");
+    rig.assert_no_leftovers();
+}
+
 #[tokio::test]
 async fn an_integration_land_is_undone_by_the_human_with_revert_m1_and_never_by_the_coordinator() {
-    let rig = Rig::with("undo-integration", &["web"], |h| h.landing_mode = LANDING_INTEGRATION.into());
+    let rig = Rig::with("undo-integration", &["web"], |h| {
+        h.landing_mode = LANDING_INTEGRATION.into();
+        h.checkpoints.insert("landing".into(), "ask".into());
+    });
     let repo = rig.repo("web").to_path_buf();
     let rc = rig.caller.paths.coordinator_worktree("web");
     fs::create_dir_all(rc.parent().unwrap()).unwrap();
@@ -2547,14 +2579,17 @@ async fn land_cards_are_decisions_categorized_by_why_and_a_lapse_isnt_a_denial()
     let card = decisions_of(&rig).into_iter().find(|x| x.id == card_id).unwrap();
     assert!(card.answered.is_none() && card.lapsed.as_ref().is_some_and(|l| l.by == "maiterm"), "{card:?}");
 
-    // The integration mode's cards are `integration`, never earned.
-    let rig = Rig::with("card-integration", &["web"], |h| h.landing_mode = LANDING_INTEGRATION.into());
+    // The integration mode's cards (Landing = Ask me) are `landing`: they count toward earning it.
+    let rig = Rig::with("card-integration", &["web"], |h| {
+        h.landing_mode = LANDING_INTEGRATION.into();
+        h.checkpoints.insert("landing".into(), "ask".into());
+    });
     let rc = rig.caller.paths.coordinator_worktree("web");
     fs::create_dir_all(rc.parent().unwrap()).unwrap();
     git(rig.repo("web"), &["worktree", "add", "-q", "-b", "hive/ship", rc.to_str().unwrap(), "main"]);
     let w = rig.reported("feat", &["web"], "feat.rs", "f\n");
     rig.land(&w).await.unwrap();
-    assert_eq!(decisions_of(&rig)[0].category(), "integration");
+    assert_eq!(decisions_of(&rig)[0].category(), "landing", "it counts toward earning Landing");
 }
 
 #[tokio::test]
@@ -2661,4 +2696,76 @@ async fn a_denied_card_replaced_when_its_held_land_resumes_isnt_said_to_have_bee
     let denied = decisions_of(&rig).into_iter().find(|x| x.id == c2).unwrap();
     assert_eq!(denied.answered.as_ref().and_then(|l| l.answer.as_deref()), Some("Don\u{2019}t land"));
     assert_eq!(denied.outcome.as_deref(), Some("superseded by a new card when the land resumed"));
+}
+
+/// Darryl, 2026-11-18: in the integration mode the land into Base is the human's card. Approved,
+/// Base gets one --no-ff merge commit whose files are exactly the branch tip's; refused while Base
+/// moved since the branch took it in; denied, nothing moves.
+#[tokio::test]
+async fn the_hives_branch_lands_into_base_on_the_humans_card() {
+    let rig = Rig::with("branch-land", &["web"], |h| h.landing_mode = LANDING_INTEGRATION.into());
+    let repo = rig.repo("web").to_path_buf();
+    let rc = rig.caller.paths.coordinator_worktree("web");
+    fs::create_dir_all(rc.parent().unwrap()).unwrap();
+    git(&repo, &["worktree", "add", "-q", "-b", "hive/ship", rc.to_str().unwrap(), "main"]);
+    let main0 = rig.main_tip("web");
+
+    let nothing = branch::tool(&rig.ctx(), &rig.caller, &json!({ "summary": "all done" })).await.unwrap_err();
+    assert!(nothing.contains("nothing Base doesn't already have"), "{nothing}");
+
+    let w = rig.reported("feat", &["web"], "feat.rs", "f\n");
+    rig.land(&w).await.unwrap();
+    let tip = git(&repo, &["rev-parse", "refs/heads/hive/ship"]);
+    assert_eq!(rig.main_tip("web"), main0, "the queen's land leaves Base alone");
+
+    assert!(branch::tool(&rig.ctx(), &rig.caller, &json!({})).await.unwrap_err().contains("summary is required"));
+    let out = branch::tool(&rig.ctx(), &rig.caller, &json!({ "summary": "Feature done and reviewed." })).await.unwrap();
+    assert_eq!(out["state"], "awaiting_human", "{out}");
+    let (req, d) = rig.last_card();
+    assert_eq!(req.args["branch"], true);
+    assert_eq!(req.summary, "Land hive/ship into main in web");
+    assert!(req.effects.iter().any(|e| e.contains("web has no land check")), "never a check it doesn't have: {:?}", req.effects);
+    assert!(rig.caller.paths.root.join("branch-land.json").is_file(), "kept for a restart");
+
+    approval::approved(&rig.ctx(), &rig.caller, &d, &opts()).await;
+    let head = rig.main_tip("web");
+    let parents: Vec<String> = git(&repo, &["rev-list", "--parents", "-n1", &head]).split_whitespace().map(str::to_string).collect();
+    assert_eq!(parents, vec![head.clone(), main0.clone(), tip.clone()], "one --no-ff merge of exactly the tip the card named");
+    assert_eq!(git(&repo, &["rev-parse", &format!("{head}^{{tree}}")]), git(&repo, &["rev-parse", &format!("{tip}^{{tree}}")]), "the tip's own files");
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), head, "Base's checkout moved with it");
+    let e = rig.log().into_iter().find(|e| e.kind == branch::KIND_BRANCH).expect("logged");
+    assert_eq!((e.target.as_str(), e.by.as_str(), e.merge_commit.as_deref()), ("main", "human", Some(head.as_str())));
+    assert!(undo::resolve(&log::folded(&rig.caller.paths), &e.id).is_err(), "not the Hive's to undo");
+    let settled = rig.seen.lock().unwrap().settled.clone();
+    assert!(settled.last().is_some_and(|s| s.1), "{settled:?}");
+    assert!(rig.told().last().is_some_and(|t| t.contains("approved landing hive/ship into Base")), "{:?}", rig.told());
+    assert!(!rig.caller.paths.root.join("branch-land.json").exists(), "settled, not kept");
+
+    // A second land into Base, with nothing but maiTerm's own merge on Base since: allowed.
+    let w2 = rig.reported("more", &["web"], "more.rs", "m\n");
+    rig.land(&w2).await.unwrap();
+    let tip2 = git(&repo, &["rev-parse", "refs/heads/hive/ship"]);
+    branch::tool(&rig.ctx(), &rig.caller, &json!({ "summary": "second" })).await.expect("Base holds only the branch's own land");
+    let (_, d2) = rig.last_card();
+    approval::approved(&rig.ctx(), &rig.caller, &d2, &opts()).await;
+    let head2 = rig.main_tip("web");
+    assert_eq!(git(&repo, &["rev-parse", &format!("{head2}^2")]), tip2, "the second land merges the newer tip");
+    assert_eq!(git(&repo, &["rev-parse", &format!("{head2}^{{tree}}")]), git(&repo, &["rev-parse", &format!("{tip2}^{{tree}}")]));
+
+    // Base moves on its own: the branch must take it in through a land first.
+    let w3 = rig.reported("third", &["web"], "third.rs", "t\n");
+    rig.land(&w3).await.unwrap();
+    commit(&repo, "hotfix.rs", "h\n");
+    let moved = branch::tool(&rig.ctx(), &rig.caller, &json!({ "summary": "more" })).await.unwrap_err();
+    assert!(moved.contains("moved since hive/ship last took it in"), "{moved}");
+
+    // A card denied moves nothing.
+    git(&rc, &["merge", "-q", "--no-edit", "main"]);
+    branch::tool(&rig.ctx(), &rig.caller, &json!({ "summary": "more" })).await.unwrap();
+    let before = rig.main_tip("web");
+    let (_, d) = rig.last_card();
+    approval::closed(&rig.ctx(), &rig.caller, &d, "denied").await;
+    assert_eq!(rig.main_tip("web"), before);
+    assert!(rig.told().last().is_some_and(|t| t.contains("denied")), "{:?}", rig.told());
+    rig.assert_no_leftovers();
 }

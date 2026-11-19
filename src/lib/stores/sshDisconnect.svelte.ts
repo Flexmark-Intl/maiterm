@@ -17,6 +17,7 @@
 import { listen } from '@tauri-apps/api/event';
 import { info as logInfo } from '@tauri-apps/plugin-log';
 import * as commands from '$lib/tauri/commands';
+import { splitWords } from '$lib/utils/shellWords';
 import type { Tab } from '$lib/tauri/types';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
@@ -74,7 +75,7 @@ const ANNOUNCE_WINDOW_MS = 3_000;
 
 /** Best-effort hostname from an ssh command, for display and for comparing two commands. */
 export function parseSshHost(sshCmd: string): string | null {
-  const tokens = commands.sshArgsOf(sshCmd).split(/\s+/).filter(Boolean);
+  const tokens = splitWords(commands.sshArgsOf(sshCmd));
   const withUser = tokens.find(t => t.includes('@'));
   if (withUser) return withUser.split('@')[1] || null;
   const host = tokens.find(t => !t.startsWith('-'));

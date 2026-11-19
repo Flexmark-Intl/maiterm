@@ -304,13 +304,15 @@ fn answers_given_while_an_offer_stood_count_for_nothing_after_it_is_answered() {
 }
 
 #[test]
-fn interfaces_and_integration_landing_are_never_offered() {
+fn interfaces_are_never_offered_and_landing_is_in_either_mode() {
+    // Landing into the Hive's branch is the queen's to earn too (Darryl, 2026-11-18): the land into
+    // Base stays the human's.
     let lines: Vec<DecisionLine> = ["interfaces", "landing"].iter().flat_map(|c| (0..6).map(|_| taken(c))).collect();
     let integ = asks_all(LANDING_INTEGRATION_MODE);
-    assert!(evaluate(&lines, &integ, &[], now(), |_| None).is_empty());
+    assert_eq!(evaluate(&lines, &integ, &[], now(), |_| None).iter().map(|o| o.checkpoint.as_str()).collect::<Vec<_>>(), vec!["landing"]);
     let base = asks_all("base");
     assert_eq!(evaluate(&lines, &base, &[], now(), |_| None).iter().map(|o| o.checkpoint.as_str()).collect::<Vec<_>>(), vec!["landing"]);
-    assert!(!earnable(&integ, "landing") && earnable(&base, "landing"));
+    assert!(earnable(&integ, "landing") && earnable(&base, "landing"));
     assert!(!earnable(&base, "interfaces"));
 }
 

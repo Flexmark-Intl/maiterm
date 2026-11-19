@@ -39,14 +39,13 @@ pub const DEFAULT_BUDGET_CENTS: u64 = 1000;
 pub const COORDINATOR_TAB_NAME: &str = "Queen";
 
 /// The §7.4 checkpoints, Coordinator by default but Settings (§3.4), whose changes the human
-/// approves until they hand them over. In integration mode a land is always the human's (§8.3).
-pub fn default_checkpoints(landing_mode: &str) -> BTreeMap<String, String> {
+/// approves until they hand them over. Landing is the queen's in either mode (Darryl, 2026-11-18):
+/// in the integration mode she lands into the Hive's branch, and the land into Base is the human's
+/// card (§8.3).
+pub fn default_checkpoints(_landing_mode: &str) -> BTreeMap<String, String> {
     let mut out: BTreeMap<String, String> =
         ["plan", "questions", "permissions", "landing", "finals", "interfaces"].iter().map(|k| (k.to_string(), "coordinator".to_string())).collect();
     out.insert("settings".to_string(), "ask".to_string());
-    if landing_mode == LANDING_INTEGRATION {
-        out.insert("landing".to_string(), "ask".to_string());
-    }
     out
 }
 
@@ -1176,7 +1175,7 @@ pub fn build_hive(spec: &HiveSpec, id: String, folders: Vec<HiveFolder>) -> Hive
         done_at: None,
         slug: slugify(&spec.name),
         created_at: crate::commands::workspace::iso_now(),
-        settings: HiveSettings { keep_off_phone: spec.keep_off_phone, workers_on_phone: spec.workers_on_phone, ..HiveSettings::default() },
+        settings: HiveSettings { keep_off_phone: spec.keep_off_phone, workers_on_phone: spec.workers_on_phone, landing_open: true, ..HiveSettings::default() },
         ..Hive::default()
     }
 }
@@ -1850,7 +1849,7 @@ mod tests {
         assert_eq!((h.cap, h.budget_cents, h.status.as_str()), (DEFAULT_CAP, 1000, STATUS_ACTIVE));
         assert_eq!(h.checkpoints.len(), 7);
         assert!(h.checkpoints.iter().all(|(k, v)| v == if k == "settings" { "ask" } else { "coordinator" }), "the human approves settings changes");
-        assert_eq!(default_checkpoints(LANDING_INTEGRATION).get("landing").map(String::as_str), Some("ask"), "integration mode always asks");
+        assert_eq!(default_checkpoints(LANDING_INTEGRATION).get("landing").map(String::as_str), Some("coordinator"), "the queen lands into the Hive's branch");
     }
 
     #[test]

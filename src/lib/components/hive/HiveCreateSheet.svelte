@@ -998,7 +998,7 @@
           <fieldset class="field">
             <legend class="label">How work lands <span class="opt">can't be changed later</span></legend>
             <label class="choice"><input type="radio" name="hive-landing" value="base" bind:group={landing} /><span><b>Straight into Base</b><span class="hint">The queen merges each finished worker into its repo's Base branch.</span></span></label>
-            <label class="choice"><input type="radio" name="hive-landing" value="integration" bind:group={landing} /><span><b>Into an integration branch, each land approved by you</b><span class="hint">Base stays untouched until you merge the branch yourself.</span></span></label>
+            <label class="choice"><input type="radio" name="hive-landing" value="integration" bind:group={landing} /><span><b>Into a branch of its own</b><span class="hint">The queen lands each finished worker into the Hive's branch. Base stays untouched until you approve landing that branch into it, on a card.</span></span></label>
           </fieldset>
           {#if landing === 'base'}
             <label class="choice">
@@ -1130,7 +1130,7 @@
               A queen on <b>Claude {coordModel}</b> ({coordEffort} effort) works toward
               “{goal.trim()}”. It starts up to <b>{cap}</b> workers on <b>Claude {workerModel}</b> ({workerEffort} effort)
               in <b>{folderList.join(', ')}</b>, and lands each finished worker
-              {landing === 'base' ? "straight into its repo's Base" : `into hive/${slug}, each land approved by you`}{pushes ? ', then pushes it' : ''}.
+              {landing === 'base' ? "straight into its repo's Base" : `into the Hive's branch hive/${slug}`}{pushes ? ', then pushes it' : ''}.
             </p>
             <p>
               {pickedWords.length ? `It can make things with ${pickedWords.join(', ')}` : 'No extra tools'}, with

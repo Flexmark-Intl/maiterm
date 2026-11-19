@@ -754,6 +754,7 @@ fn job_sandbox_probe() {
         deny: lists.deny.iter().map(|d| DenyPath { path: profile_path(&d.path, &writable).unwrap(), dir: d.dir }).collect(),
         own_ports: vec![],
         reach_ports: vec![leased_port],
+        reach_sockets: vec![],
     };
     let profile_file = run_dir.join(PROFILE_FILE);
     std::fs::write(&profile_file, profile(&spec).unwrap()).unwrap();
@@ -946,6 +947,7 @@ fn an_install_job_writes_node_modules_config_and_reaches_only_the_registry_proxy
         deny: lists.deny.iter().map(|d| DenyPath { path: profile_path(&d.path, &writable).unwrap(), dir: d.dir }).collect(),
         own_ports: vec![],
         reach_ports: vec![proxy_port],
+        reach_sockets: vec![],
     };
     let profile_file = paths.run(&job).join(PROFILE_FILE);
     std::fs::create_dir_all(profile_file.parent().unwrap()).unwrap();
@@ -998,7 +1000,7 @@ fn real_pnpm_install_probe() {
     let job = format!("j-probe-{}", uuid::Uuid::new_v4().simple());
     let (proxy_port, url) = crate::hive::registry_proxy::open(&job, vec!["registry.npmjs.org".into()]).unwrap();
     // HOME isn't writable: pnpm must keep everything in the worker's cache, as `deps::cache_env` says.
-    let spec = ProfileSpec { allow: vec![wt.clone(), cache.clone()], deny: vec![], own_ports: vec![], reach_ports: vec![proxy_port] };
+    let spec = ProfileSpec { allow: vec![wt.clone(), cache.clone()], deny: vec![], own_ports: vec![], reach_ports: vec![proxy_port], reach_sockets: vec![] };
     let profile_file = base.join("profile.sb");
     std::fs::write(&profile_file, profile(&spec).unwrap()).unwrap();
     let mut cmd = Command::new("/usr/bin/sandbox-exec");

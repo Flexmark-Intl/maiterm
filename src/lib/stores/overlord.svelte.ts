@@ -1224,8 +1224,6 @@ function createOverlordStore() {
   /** Why Run could not type a command into the agent's tab, in the human's words. */
   function runRefusalText(reason: string): string {
     switch (reason) {
-      case 'busy':
-        return 'The agent is in the middle of a turn. Run it once the turn ends.';
       case 'draft':
         return "There's a draft in the agent's input box. Send or clear it, then Run.";
       case 'typing':

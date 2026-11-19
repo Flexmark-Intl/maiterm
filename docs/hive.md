@@ -78,7 +78,8 @@ each was made, in the spirit of Higgsfield's library.
    branch (main), with no card (§8). maiTerm carries out the merge, never the agent's own git,
    so it can refuse a merge that would touch anyone's uncommitted work. A land that changes
    agent or execution config always goes to the human (§8.1). Choosing, when the Hive is
-   created, an integration branch instead makes the human approve each land (§8.3).
+   created, a branch of its own instead lands each worker into `hive/<slug>`, the queen's too
+   unless Landing is Ask me, and Base is the human's (§8.3).
 7. **Code lands in git; everything else lands in the gallery.** A file a person would look at
    is an asset, kept immutable, with who made it, for which task, and how. Rust owns the gallery
    store; agents add to it through a tool, never by writing into it (§10).
@@ -156,7 +157,7 @@ The fields:
 | Project brief | Optional, up to 32,000 characters, plus up to 10 attached files (5 MB each). **The coordinator's alone** (§3.5): the plan, background, constraints, or where to get them ("Bridge to the API tab for the specs") |
 | Rules for every agent | Optional, up to 16,000 characters (Projects' instructions limit), folded away by default. Every worker gets them too, so only rules for all work: tools, style, places not to touch. Stored as `Hive.instructions` |
 | Workers at once | **Hard cap**, enforced in Rust (default 24, at most 64; §6.8). A ceiling, not a target: the coordinator starts what the plan needs. What it counts is §3.1 |
-| Landing | **Land to Base** (default: the coordinator merges each finished worker into its repos' Base) or **Integration branch, I approve each land** (§8). **Fixed at creation.** It's a branch topology, not a checkpoint: the Landing checkpoint (§7.4) only decides who calls `hiveLand` *within* the mode, and integration mode is always Ask me. Switching later would fast-forward integration commits into Base, so a different mode means a new Hive |
+| Landing | **Land to Base** (default: the coordinator merges each finished worker into its repos' Base) or **A branch of its own** (§8.3: the queen lands each worker into `hive/<slug>`; Base is the human's). **Fixed at creation.** It's a branch topology, not a checkpoint: the Landing checkpoint (§7.4) only decides who calls `hiveLand` *within* the mode, the queen by default in either (2026-11-18). Switching later would fast-forward integration commits into Base, so a different mode means a new Hive |
 | Stack | The services this Hive's work needs, proposed from the repos' own stacks and the human's other workspaces (§6.8). See step 3 below |
 | Land check | Optional command per repo that must pass before a land (e.g. `npm run check`), run on the reviewed commit merged with Base in a temporary worktree (§8.1) |
 | Setup command | Per repo, run in every new worktree before its agent starts (e.g. `npm ci`) |
@@ -617,7 +618,8 @@ anything.
 | 1 | Needs you | orange; red for an `action` | Permission or question on screen, a task blocker, a watch script waiting. The human or the coordinator may be the one answering (§4.7) |
 | 2 | Blocked | amber | The worker called `hiveReport {status: "blocked"}`: it's waiting on the coordinator, not the human |
 | 3 | Working | green moving | Agent busy (hook state) |
-| 4 | Starting | grey pulse | Worktrees, setup or agent launch in progress. Sub-label **waits on …** while unmet `depends_on` holds it (§3.1), or **blocked: <dep> failed / undone** |
+| 4 | Starting | grey pulse | Worktrees, setup or agent launch in progress |
+| 4 | Queued | grey, still | Unmet `depends_on` holds it (§3.1): nothing of it exists yet. Sub-label **waits on …**, or **blocked: <dep> failed / undone**. Was Starting · waits on … until 2026-11-18, which read as a launch under way for workers that waited hours |
 | 5 | Idle | hollow | Turn ended without a report. Worth a look, never an alarm |
 | 6 | Reported | blue check | The worker called `hiveReport` with `done` |
 | 7 | Landing | blue pulse | Merging, held (§8.1), or waiting for the human in the approval mode |
@@ -787,6 +789,16 @@ Open coordinator) beside it. What the coordinator holds (§7.4, not timed out, n
 listed below the rest under "With the coordinator", reads "With coordinator" with Take over, and
 is **not counted**. The header shows **Needs you · N** while N > 0, and the view tab carries the
 count, so the human sees from any view that something waits.
+
+**The queen's decisions are answered here, not in her chat** (Darryl, 2026-11-18): in her
+column's dock a long decision covered the messages that led to it, and the chat couldn't be
+scrolled back while answering. Her dock shows a line that opens Needs you instead
+(`ChatColumn`'s `decisionElsewhere`); her permission dialogs and questions stay in the dock. A
+**new** decision or approval from her (`needsYou::queenAsks`, one key per asking) switches the
+view to Needs you beside her chat, unless the human is typing in something that view would hide
+(a worker's column, Memory); what was already waiting when the Hive was opened moves nothing. A
+notification's click on one of hers (`waitingStore.openOnTab`), or opening her while she waits on
+one, focuses her column and shows Needs you.
 
 **Sub-tasks are the worker's** (`worker::worker_for_row`). Workers split their work into rows on
 their own tab and block those. Before 2026-10-26 only the task a worker was given was routed
@@ -1028,10 +1040,33 @@ the main checkout's entry into the one root the agents launch under (`trust::tru
 Claude's own dialog would, recorded nowhere, so deleting the Hive never takes it back. A worker's
 launch checks that same root alone (third live test fixes, §16).
 
-**maiTerm writes trust only for Hive folders that aren't worktrees**: the coordinator's `home/`
-and a scratch-only worker's `scratch/`, which it creates itself. The human chose the Hive by
-creating it, so **maiTerm itself** (not an agent, which the permission classifier rightly refuses
-as "Security Weaken") writes `projects["<realpath>"].hasTrustDialogAccepted = true` for them.
+**maiTerm writes trust only for Hive folders that aren't worktrees**: the coordinator's `home/`,
+every worker's `scratch/` (a reviewer's builder's too) and the gallery, which it creates itself.
+The human chose the Hive by creating it, so **maiTerm itself** (not an agent, which the permission
+classifier rightly refuses as "Security Weaken") writes `projects["<realpath>"].hasTrustDialogAccepted = true`
+for them, before every launch.
+
+**Every `--add-dir` needs trust too (measured on 2.1.327, 2026-11-18).** Claude now asks "Adding a
+new directory: … Is this a directory you created or one you trust?" for each added folder it has
+no trust for, before the session starts; the answer holds for that session only. A worktree of a
+trusted repo still inherits its trust, as a cwd or an added folder, but a builder's `scratch/` and
+the gallery didn't, so every builder in a git folder stopped at that dialog on a hidden tab (the
+maiShop Hive, eight workers). A trust entry on the added folder clears it. So the launch trusts
+every folder maiTerm made that it adds (`owned_add_dirs`, `check_worker_trust`; the coordinator's
+gallery in `prepare_coordinator`). A plain folder of the human's that isn't trusted would still
+raise it: the human's to trust, as a repo is. A worker can write its `scratch/`, so it could swap
+it for a link to a repo its human never trusted: `write_trust` never follows a link at the last
+step (only the parent, which no worker writes, is resolved), refuses anything but a plain folder
+inside the Hive's root, and the launch is refused.
+
+**maiTerm's own writes of `.claude.json` are serialized (2026-11-18).** Eight workers restarted at
+once lost six of their eight scratch entries. The cause wasn't Claude: eight 2.1.327 sessions
+started half a second apart on one root, each just after its entry was written, kept all eight
+through start, 10 s of running and exit. It was maiTerm racing itself: the parallel trust writes
+shared one temp file per process, and the 30 s account-root resync (`accounts::merge_json`)
+replaced the file from a copy read before them. Every maiTerm edit of these files now holds
+`json_file::write_lock`, writes its own temp file and re-reads if the file changed meanwhile, and
+`ensure_trust_in` reads the entry back and writes it again if it's gone.
 
 - **Trust doesn't keep a worker's branch out.** Since every worktree inherits its repo's trust,
   an unlanded, worker-authored branch is trusted too, a reviewer's included. Trust lets a
@@ -1186,10 +1221,26 @@ workers skills (a copy under their own settings) is open.
 **every** port, maiTerm's 8765 and the MCP proxy included: `allowLocalBinding: true`, and a bare
 `127.0.0.1` in `allowedDomains` (spike 9). So a worker reaches local services through MCP or
 `hiveRun` jobs (§6.8), and maiTerm's own hooks don't need localhost (they are command hooks,
-§6.8). If a Hive ever needs a local port, it's opened **by port only**, `127.0.0.1:<port>`, as an
-explicit per-Hive widening in Hive settings, never for maiTerm's MCP, proxy or maiLink port.
-Bash can reach that port through the sandbox's proxy, so the service there must not trust a
-local caller.
+§6.8).
+
+**A local database is opened by its Unix socket, never a port** (Darryl's call, 2026-11-18: the
+maiShop Hive's DB-backed specs, migrations and the invoice-number concurrency proof, couldn't run
+in a worker). Measured on 2.1.327 against a real Postgres: `127.0.0.1:5432` in `allowedDomains`
+does **not** open it (the sandbox lets traffic out only through its proxy, which database clients
+don't use), while `allowUnixSockets: ["/tmp/.s.PGSQL.5432"]` does, and nothing else. So the human
+lists sockets in Hive settings → Workers (`settings.worker_sockets`), and only the human:
+`hiveChangeSettings` refuses them, whatever the checkpoint. Only a database's socket name is taken
+(`.s.PGSQL.<port>`, `mysql*.sock`, `mysqld*.sock`, `redis*.sock`, `change::check_socket`): other
+local sockets reach far more (Docker's is root, an ssh agent or a ControlMaster can push, maiTerm's
+reach its tools). At each launch the path's realpath is checked again (a symbolic link must lead
+to a database's socket too) and a socket that isn't there is left out (`change::launch_sockets`).
+A hard link to another socket under a database's name would pass, so the grant is only as strong
+as the socket's folder: no worker can write `/tmp` or any folder outside its own, but the queen,
+with the human's access, could (she could reach that socket herself anyway). A
+builder's sandbox gets `allowUnixSockets` with the kept and the real path; its jobs and land
+checks get a Seatbelt `(remote unix-socket (path-literal <realpath>))` rule (`job_sandbox`).
+Reviewers get none, as with hosts. The worker's brief says how to connect (`host=/tmp`) and to use
+a database of its own: the grant reaches every database that server holds, the human's too.
 
 **Seeing its own app is serve plus fetch or screenshot, never a widening** (built 2026-10-31,
 `hive/serve.rs`). A live worker on a new SvelteKit project ran `PORT=3199 node build`, got
@@ -1681,7 +1732,7 @@ call whose window isn't loaded is refused, never half-done. Every Hive task writ
 
 | Tool | Who | Executed by | Does |
 |---|---|---|---|
-| `hiveSpawnWorker {title, role, brief, folders?, depends_on?, inputs?, reviews?, model?, effort?}` | coordinator | Rust reserves (§7.8), then window rpc | Creates the task, worktrees, branches and hidden tab, runs setup, and launches the agent with the Hive preamble, its role (§7.7) and the brief. `inputs` names gallery assets the worker starts from (their paths go in its brief). `reviews` makes it the reviewer of another worker's result (§7.7). Refused above the cap or by a fuse (§7.8). A worker with unmet `depends_on` is created in **Starting · waits on …** as a task and card only; its worktrees, setup and agent come at launch, when they land (§3.1) |
+| `hiveSpawnWorker {title, role, brief, folders?, depends_on?, inputs?, reviews?, model?, effort?}` | coordinator | Rust reserves (§7.8), then window rpc | Creates the task, worktrees, branches and hidden tab, runs setup, and launches the agent with the Hive preamble, its role (§7.7) and the brief. `inputs` names gallery assets the worker starts from (their paths go in its brief). `reviews` makes it the reviewer of another worker's result (§7.7). Refused above the cap or by a fuse (§7.8). A worker with unmet `depends_on` is created in **Queued · waits on …** as a task and card only; its worktrees, setup and agent come at launch, when they land (§3.1) |
 | `hiveListWorkers` | coordinator | Rust | Cards as data: state, task, folders, branches, diff stat, assets, last report |
 | `hiveMessageWorker {worker, text, assets?}` | coordinator | Rust (`deliver_to_agent`) | The draft, dialog and typing guards; a busy agent is no reason to hold. `assets` attach gallery files as paths |
 | `hiveLand {worker, summary, commits: {repo: sha}}` | coordinator | Rust | Lands the worker at the reviewed commits (§8). Answers with what happened in each repo, or why it refused |
@@ -1724,7 +1775,7 @@ exists.
 | Spawn a worker within the cap | None; the Hive is the envelope (decision §14.1) |
 | Raise the cap | The human, in Hive settings |
 | Land a worker into Base (default mode) | None: the coordinator calls `hiveLand`, and maiTerm merges behind its guards (§8). A land that changes agent or execution config is the human's (§8.1) |
-| Land a worker (approval mode) | The human, on a land card; merging the integration branch into Base is the human's, outside the Hive |
+| Land a worker into the Hive's branch (integration mode) | None by default: the coordinator calls `hiveLand` (§8.3). With Landing = Ask me, the human, on a land card. Landing that branch into Base is the human's, on its own card (`hiveLandBranch`, §8.3) |
 | Deliver assets into a Hive plain folder | None for new files, within the limits below; overwriting anything, and any other destination, is the human's (Export…, §10.6) |
 | Push | **No agent.** Only maiTerm's land path pushes, and only when the Hive's Push after land setting is on (default off), never forced (§8.5) |
 | Spend past the budget | The human, on a blocker the agent raises first (§10.3). Never delegable (§7.4) |
@@ -1800,7 +1851,7 @@ where a checkpoint says so. The checkpoints are Hive settings, and each one is s
 | Plan: which workers, how many, in what order | Coordinator | "Show me the plan first" is the Ask-me setting |
 | Workers' questions | Coordinator | One asker per question (`docs/overlord.md` §9.1.2), routed as the table below says |
 | Workers' permission prompts | Coordinator | Within the allowlist below |
-| Landing | Coordinator | Gates who calls `hiveLand` within the landing mode, which is fixed at creation (§3). In the approval mode (§8.3) it's always Ask me and can't be earned (§7.6) |
+| Landing | Coordinator | Gates who calls `hiveLand` within the landing mode, which is fixed at creation (§3). In the integration mode it gates lands into the Hive's branch, and is the queen's by default there too (Darryl, 2026-11-18, §8.3) |
 | Picking finals in the gallery | Coordinator | Creative Hives often set this to Ask me |
 | Adding a dependency, changing a public interface | Coordinator | Listed so a Hive can tighten them |
 
@@ -2296,9 +2347,18 @@ What can break is the pair: a web change that needs an api change not yet landed
 coordinator's to order, the same as Projects reporting "which PRs need to merge first". The brief
 says so, and the land answer always names which repos landed.
 
-### 8.3 Mode: integration branch, I approve each land
+### 8.3 Mode: a branch of its own (integration branch)
 
-`hiveLand` files an **Agent request** card ("Land *Session store* into *hive/auth*?", with the
+**Changed 2026-11-18 (Darryl):** this mode was "I approve each land", with Landing forced to Ask
+me. What he wanted was a branch the queen lands into freely, and his approval for the land into
+main. So Landing is an ordinary checkpoint here, the queen's by default (`default_checkpoints`),
+and only Ask me files the card below; an Undo follows who lands (the human's alone only under Ask
+me); earned autonomy may offer it. A Hive made before had Ask me forced on it, never chosen, so a
+load hands it to the queen once (`Hive::migrate_integration_landing`, marked by
+`settings.landing_open`); an Ask me its human picks afterwards stays. What the rest of this section says of "the approval mode" applies
+to Landing = Ask me.
+
+With Landing = Ask me, `hiveLand` files an **Agent request** card ("Land *Session store* into *hive/auth*?", with the
 diff stat and the coordinator's summary quoted as its reason) in the Loom's Decisions, in the
 worker's column and on the phone. It's the existing agent-requests machinery
 (`docs/agent-requests.md`): only a human click or a paired phone approves. At the end,
@@ -2307,7 +2367,7 @@ MRs from it, outside the Hive.
 
 The mode is fixed when the Hive is created (§3), because it's a branch topology, not a
 checkpoint: switching to land-to-Base later would fast-forward integration merges into Base. In
-this mode the Landing checkpoint is always Ask me, and it's excluded from earned autonomy (§7.6).
+this mode the Landing checkpoint decides who lands into `hive/<slug>` (above).
 
 **The card is pinned too.** It stores the sha per repo that `hiveLand` named, its diff stat is
 computed from that sha, and on approval maiTerm merges **exactly that sha** `--no-ff` into
@@ -2316,17 +2376,33 @@ computed from that sha, and on approval maiTerm merges **exactly that sha** `--n
 the land check run in a temporary worktree, as in §8.1; `hive/<slug>` then advances by
 compare-and-swap, and the land log records the sha.
 
+**The land into Base is the human's card** (Darryl, 2026-11-18; `land/branch.rs`). The queen asks
+with `hiveLandBranch {summary}` once the goal's work has landed; the card is a `hive_land` request
+with `branch: true`, so the phone shows and approves it like any land card, with no wire change.
+It's filed only while the branch holds Base's tip in every repo it lands in (Base that moved since is
+merged into the branch first, by a worker, through a normal land and its check), so the land is
+`git commit-tree` of the branch tip's own tree with Base and the tip as parents: exactly the files
+the card names, which it says were, or weren't, a tree the branch's last land check passed (from
+the land log; no new check runs, none could add anything). Approved, each repo goes in order under
+its land lock: Base still at the card's tip, the merge commit, step 2's `advance` (a checkout of
+Base takes it by `merge --ff-only` and holds over uncommitted work), a `branch` line in the land log
+(`by: human`), and the queen told. Nothing is pushed. A Base whose tip is maiTerm's own land of this branch (a `branch` log line
+whose branch tip the branch still holds) counts as held, so the second land isn't refused. The
+newest waiting card is kept in `branch-land.json` and filed again after a restart. Undo is the human's, by hand (`git revert -m 1`, which the land log
+and the refusal name): the Hive's Undo runs its check as a job under a worker's sandbox, and this
+land has no worker.
+
 **What "Base" means in this mode** is `hive/<slug>`, everywhere:
 
 | | Land to Base (§8.1) | Integration branch |
 |---|---|---|
-| Landing target | Base | `hive/<slug>`, by a `--no-ff` merge of the approved sha |
+| Landing target | Base | `hive/<slug>`, by a `--no-ff` merge of the landed sha |
 | Coordinator's read copy | Moves to Base's new tip | Its worktree on `hive/<slug>`, moved to the new tip |
 | New workers branch from | Base | `hive/<slug>` |
 | Post-land check (§8.6) | At Base's tip | At `hive/<slug>`'s tip |
-| Undo (§8.6) | The coordinator or the human | **The human's**: `git revert -m 1 <merge>` on `hive/<slug>`, from the land log |
+| Undo (§8.6) | The coordinator or the human | `git revert -m 1 <merge>` on `hive/<slug>`, from the land log: the coordinator or the human, the human's alone under Landing = Ask me |
 | Push after land (§8.5) | The setting | Off and hidden: `hive/<slug>` is pushed by the human |
-| Batching (§6.8) | Yes | Never; each land is its own card |
+| Batching (§6.8) | Yes | Never |
 
 ### 8.4 After landing
 
@@ -3583,7 +3659,8 @@ Decided 2026-10-23:
 
 1. **Spawn approval:** spawns within the cap need no card (principle 5).
 2. **Landing:** by default the coordinator lands each worker straight into Base (§8.1). The
-   integration branch with human-approved lands is chosen when the Hive is created (§3, §8.3).
+   integration branch is chosen when the Hive is created (§3, §8.3); its lands were the human's
+   until 2026-11-18, the queen's by default since.
 3. **Runtime scope:** Claude only in v1 (§12).
 4. **The window Overlord** leaves Hive tabs alone (§7.3).
 5. **Folders:** one primary plus any number more, git or plain; plain folders are read-only
@@ -4042,7 +4119,7 @@ several releases a day).
    a branch tip that moved, a dirty worktree (untracked included), an agent mid-turn (its hook state
    `Active`), a review still running or whose last verdict isn't a pass at exactly these shas
    (`accept_review` after `hiveResolve accept`), a detached Base, and, until 6d, anything that needs
-   the human (integration mode, Landing = Ask me, the config rule). `worker.json` `land` holds the
+   the human (Landing = Ask me, in either mode, or the config rule). `worker.json` `land` holds the
    state, persisted before every irreversible step. The lock (`land/lock.rs`) is
    `<common dir>/maiterm-land.lock` by `create_new`, stale when its pid is gone or is ours and not
    held; waits wake on a condvar and re-read every 2 s; `hiveLand` waits 10 s, then the land carries
@@ -4085,7 +4162,7 @@ several releases a day).
    path refuses both kinds), one per land (`args.land_id`; a newer land of the task supersedes the
    card), exempt from the five-per-tab cap, 24 h to answer. Three things file one: the config rule
    in any mode, after every repo's step 1 and check and before any step 2 (one card for the whole
-   land); Landing = Ask me and the integration mode, at `hiveLand`, before step 1. While a card waits
+   land); Landing = Ask me (in either mode), at `hiveLand`, before step 1. While a card waits
    the land is `awaiting_human`: no lock, no temporary worktree, no delivery hold, `tested` and
    `base_before` kept; its worker may be stopped, retired or report again, which withdraws the card.
    Every word on it is maiTerm's ("Land “Title” into main in web", the diff stat from the target to
@@ -4124,8 +4201,8 @@ several releases a day).
    and `info` denied, its own cargo target in the land temp folder, seeded from the checkout's),
    step 2 with the dirty hold and three Base-moved rebuilds; a held undo resumes on the next undo
    of the same line. It logs `kind: undo`, marks the worker `undone` (its waiters block, "…'s land
-   was undone") and never reopens it. `hiveUndoLand {land, reason}` (coordinator; refused in the
-   integration mode; `L-…` alone only for a one-repo land) files a `hive_undo` card when the revert
+   was undone") and never reopens it. `hiveUndoLand {land, reason}` (coordinator; refused in an
+   integration Hive whose lands the human approves; `L-…` alone only for a one-repo land) files a `hive_undo` card when the revert
    changes config; the human's Undo (`hive_land_log`, `hive_undo_preview`, `hive_undo_land`;
    `LandLogModal` from the header and the worker column's menu) is a direct command whose inline
    confirmation names the repo, the branch, the commits and the config files, and is refused if the
@@ -4188,8 +4265,7 @@ several releases a day).
    checkpoint (a missing key is its default for the landing mode) and maps a prompt kind to one
    (permission → permissions; question, blocker, completion and a finished turn →
    questions, plan D14); `hive_set_autonomy` saves the checkpoints and `settings.autonomy`
-   (`prompt_timeout_secs` 60–3,600, default 300; `daily_digest`), keeps Landing at Ask me in the
-   integration mode, tells the coordinator, and moves each prompt it owns under a checkpoint now
+   (`prompt_timeout_secs` 60–3,600, default 300; `daily_digest`), tells the coordinator, and moves each prompt it owns under a checkpoint now
    Ask me to the human, a timed-out one too (`hiveAnswerWorker` also reads the checkpoint at call
    time, so a change racing it records rather than sends). `hive/prompts.rs` routes a worker's permission dialog or AskUserQuestion
    (its PermissionRequest, Notification or AskUserQuestion PreToolUse hook, the screen read 800 ms
@@ -4239,8 +4315,7 @@ several releases a day).
    the layout shows, on a focused window, as visible (`hiveView.tabColumnOpen`, plan D27, over the
    tabs HiveView publishes from `fitColumns` via `tabsOnScreen`): a column given way on a narrow
    window, or a coordinator squeezed to its strip, is not. The header's
-   "Autonomy: N ask you" opens `HiveAutonomyModal` (`hive/autonomy.ts`: six rows, Landing locked
-   at Ask me in the integration mode, the never-delegated list, the timeout in minutes 1–60, the
+   "Autonomy: N ask you" opens `HiveAutonomyModal` (`hive/autonomy.ts`: six rows, the never-delegated list, the timeout in minutes 1–60, the
    digest), saved by `hive_set_autonomy`. Every blocker the human answers in a Hive (a click, the
    Loom, the phone) reaches Rust's log through `hive_blocker_answered`, called by `answerBlocker`
    after its task write and reachable from no MCP call (plan D16): `record_blocker_answer` reuses
@@ -4275,7 +4350,7 @@ several releases a day).
    an `outcome` updates just that, newest first by a decision's latest line. Lands are decisions: the
    coordinator's `hiveLand` under its Landing checkpoint is `answered` (`landing`, key `L-…`, one per
    land, kept while a held land resumes on its pins, new on new pins; `LandState.decision`), each
-   card is its own (`card_decision`; category `landing` for Ask me, `config`, `integration`), the
+   card is its own (`card_decision`; category `landing` for Ask me in either mode, `config`; `integration` on lines from before 2026-11-18), the
    human's approval `Land`, a denial `Don't land`, a lapse or a withdrawal `lapsed`, and the land's
    refusal, hold (a restart's included, written by `reconcile`) or landing is the outcome on both; a
    card replaced when its land resumes says "asked again" only if the log shows it approved.

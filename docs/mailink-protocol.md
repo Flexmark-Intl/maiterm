@@ -24,8 +24,9 @@
 >   stays open for "I've done it" (`/answer`). `null`: no Run (not an action, or no command).
 >   Say which on the button ("Run in the agent's tab" / "Run on the desktop").
 > - **`POST /tasks/{id}/run`** `{ askedAt }` runs it. `result.ran` is `agent` | `tab`. An `agent`
->   run is refused, never held, while the agent is mid-turn, has a dialog open, or there is a
->   draft in its box or the human is typing there: `accepted:false` with the sentence as `reason`.
+>   run is refused, never held, while the agent has a dialog open, or there is a draft in its
+>   box or the human is typing there: `accepted:false` with the sentence as `reason`. (Since
+>   2026-11-15 a mid-turn agent is not refused: Claude queues the line until its turn ends.)
 >
 > **v0.26 changelog** (2026-11-02). Additive: **pick-several decisions** (maiTerm docs/tasks.md
 > §3.1.1). An agent's decision can let the human tick any of its options, where one answer
@@ -2445,7 +2446,7 @@ interface OutstandingDirective {
 | `POST /tasks/{id}/start` | `{}` | `{ accepted, confirmed, result?: { started, told, task } }` — see below |
 | `POST /tasks/{id}/answer` | `{ askedAt: string, option?: number, options?: number[], text?: string }` (0.13; `options` 0.26: the ticked `picks` of a `pick:"many"` question, `[]` for none of them; refused on a pick-one question, as `option` is on a pick-several one; `text` alone answers either) | `{ accepted, confirmed, reason?, result?: { answered: true, told, task } }` — see below |
 | `POST /tasks/{id}/dismiss` | `{ askedAt: string }` (0.17) | `{ accepted, confirmed, reason?, result?: { dismissed: true, task } }` — "Already handled in the tab": the blocker is cleared and the task goes back to Active with the note "Handled in the tab by the human". NOTHING is typed to the agent. Any blocker kind (`decision`, `action`, `external`), as on the desktop's card. Refusals as for `/answer` (stale `askedAt`, no longer blocked), `reason` verbatim |
-| `POST /tasks/{id}/run` | `{ askedAt: string }` (0.27) | `{ accepted, confirmed, reason?, result?: { ran: "agent" \| "tab", task } }` — the card's Run, where `blocker.run` says. `agent`: typed into the agent's tab as a shell-mode line and the task goes back to Active (the agent saw the output); refused, never held, while the agent works, has a dialog open, or has a draft or the human's typing in its box. `tab`: a new terminal tab opens beside the agent on the desktop, behind the human's work, and the task stays Blocked for `/answer`. Refusals as for `/answer` (stale `askedAt`, no longer blocked, not an action), `reason` verbatim |
+| `POST /tasks/{id}/run` | `{ askedAt: string }` (0.27) | `{ accepted, confirmed, reason?, result?: { ran: "agent" \| "tab", task } }` — the card's Run, where `blocker.run` says. `agent`: typed into the agent's tab as a shell-mode line and the task goes back to Active (the agent saw the output); refused, never held, while the agent has a dialog open, or has a draft or the human's typing in its box. `tab`: a new terminal tab opens beside the agent on the desktop, behind the human's work, and the task stays Blocked for `/answer`. Refusals as for `/answer` (stale `askedAt`, no longer blocked, not an action), `reason` verbatim |
 
 **Answering a blocker (0.13).** `POST /tasks/{id}/answer` is the phone's "prompt me": the human
 answers the question on a task's `blocker`. It is the same human-only verb as the desktop's answer

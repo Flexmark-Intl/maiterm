@@ -105,7 +105,7 @@
       <div class="title">Land log{taskId && entries[0] ? `: ${entries[0].title}` : ''}</div>
       <div class="subtitle">
         Every land, undo and post-land check, newest first. Undo writes a revert commit and lands it like a land; it never resets
-        history.{#if log?.integration} In this Hive's approval mode, Undo is yours alone.{/if}
+        history.{#if log?.integration} This Hive asks you before each land into its branch, so Undo is yours alone.{/if}
       </div>
     </div>
 

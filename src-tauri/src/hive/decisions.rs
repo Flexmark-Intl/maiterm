@@ -48,7 +48,8 @@ pub const EVENT_DIGEST: &str = "digest";
 pub const CATEGORY_NEVER: &str = "never";
 /// The coordinator's own blockers: they can become precedents, never a streak (plan D15).
 pub const CATEGORY_OTHER: &str = "other";
-/// Land cards the config rule and the integration mode file: the human's, never earned.
+/// Land cards the config rule files: the human's, never earned. `integration`: the integration
+/// mode's cards from before its Landing could be the queen's (2026-11-18), read from old lines.
 pub const CATEGORY_CONFIG: &str = "config";
 pub const CATEGORY_INTEGRATION: &str = "integration";
 /// maiTerm's own offers: never a precedent, never a streak.
@@ -605,12 +606,12 @@ pub(crate) fn land_decided(paths: &HivePaths, hive_id: &str, w: &WorkerRecord, l
     record(paths, &l);
 }
 
-/// The category of a land card by why it asks: Landing = Ask me is `landing`, which can be
-/// earned; the config rule and the integration mode are never the coordinator's.
+/// The category of a land card by why it asks: Landing = Ask me is `landing` in either mode (the
+/// integration mode's card is Landing = Ask me too since 2026-11-18, §8.3), which can be earned;
+/// the config rule is never the coordinator's. `integration` stays for the lines logged before.
 pub fn card_category(why: &str) -> &'static str {
     match why {
-        super::land::approval::WHY_ASK => super::checkpoints::LANDING,
-        super::land::approval::WHY_INTEGRATION => CATEGORY_INTEGRATION,
+        super::land::approval::WHY_ASK | super::land::approval::WHY_INTEGRATION => super::checkpoints::LANDING,
         _ => CATEGORY_CONFIG,
     }
 }

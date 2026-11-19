@@ -94,6 +94,15 @@ export function needsYouQueue(input: NeedsYouInput): NeedsYouItem[] {
   return items.sort((a, b) => Number(a.held) - Number(b.held) || a.at - b.at);
 }
 
+/** The queen's decisions and approvals waiting on the human, one key per asking (a question
+ *  asked again on the same task is a new one). A key the view hasn't seen is a new decision,
+ *  which brings Needs you up (docs/hive.md §4.8). */
+export function queenAsks(items: readonly NeedsYouItem[]): string[] {
+  return items
+    .filter((i) => !i.held && i.asker !== null && i.asker.taskId === null && (i.kind === 'blocker' || i.kind === 'request'))
+    .map((i) => (i.kind === 'blocker' ? `${i.key}@${i.task.blocker?.asked_at ?? ''}` : i.key));
+}
+
 /** The header's count: what is the human's now. */
 export const needsYouCount = (items: readonly NeedsYouItem[]): number => items.filter((i) => !i.held).length;
 

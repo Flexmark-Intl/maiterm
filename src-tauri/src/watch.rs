@@ -41,7 +41,7 @@ fn tunnel_args(state: &AppState, host: &str) -> Option<(String, String)> {
         .ssh_tunnels
         .read()
         .values()
-        .find(|t| connect_args(&t.host_key) == host)
+        .find(|t| same_host(&t.host_key, host))
         .map(|t| (t.host_key.clone(), connect_args(&t.ssh_args)))
 }
 
@@ -177,38 +177,53 @@ pub fn host_label(host: &str) -> String {
 }
 
 /// ssh's options that take an argument (OpenSSH's getopt string).
-const SSH_ARG_FLAGS: &str = "bceilmopBDEFIJLOPQRSwW";
+pub(crate) const SSH_ARG_FLAGS: &str = "bceilmopBDEFIJLOPQRSwW";
 
 /// An ssh command line, read as ssh's getopt reads it.
-struct SshParse<'a> {
+struct SshParse {
     /// The words that say WHERE to connect — options and destination — without any remote
     /// command after them, and without `-t`.
-    connect: Vec<&'a str>,
-    dest: Option<&'a str>,
-    port: Option<&'a str>,
-    user: Option<&'a str>,
+    connect: Vec<String>,
+    dest: Option<String>,
+    port: Option<String>,
+    user: Option<String>,
+    /// The index of the word the remote command starts at (`words.len()` when there is none).
+    remote_at: usize,
 }
 
-fn parse_ssh(cmd: &str) -> SshParse<'_> {
-    let words: Vec<&str> = cmd.split_whitespace().collect();
-    let mut p = SshParse { connect: Vec::new(), dest: None, port: None, user: None };
+/// Where the remote command starts among `cmd`'s words (`parse_ssh`). The frontend's
+/// `remoteCommandIndex` is the same walk; the two are checked against one table (in `tests`,
+/// which is unix-only).
+#[cfg(all(test, unix))]
+pub(crate) fn remote_command_index(cmd: &str) -> usize {
+    parse_ssh(cmd).remote_at
+}
+
+/// `cmd` is shell words (`util::ssh_words`): `-i '/Users/me/My Keys/id'` is one option.
+fn parse_ssh(cmd: &str) -> SshParse {
+    let words = crate::util::ssh_words::split(cmd);
+    let mut p = SshParse { connect: Vec::new(), dest: None, port: None, user: None, remote_at: words.len() };
     let mut i = 0;
     while i < words.len() {
-        let w = words[i];
+        let w = words[i].as_str();
         if w == "--" {
             if p.dest.is_none() {
-                p.dest = words.get(i + 1).copied();
-                p.connect.extend(p.dest);
+                p.dest = words.get(i + 1).cloned();
+                p.connect.extend(p.dest.clone());
+                p.remote_at = (i + 2).min(words.len());
+            } else {
+                p.remote_at = i + 1;
             }
             break;
         }
         let Some(flags) = w.strip_prefix('-').filter(|f| !f.is_empty()) else {
             // The first plain word is the destination; one after it starts the remote command.
             if p.dest.is_some() {
+                p.remote_at = i;
                 break;
             }
-            p.dest = Some(w);
-            p.connect.push(w);
+            p.dest = Some(w.to_string());
+            p.connect.push(w.to_string());
             i += 1;
             continue;
         };
@@ -217,7 +232,7 @@ fn parse_ssh(cmd: &str) -> SshParse<'_> {
             i += 1;
             continue;
         }
-        p.connect.push(w);
+        p.connect.push(w.to_string());
         // A cluster (`-xCp2222`): flags until one that takes an argument, which is the rest of
         // the word or, if none, the next word.
         for (j, ch) in flags.char_indices() {
@@ -227,18 +242,18 @@ fn parse_ssh(cmd: &str) -> SshParse<'_> {
             let rest = &flags[j + ch.len_utf8()..];
             let arg = if rest.is_empty() {
                 i += 1;
-                let a = words.get(i).copied();
-                p.connect.extend(a);
+                let a = words.get(i).cloned();
+                p.connect.extend(a.clone());
                 a
             } else {
-                Some(rest)
+                Some(rest.to_string())
             };
             match (ch, arg) {
                 ('p', Some(a)) => p.port = Some(a),
                 ('l', Some(a)) => p.user = Some(a),
                 ('o', Some(a)) => match a.split_once('=') {
-                    Some((k, v)) if k.eq_ignore_ascii_case("port") => p.port = Some(v),
-                    Some((k, v)) if k.eq_ignore_ascii_case("user") => p.user = Some(v),
+                    Some((k, v)) if k.eq_ignore_ascii_case("port") => p.port = Some(v.to_string()),
+                    Some((k, v)) if k.eq_ignore_ascii_case("user") => p.user = Some(v.to_string()),
                     _ => {}
                 },
                 _ => {}
@@ -250,13 +265,73 @@ fn parse_ssh(cmd: &str) -> SshParse<'_> {
     p
 }
 
+/// `words` (an ssh's args, no program) without its tty switches (`-t`, `-t -t`, `-tt`): only
+/// options, read as `parse_ssh` reads them, never an option's argument nor anything at or after
+/// the remote command. ssh reads a cluster flag by flag (`-xtt` is `-x -t -t`) up to the first
+/// flag that takes an argument, which takes the rest: `-xtt` becomes `-x`, `-tp22` becomes
+/// `-p22`, and `-Et` is untouched (its `t` is `-E`'s argument). maiTerm's own ssh passes `-T`, and ssh reads options left to right, so a
+/// user's `-t` after it asks for a tty (`-t -t` forces one): on `cat > path` or `sh -s` that
+/// turns bytes into keystrokes (0x03 becomes SIGINT, LF becomes CRLF, no EOF). The frontend's
+/// `sshArgsOf` drops them too; this covers args saved before it did.
+pub(crate) fn without_tty(words: Vec<String>) -> Vec<String> {
+    // Word index → the word without its t's, or None when nothing is left.
+    let mut edits: Vec<(usize, Option<String>)> = Vec::new();
+    let mut dest = false;
+    let mut i = 0;
+    while i < words.len() {
+        let w = words[i].as_str();
+        if w == "--" {
+            break;
+        }
+        let Some(flags) = w.strip_prefix('-').filter(|f| !f.is_empty()) else {
+            if dest {
+                break;
+            }
+            dest = true;
+            i += 1;
+            continue;
+        };
+        let arg = flags.find(|c| SSH_ARG_FLAGS.contains(c));
+        let (head, rest) = flags.split_at(arg.unwrap_or(flags.len()));
+        let kept: String = head.chars().filter(|c| *c != 't').collect();
+        if kept.len() != head.len() {
+            edits.push((i, (!kept.is_empty() || !rest.is_empty()).then(|| format!("-{kept}{rest}"))));
+        }
+        // Its argument is the rest of the word, or else the next word.
+        if arg.is_some_and(|j| j + 1 == flags.len()) {
+            i += 1;
+        }
+        i += 1;
+    }
+    words
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, w)| match edits.iter().find(|(e, _)| *e == i) {
+            Some((_, edited)) => edited.clone(),
+            None => Some(w),
+        })
+        .collect()
+}
+
 /// Where to connect, and nothing else: a tunnel's `host_key` can be an ssh command line read
 /// back from the process table, which for a session maiTerm started ends in maiTerm's own remote
 /// command — `export … MAITERM_AUTH=…; cd … && exec $SHELL -l`. That must never be stored with a
 /// follow-up (it is a credential, and the state file is on disk) nor have a script's `sh -s`
 /// appended to it. What `due.host` holds, and what a remote run's ssh is given.
+///
+/// Shell words in, shell words out (`util::ssh_words`): a word with nothing special in it stays
+/// bare, so a key spelled before quoting (`-o Port=2222 ews@nova`) is still the same key.
 pub fn connect_args(key: &str) -> String {
-    parse_ssh(key).connect.join(" ")
+    crate::util::ssh_words::join(parse_ssh(key).connect)
+}
+
+/// Two ssh spellings reach the same host: their `connect_args` are equal, so both sides are
+/// read as words and spelled anew. Compare a host with this, never with `==` against a stored
+/// string: a `due.host` or a Files root persisted before ssh args were shell words (2026-11-15)
+/// holds `-i C:\Users\me\.ssh\id ews@nova`, which `connect_args` now spells
+/// `-i 'C:\Users\me\.ssh\id' ews@nova` — the same words.
+pub fn same_host(a: &str, b: &str) -> bool {
+    connect_args(a) == connect_args(b)
 }
 
 /// A place for a human: `place` with the host's label.
@@ -264,9 +339,30 @@ pub fn place_label(f: &FollowUp) -> Option<String> {
     f.due.cwd.as_deref().map(|cwd| place(f.due.host.as_deref().map(host_label).as_deref(), cwd))
 }
 
-/// A script follow-up's place (`place`); None without a folder.
+/// A script follow-up's place (`place`); None without a folder. The host in its `connect_args`
+/// spelling, so one host is one place however its `due.host` was stored.
 pub fn place_of(f: &FollowUp) -> Option<String> {
-    f.due.cwd.as_deref().map(|cwd| place(f.due.host.as_deref(), cwd))
+    f.due.cwd.as_deref().map(|cwd| place(f.due.host.as_deref().map(connect_args).as_deref(), cwd))
+}
+
+/// Has a HUMAN approved this follow-up's script where it runs (`is_approved` at `place_of`)?
+/// Also under the spellings its host had before ssh args were shell words (2026-11-15): the
+/// stored `due.host` itself, and its words joined with single spaces, as `connect_args` spelled
+/// every host then. Without them an approval of `-o SendEnv=LC_* ews@nova` would stop matching
+/// the same host now spelled `-o 'SendEnv=LC_*' ews@nova`. The old spelling counts only when it
+/// reads back as the SAME words: joined with spaces, `-i 'id -J' jump nova` (key `id -J`, host
+/// jump) spells `-i id -J jump nova` (host nova), and an approval for nova must never run on
+/// jump. A word with a space never made a working host before quoting, so nothing real is lost.
+pub fn follow_up_approved(app_data: &AppData, f: &FollowUp) -> bool {
+    let (Some(cwd), Some(script)) = (f.due.cwd.as_deref(), f.due.script.as_deref()) else { return false };
+    let Some(host) = f.due.host.as_deref() else { return is_approved(app_data, cwd, script) };
+    let words = crate::util::ssh_words::split(host);
+    let legacy = words.join(" ");
+    let mut keys = vec![connect_args(host), host.to_string()];
+    if crate::util::ssh_words::split(&legacy) == words {
+        keys.push(legacy);
+    }
+    keys.iter().any(|h| is_approved(app_data, &place(Some(h), cwd), script))
 }
 
 /// The approval key: the script and the place it runs. The same script somewhere else is a
@@ -897,6 +993,106 @@ mod tests {
         assert_eq!(clean(b"abcdef", 3, true), "…def");
     }
 
+    /// A `due.host` (or a Files root) persisted before ssh args were shell words keeps its old
+    /// spelling; the tunnel to that host is keyed in the new one. Same words, same host.
+    #[test]
+    fn a_host_stored_before_quoting_still_finds_its_tunnel_and_its_approval() {
+        let olds = [
+            // Each is spelled anew (quoted); the same words, so still the same host.
+            "-i C:\\Users\\me\\.ssh\\id ews@nova",
+            "-J ews@[fe80::1]:22 nova",
+            "-L [::1]:5432:db:5432 nova",
+            "-o SendEnv=LC_* nova",
+            "-o HostKeyAlgorithms=^ssh-ed25519 nova",
+        ];
+        for old in olds {
+            let new = connect_args(old);
+            assert!(same_host(old, &new) && same_host(&new, old), "{old}");
+            assert!(!same_host(old, "ews@nova"));
+
+            let state = AppState::new();
+            state.ssh_tunnels.write().insert(
+                new.clone(),
+                crate::state::app_state::SshTunnel { pid: 1, remote_port: 1, host_key: new.clone(), tab_ids: Default::default(), ssh_args: new.clone() },
+            );
+            assert_eq!(tunnel_args(&state, old).map(|(k, _)| k), Some(new.clone()), "{old}");
+
+            // Approved before the upgrade, keyed by the stored spelling.
+            let mut d = AppData::default();
+            remember_approval(&mut d, &place(Some(old), "/srv"), "test -f done");
+            let mut f = FollowUp {
+                id: "f".into(),
+                text: "t".into(),
+                due: crate::state::workspace::FollowUpDue {
+                    kind: REMOTE_KIND.into(),
+                    host: Some(old.into()),
+                    cwd: Some("/srv".into()),
+                    script: Some("test -f done".into()),
+                    ..Default::default()
+                },
+                author: "agent".into(),
+                created_at: "2026-11-15T00:00:00Z".into(),
+                expires_at: None,
+            };
+            assert!(follow_up_approved(&d, &f), "the stored follow-up: {old}");
+            f.due.host = Some(new.clone());
+            assert!(follow_up_approved(&d, &f), "a new follow-up to the same host: {new}");
+            f.due.script = Some("rm -rf /".into());
+            assert!(!follow_up_approved(&d, &f), "another script is still another approval");
+            f.due.script = Some("test -f done".into());
+            f.due.host = Some("ews@nova".into());
+            assert!(!follow_up_approved(&d, &f), "another host is still another place");
+        }
+
+        // Words that join to an approved host's spelling are still another host: the key file
+        // `id -J` and the host jump is not the key id through jump to nova.
+        let mut d = AppData::default();
+        let approved = "-i id -J jump nova";
+        remember_approval(&mut d, &place(Some(approved), "/srv"), "test -f done");
+        let mut f = FollowUp {
+            id: "f".into(),
+            text: "t".into(),
+            due: crate::state::workspace::FollowUpDue {
+                kind: REMOTE_KIND.into(),
+                host: Some(approved.into()),
+                cwd: Some("/srv".into()),
+                script: Some("test -f done".into()),
+                ..Default::default()
+            },
+            author: "agent".into(),
+            created_at: "2026-11-15T00:00:00Z".into(),
+            expires_at: None,
+        };
+        assert!(follow_up_approved(&d, &f));
+        for other in ["-i 'id -J' jump nova", "-i 'id -J' jump"] {
+            f.due.host = Some(other.into());
+            assert!(!same_host(other, approved));
+            assert!(!follow_up_approved(&d, &f), "a script approved for nova must not run on jump: {other}");
+        }
+    }
+
+    /// The frontend's `remoteCommandIndex` asserts this same table (`REMOTE_AT` in
+    /// sshArgsRoundTrip.test.ts): both must say where the remote command starts alike, or the
+    /// frontend cuts a user's option after the host as if it were maiTerm's remote command.
+    #[test]
+    fn the_remote_command_starts_where_the_frontend_says() {
+        let table: [(&str, usize); 10] = [
+            ("ews@nova", 1),
+            ("ews@nova uptime", 1),
+            ("-p 2222 ews@nova uptime -l", 3),
+            ("ews@nova -o SetEnv=MAITERM_PROFILE=dev", 3),
+            ("ews@nova -o 'SendEnv=MAITERM_*' tmux", 3),
+            ("nova -oSendEnv=MAITERM_X -p 2222", 4),
+            ("-xCp2222 nova -t -J bastion ls", 5),
+            ("-- nova uptime", 2),
+            ("nova -- -p 1", 2),
+            ("-p 2222", 2),
+        ];
+        for (args, at) in table {
+            assert_eq!(remote_command_index(args), at, "{args}");
+        }
+    }
+
     #[test]
     fn approval_is_per_script_and_folder_and_capped() {
         let mut d = AppData::default();
@@ -945,6 +1141,10 @@ mod tests {
         assert_eq!(host_label(ps), "ews@nova");
         assert_eq!(connect_args("ews@nova -J bastion uptime"), "ews@nova -J bastion");
         assert_eq!(connect_args("-x -C ews@nova"), "-x -C ews@nova");
+        // Shell words: a quoted path is one option, and stays quoted in the key.
+        let q = "-t -i '/Users/me/My Keys/id' -l ews nova 'cd /x && exec $SHELL -l'";
+        assert_eq!(connect_args(q), "-i '/Users/me/My Keys/id' -l ews nova");
+        assert_eq!(host_label(q), "ews@nova");
         assert_eq!(host_label("nova"), "nova");
         for i in 0..MAX_APPROVALS + 5 {
             remember_approval(&mut d, "/a", &i.to_string());

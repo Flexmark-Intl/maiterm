@@ -4,6 +4,7 @@
  * (`stores/followUps.svelte.ts`) wraps these with state, persistence and the delivery tick.
  */
 import type { FollowUp } from '$lib/tauri/types';
+import { splitWords } from '$lib/utils/shellWords';
 
 /** §4 limits. Each refusal names the one that tripped. */
 export const MAX_PENDING = 10;
@@ -50,7 +51,7 @@ export function hostLabel(host: string): string {
   // Parsed as ssh's getopt reads it: options may follow the destination (`ews@nova -J bastion`),
   // and guessing by position named the jump host (review of dcf3545). A port stays: `localhost`
   // behind two forwards is two machines, and the human must see which.
-  const words = host.split(/\s+/).filter(Boolean);
+  const words = splitWords(host);
   let dest: string | undefined;
   let port: string | undefined;
   let user: string | undefined;

@@ -10,6 +10,7 @@
  */
 
 import * as commands from '$lib/tauri/commands';
+import { splitWords } from '$lib/utils/shellWords';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { dispatch } from '$lib/stores/notificationDispatch';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
@@ -308,7 +309,7 @@ const SSH_FLAGS_WITH_ARG = new Set([
  *   - trailing command contains `exec $SHELL` (maiTerm's split/restore reconnect pattern)
  */
 export function isInteractiveSshSession(cmd: string): boolean {
-  const tokens = commands.sshArgsOf(cmd).split(/\s+/).filter(Boolean);
+  const tokens = splitWords(commands.sshArgsOf(cmd));
   let i = 0;
   let sawHost = false;
   while (i < tokens.length) {

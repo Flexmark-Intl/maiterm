@@ -9,16 +9,21 @@ const short = (sha: string | null | undefined) => (sha ?? '').slice(0, 7);
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 /** A line that moved its target: what Undo can take back. */
-export const movedTarget = (e: Pick<HiveLandLogEntry, 'kind'>) => ['land', 'batch_member', 'integration', 'undo'].includes(e.kind);
+export const movedTarget = (e: Pick<HiveLandLogEntry, 'kind'>) => ['land', 'batch_member', 'integration', 'undo', 'branch'].includes(e.kind);
 
-export function kindLabel(e: Pick<HiveLandLogEntry, 'kind' | 'check'>): string {
+export function kindLabel(e: Pick<HiveLandLogEntry, 'kind' | 'check' | 'by'>): string {
   switch (e.kind) {
     case 'land':
       return 'Landed';
     case 'batch_member':
       return 'Landed in a batch';
     case 'integration':
-      return 'Landed (approved)';
+      // Into the Hive's branch: approved only when a person landed it (Landing = Ask me, or a
+      // config card); the queen's own since 2026-11-18 (docs/hive.md §8.3).
+      return e.by === 'human' ? 'Landed into the branch (approved)' : 'Landed into the branch';
+    case 'branch':
+      // The Hive's branch landed into Base on the human's card (docs/hive.md §8.3).
+      return 'Branch landed into Base';
     case 'undo':
       return 'Undo';
     case 'base_check':
@@ -35,8 +40,10 @@ export function moveLine(e: Pick<HiveLandLogEntry, 'kind' | 'target' | 'base_bef
 }
 
 /** What a line's qualifiers say: undone, suspect, its push. */
-export function flags(e: Pick<HiveLandLogEntry, 'undone_by' | 'suspect' | 'pushed' | 'kind'>): string[] {
+export function flags(e: Pick<HiveLandLogEntry, 'undone_by' | 'suspect' | 'pushed' | 'kind'> & { merge_commit?: string | null }): string[] {
   const out: string[] = [];
+  // Not the Hive's to undo (its revert would run a check under no worker's sandbox): by hand.
+  if (e.kind === 'branch' && e.merge_commit) out.push(`to undo: git revert -m 1 ${e.merge_commit.slice(0, 10)}`);
   if (e.undone_by) out.push(`undone by ${e.undone_by}`);
   if (e.suspect) out.push('suspect');
   if (movedTarget(e) && e.pushed.startsWith('held')) out.push(`push ${e.pushed}`);
@@ -52,7 +59,8 @@ export function undoBlocked(e: Pick<HiveLandLogEntry, 'id' | 'undone_by'>, log: 
   return open.state === 'awaiting_human' ? 'Its undo waits for your approval on a card.' : `Being undone now (${open.state}).`;
 }
 
-export const offersUndo = (e: Pick<HiveLandLogEntry, 'kind'>) => movedTarget(e) && e.kind !== 'undo';
+/** A branch land into Base is undone by hand (`flags` names the revert): never the Hive's Undo. */
+export const offersUndo = (e: Pick<HiveLandLogEntry, 'kind'>) => movedTarget(e) && e.kind !== 'undo' && e.kind !== 'branch';
 
 /** Newest first, a worker's own lines only when `taskId` is given. */
 export function shownEntries(log: Pick<HiveLandLog, 'entries'>, taskId?: string | null): HiveLandLogEntry[] {

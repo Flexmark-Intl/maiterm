@@ -10,8 +10,8 @@
 //!
 //! The coordinator's undo whose revert changes agent or execution config files a `hive_undo` card
 //! the human approves; the human's own Undo (the land log, the worker column's menu) is a direct
-//! command whose inline confirmation already named those files (plan D15). In the integration
-//! mode only the human undoes (§8.3). Undo never appears on a card of the board (§4.3). The worker
+//! command whose inline confirmation already named those files (plan D15). In an integration
+//! Hive whose lands the human approves (Landing = Ask me) only the human undoes (§8.3). Undo never appears on a card of the board (§4.3). The worker
 //! isn't reopened: it is marked `undone`, so its waiters block, and the coordinator is told.
 //!
 //! An undo's state is `logs/undos/<U-…>.json` while it runs, waits or holds, persisted before
@@ -201,6 +201,14 @@ pub(crate) fn resolve(folded: &landlog::Folded, name: &str) -> Result<LandLogEnt
     match e.entry.kind.as_str() {
         landlog::KIND_UNDO => return Err(format!("{} is an undo itself: to bring that work back, land it again.", e.entry.id)),
         landlog::KIND_BASE_CHECK => return Err(format!("{} is a post-land check, not a land.", e.entry.id)),
+        super::branch::KIND_BRANCH => {
+            return Err(format!(
+                "{} landed this Hive's branch into {} on the human's card: undoing it is theirs, by hand (git revert -m 1 {}).",
+                e.entry.id,
+                e.entry.target,
+                e.entry.merge_commit.as_deref().unwrap_or("<its merge commit>")
+            ))
+        }
         _ if !e.entry.moved_target() => return Err(format!("{} isn't a land maiTerm can undo.", e.entry.id)),
         _ => {}
     }
@@ -1028,7 +1036,7 @@ pub fn tool_definition(tab_id: &Value) -> Value {
              lock, through its land check, by fast-forward), never resetting history. land names a land log line, \"L-…/folder\", \
              or \"L-…\" for a land in one repo (the ids are in hiveLand's answers and ⟦HIVE LAND⟧). Refused if later work on the \
              target builds on it (a revert would conflict: fix forward instead), if it is already undone or being undone, and \
-             in the integration mode, where Undo is the human's. A revert that changes agent or execution config waits for the \
+             in an integration Hive whose lands the human approves (Landing = Ask me), where Undo is the human's. A revert that changes agent or execution config waits for the \
              human's approval on a card. The worker isn't reopened: it is marked undone, workers waiting on it stay blocked, \
              and the work comes back only as a new task. An uncommitted change in Base's checkout holds it, as for a land; \
              undo again once it's gone. The reason (at most {MAX_SUMMARY} characters) goes in the land log."
@@ -1050,7 +1058,9 @@ pub(crate) async fn undo_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, 
 }
 
 pub(crate) async fn undo_tool_with<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, args: &Value, opts: &Opts) -> Result<Value, String> {
-    if caller.hive.is_integration() {
+    // Undo follows who lands: with Landing = Ask me in the integration mode, every land into the
+    // Hive's branch was the human's, and so is undoing one.
+    if caller.hive.is_integration() && super::approval::asks_first(&caller.hive).is_some() {
         return Err(format!(
             "This Hive lands into {} with the human's approval, so Undo is theirs (the land log, or the worker's column menu): \
              ask them if a land should be undone.",
@@ -1163,7 +1173,9 @@ pub fn log_view(hive: &Hive, paths: &HivePaths) -> LandLogView {
             .filter(UndoState::open)
             .map(|u| UndoView { id: u.id, undoes: u.undoes, state: u.state, by: u.by, held_reason: u.held_reason, request: u.request })
             .collect(),
-        integration: hive.is_integration(),
+        // Read as "Undo is the human's alone": an integration Hive whose lands into its branch are
+        // approved one by one (Landing = Ask me, `undo_tool_with`).
+        integration: hive.is_integration() && super::approval::asks_first(hive).is_some(),
     }
 }
 

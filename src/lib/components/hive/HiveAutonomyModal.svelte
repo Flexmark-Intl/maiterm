@@ -7,8 +7,7 @@
   import type { Hive } from '$lib/tauri/types';
   import { hiveSetAutonomy } from '$lib/tauri/commands';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
-  import { CHECKPOINT_ROWS, formFor, lockedReason, NEVER_DELEGATED, TIMEOUT_MAX_MINUTES, TIMEOUT_MIN_MINUTES, toSave, validateForm, type AutonomyForm, type CheckpointValue } from '$lib/hive/autonomy';
-  import Tooltip from '$lib/components/Tooltip.svelte';
+  import { CHECKPOINT_ROWS, formFor, NEVER_DELEGATED, TIMEOUT_MAX_MINUTES, TIMEOUT_MIN_MINUTES, toSave, validateForm, type AutonomyForm, type CheckpointValue } from '$lib/hive/autonomy';
   import { modLabel } from '$lib/utils/platform';
   import { error as logError } from '@tauri-apps/plugin-log';
 
@@ -85,7 +84,6 @@
     <div class="body">
       <div class="rows" role="group" aria-label="Checkpoints">
         {#each CHECKPOINT_ROWS as row (row.key)}
-          {@const locked = lockedReason(hive, row.key)}
           <div class="row">
             <div class="what">
               <span class="name">{row.label}</span>
@@ -93,19 +91,13 @@
             </div>
             <div class="seg" role="radiogroup" aria-label={row.label}>
               {#each [['coordinator', 'Queen'], ['ask', 'Ask me']] as [v, text] (v)}
-                {#if locked && v === 'coordinator'}
-                  <Tooltip text={locked}>
-                    <button type="button" role="radio" aria-checked="false" disabled>{text}</button>
-                  </Tooltip>
-                {:else}
-                  <button
-                    type="button"
-                    role="radio"
-                    aria-checked={values[row.key] === v}
-                    class:on={values[row.key] === v}
-                    onclick={() => (values = { ...values, [row.key]: v as CheckpointValue })}
-                  >{text}</button>
-                {/if}
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={values[row.key] === v}
+                  class:on={values[row.key] === v}
+                  onclick={() => (values = { ...values, [row.key]: v as CheckpointValue })}
+                >{text}</button>
               {/each}
             </div>
           </div>
