@@ -1337,7 +1337,9 @@ timeout?}`. `hiveRun` is worker-only, and it is **not a free command string**:
   worktree, else `package.json` `engines.node` (an npm range), picks the newest installed Node
   that fits (Homebrew's Cellar, nvm, fnm, Volta, asdf, mise, nodenv), and its `bin` goes first on
   the job's PATH ahead of the shell's own (`PATH='<bin>':"$PATH"`). None fits: the job runs as
-  before and maiTerm logs it. A job whose entry sets PATH keeps its own. The brief tells each
+  before and maiTerm logs it. A job whose entry sets PATH keeps its own. A builder's first
+  setup gets the same Node (`launch::first_launch_setup`): an install on another one would
+  build native addons for an ABI its jobs can't load. The brief tells each
   worker which Node its jobs use, so its own shell can match.
 - **Resources.** Hive settings declare, per repo, what jobs need: `cargo` (CPU-heavy, 2 at a
   time), `tauri-dev` (one at a time: its ports and data folder), `e2e` (one: a browser and a

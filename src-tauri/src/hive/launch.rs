@@ -862,7 +862,11 @@ fn first_launch_setup(hive: &Hive, paths: &HivePaths, w: &WorkerRecord) -> Resul
                 }
             }
         }
-        prefix.push_str(&format!("( cd {} && export{exports} && {setup} ) && ", sh_quote(wt)));
+        // On the Node its jobs run on (`node::bin_for`): an install on another one builds native
+        // addons for the wrong ABI, or is refused by `engines`.
+        let wtp = Path::new(wt);
+        let node = super::node::bin_for(wtp, wtp).map(|b| format!(" PATH={}:\"$PATH\"", sh_quote(&b.to_string_lossy()))).unwrap_or_default();
+        prefix.push_str(&format!("( cd {} && export{exports}{node} && {setup} ) && ", sh_quote(wt)));
     }
     Ok(prefix)
 }

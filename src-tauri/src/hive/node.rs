@@ -188,10 +188,15 @@ fn version_of(name: &str) -> Option<Version> {
     Version::parse(v).ok()
 }
 
-/// Every Node the stores hold that has a `node` to run.
+/// Every Node the machine's stores hold that has a `node` to run.
 pub fn installed(home: Option<&Path>) -> Vec<Installed> {
+    installed_in(stores(home))
+}
+
+/// Every Node `stores` hold that has a `node` to run.
+fn installed_in(stores: Vec<(PathBuf, &'static str)>) -> Vec<Installed> {
     let mut out: Vec<Installed> = Vec::new();
-    for (store, rel) in stores(home) {
+    for (store, rel) in stores {
         let Ok(rd) = std::fs::read_dir(&store) else { continue };
         for e in rd.flatten() {
             let Some(version) = version_of(&e.file_name().to_string_lossy()) else { continue };
@@ -293,7 +298,8 @@ mod tests {
                 std::fs::write(bin.join("node"), "").unwrap();
             }
         }
-        let all = installed(Some(&base));
+        // Only the fixture's stores: the machine's own Nodes would decide the pick.
+        let all = installed_in(vec![(base.join(".nvm/versions/node"), "bin"), (base.join(".volta/tools/image/node"), "bin")]);
         let want = Want { any_of: npm_range(">=22.14.0 <23").unwrap(), from: String::new(), said: String::new() };
         let got = pick(&want, &all).expect("one fits");
         assert_eq!(got.version, v("22.23.5"), "the newest that fits; a folder with no node isn't a Node");
