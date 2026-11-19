@@ -91,10 +91,23 @@ pub struct Stamps {
     root_exclude: Option<(PathBuf, Stamp)>,
 }
 
+/// Tests: called as `Stamps::moved` starts, for a root whose path ends with the key, so a test
+/// can see what is held while it reads the disk (the hub's ignore lock must not be).
+#[cfg(test)]
+#[allow(clippy::type_complexity)]
+pub static MOVED_HOOKS: parking_lot::Mutex<Vec<(PathBuf, std::sync::Arc<dyn Fn() + Send + Sync>)>> = parking_lot::Mutex::new(Vec::new());
+
 impl Stamps {
     /// Reads the disk. The folders whose rules changed since they were read, and whether the
     /// root repository's `info/exclude` did.
     pub fn moved(&self) -> (Vec<String>, bool) {
+        #[cfg(test)]
+        {
+            let hooks: Vec<_> = MOVED_HOOKS.lock().iter().filter(|(r, _)| self.root.ends_with(r)).map(|h| h.1.clone()).collect();
+            for h in hooks {
+                h();
+            }
+        }
         let now = SystemTime::now();
         let folders = self
             .folders

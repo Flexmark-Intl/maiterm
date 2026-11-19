@@ -922,6 +922,57 @@ fn refresh_lists_an_open_folder_with_the_rules_on_disk() {
     }
 }
 
+/// The rules files are read off the disk with the hub's ignore lock released: a slow disk under
+/// a refresh, an edge or a fresh open must not hold up every listing and event that matches
+/// rows (docs/file-tree.md §6.1).
+#[test]
+fn rules_files_are_read_without_the_ignore_lock() {
+    let root = temp_root("rulesnolock");
+    git_init(&root);
+    std::fs::create_dir_all(root.join("pkg/gen")).unwrap();
+    std::fs::create_dir_all(root.join("other")).unwrap();
+    std::fs::write(root.join("pkg/.gitignore"), "gen/\n").unwrap();
+    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let probe = Probe::new(&ft);
+    let rec = Arc::new(Recorder::default());
+    let restore = vec![DirReq { rel: "".into(), known_gen: None }, DirReq { rel: "pkg".into(), known_gen: None }];
+    let ack = ft.open("w", &root.to_string_lossy(), restore, rec.clone(), vec![]).unwrap();
+    let hub = ft.hub_of(ack.sub_id).unwrap();
+    probe.watching(&hub);
+    probe.idle(&hub);
+    // Whether the hub's ignore lock is held, each time the rules files are read.
+    let seen: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+    let key = PathBuf::from(root.file_name().unwrap());
+    {
+        let seen = seen.clone();
+        let weak = Arc::downgrade(&hub);
+        super::ignore_cache::MOVED_HOOKS.lock().push((key.clone(), Arc::new(move || {
+            if let Some(h) = weak.upgrade() {
+                seen.lock().push(h.ignore.is_locked());
+            }
+        })));
+    }
+    let take = |what: &str| {
+        let got: Vec<bool> = seen.lock().drain(..).collect();
+        assert!(!got.is_empty(), "{what}: the rules files were read");
+        assert!(got.iter().all(|held| !held), "{what}: the ignore lock was held while the rules files were read: {got:?}");
+    };
+    hub.refresh(ack.sub_id, None);
+    probe.idle(&hub);
+    take("refresh");
+    let asked = hub.reconcile_asked();
+    hub.reconcile("");
+    probe.reconciled(&hub, asked);
+    probe.idle(&hub);
+    take("an edge");
+    hub.expand(ack.sub_id, vec![DirReq { rel: "other".into(), known_gen: None }]);
+    probe.idle(&hub);
+    take("a fresh open");
+    super::ignore_cache::MOVED_HOOKS.lock().retain(|(r, _)| r != &key);
+    ft.close(ack.sub_id);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 #[test]
 fn a_hub_is_reaped_after_its_grace() {
     let root = temp_root("reap");

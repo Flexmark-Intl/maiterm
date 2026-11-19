@@ -1130,7 +1130,9 @@ impl RootHub {
     /// Returns those folders.
     fn rules_pass(&self) -> Vec<String> {
         let open: Vec<String> = self.dirs.lock().keys().cloned().collect();
-        let (rules, exclude) = { self.ignore.lock().stamps(&open) }.moved();
+        // Its own statement: the guard drops before `moved` reads the disk.
+        let stamps = self.ignore.lock().stamps(&open);
+        let (rules, exclude) = stamps.moved();
         let forced = self.rules_moved(rules, exclude, None);
         if forced.is_empty() {
             return Vec::new();
@@ -1185,7 +1187,9 @@ impl RootHub {
             return;
         }
         let me = [rel.to_string()];
-        let (rules, exclude) = { self.ignore.lock().stamps(&me) }.moved();
+        // Its own statement: the guard drops before `moved` reads the disk.
+        let stamps = self.ignore.lock().stamps(&me);
+        let (rules, exclude) = stamps.moved();
         let forced = self.rules_moved(rules, exclude, Some(rel));
         if forced.is_empty() {
             return;
@@ -2352,7 +2356,8 @@ mod stall_tests {
         hub.jobs.lock().inflight.remove("pkg/sub");
         // And no edge would catch it afterwards: pkg's stamp is the new file's.
         let open = ["pkg/sub".to_string()];
-        let (moved, _) = { hub.ignore.lock().stamps(&open) }.moved();
+        let stamps = hub.ignore.lock().stamps(&open);
+        let (moved, _) = stamps.moved();
         probe.idle(&hub);
         ft.close(ack.sub_id);
         let _ = std::fs::remove_dir_all(&root);
