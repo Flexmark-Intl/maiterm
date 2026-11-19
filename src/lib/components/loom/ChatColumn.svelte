@@ -4,17 +4,25 @@
   a question, a task question, a watch script), answerable in place, and a composer. The header
   carries the chat's own state: model, effort, context.
 
-  One long-lived instance whose `source` changes, never {#key}-ed: drafts, attachments, bubbles
-  still on their way, a picked effort, open folds and the notes are kept per chat in here, so
-  switching chats keeps each one's. What belongs to a caller (the Loom's ritual, Release and
+  One long-lived instance whose `source` changes, never {#key}-ed: bubbles still on their way, a
+  picked effort, open folds and the notes are kept per chat in here, so switching chats keeps
+  each one's. Drafts and attachments are module state, so they also outlive the instance (a
+  Hive's column unmounts while another workspace is active). What belongs to a caller (the Loom's ritual, Release and
   Trigger) comes in as snippets: `header` after the gauges, `composerActions` at the composer's
   left (docs/hive.md §4.2).
 -->
 <script lang="ts" module>
   import type { Task } from '$lib/tauri/types';
   import type { ChatSource } from '$lib/loom/model';
+  import type { ComposerAttachment } from '$lib/composer/attachments';
 
   export type { ChatSource };
+
+  /** Drafts and attachments by chat (a tab id), kept outside any one instance: a Hive's column
+   *  unmounts whenever another workspace is active, and a draft typed there must be waiting on
+   *  return. Focus and a Hive showing one agent share its draft. */
+  const drafts = $state<Record<string, string>>({});
+  const attached = $state<Record<string, ComposerAttachment[]>>({});
 
   /** The task question a tab's agent waits on the human for: the list pins the chat on it, the
    *  column answers it. */
@@ -39,7 +47,7 @@
   import ContextMenu from '$lib/components/ContextMenu.svelte';
   import PromptCard from './PromptCard.svelte';
   import AttachmentChips from '$lib/components/composer/AttachmentChips.svelte';
-  import { fromPaths, mergeAttachments, pasteCarriesFiles, readPaste, type ComposerAttachment } from '$lib/composer/attachments';
+  import { fromPaths, mergeAttachments, pasteCarriesFiles, readPaste } from '$lib/composer/attachments';
   import { isModKey } from '$lib/utils/platform';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { dropPointToCss } from '$lib/utils/dropPoint';
@@ -262,8 +270,8 @@
     p === null ? 'var(--fg-dim)' : p >= 75 ? 'var(--red)' : p >= ((tabId ? overlordStore.checkpointThresholdFor(tabId) : null) ?? 60) ? 'var(--orange, #ff9e64)' : 'var(--green)';
 
   // ── Composer ──────────────────────────────────────────────────────────────────────────────
-  /** Drafts by chat, so switching chats never sends one agent's words to another. */
-  let drafts = $state<Record<string, string>>({});
+  /** Drafts by chat (module state, above), so switching chats never sends one agent's words to
+   *  another. */
   const draft = $derived(openId ? (drafts[openId] ?? '') : '');
   let sending = $state(false);
   /** `turns`: the chat's length when a wake note went up; the note is about a coordinator still
@@ -326,12 +334,11 @@
 
   // ── Attachments: the terminal composer's (lib/composer/attachments.ts) — Cmd+V of a screenshot
   //    or Finder files, a menu paste, a drop onto the composer — kept per chat like drafts. ──
-  let attached = $state<Record<string, ComposerAttachment[]>>({});
   const attachedHere = $derived(openId ? (attached[openId] ?? []) : []);
   const attach = (chat: string, items: ComposerAttachment[]) =>
-    (attached = { ...attached, [chat]: mergeAttachments(attached[chat] ?? [], items) });
+    (attached[chat] = mergeAttachments(attached[chat] ?? [], items));
   const unattach = (chat: string, index: number) =>
-    (attached = { ...attached, [chat]: (attached[chat] ?? []).filter((_, i) => i !== index) });
+    (attached[chat] = (attached[chat] ?? []).filter((_, i) => i !== index));
   let composerEl = $state<HTMLTextAreaElement | null>(null);
   let dockEl = $state<HTMLElement | null>(null);
   let dragOver = $state(false);
@@ -342,7 +349,7 @@
       if (r?.kind === 'attachments') attach(chat, r.items);
       else if (r?.kind === 'text' && composerEl && openId === chat) {
         composerEl.setRangeText(r.text, composerEl.selectionStart, composerEl.selectionEnd, 'end');
-        drafts = { ...drafts, [chat]: composerEl.value };
+        drafts[chat] = composerEl.value;
       }
     } catch (e) {
       sendNote = { chat, text: `Couldn't paste: ${e}` };
@@ -385,7 +392,7 @@
     const chat = openId;
     if (!chat || readOnly) return;
     if (paths.length) attach(chat, fromPaths(paths));
-    if (text) drafts = { ...drafts, [chat]: appendToDraft(drafts[chat] ?? '', text) };
+    if (text) drafts[chat] = appendToDraft(drafts[chat] ?? '', text);
     focusComposer();
   }
   // Assets dragged from the gallery onto this composer (pointer events: no HTML5 drop reaches
@@ -412,7 +419,7 @@
     const id = ++outSeq;
     // Attachments alone get no bubble: there is no text to recognise the echo by.
     const bubble = !!text.trim() && !neverEchoed(text);
-    attached = { ...attached, [chat]: [] };
+    attached[chat] = [];
     // The bubble goes up on the last poll's baseline, then takes a FRESH one before anything is
     // typed: the poll can be 3 s old, and a user turn written since (a message sent just before,
     // one from the phone) would otherwise read as this one being taken.
@@ -420,7 +427,7 @@
       seen: sameText(trs, text.trim()), lastUser: lastUserTurn(trs)?.msg_id ?? null, lastTurn: trs[trs.length - 1]?.msg_id ?? null,
     });
     if (bubble) outgoing = [...outgoing, { id, chat, text, sentAt: 0, ...baseline(turns) }];
-    drafts = { ...drafts, [chat]: '' };
+    drafts[chat] = '';
     pinned = true;
     if (bubble) {
       const fresh = await getTabTranscript(chat).catch(() => null);
@@ -428,7 +435,7 @@
     }
     const fail = (note: string) => {
       outgoing = outgoing.filter((o) => o.id !== id);
-      if (!(drafts[chat] ?? '').trim()) drafts = { ...drafts, [chat]: text };
+      if (!(drafts[chat] ?? '').trim()) drafts[chat] = text;
       if (files.length) attach(chat, files);
       sendNote = { chat, text: note };
     };
@@ -762,7 +769,7 @@
             rows="2"
             placeholder={composerPlaceholder ?? `Message ${name}… (paste or drop files to attach)`}
             value={draft}
-            oninput={(e) => (drafts = { ...drafts, [openId]: (e.currentTarget as HTMLTextAreaElement).value })}
+            oninput={(e) => (drafts[openId] = (e.currentTarget as HTMLTextAreaElement).value)}
             onkeydown={onComposerKey}
             onpaste={onComposerPaste}
             disabled={sending}
