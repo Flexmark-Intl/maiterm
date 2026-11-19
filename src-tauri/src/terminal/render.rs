@@ -460,7 +460,8 @@ pub fn buffer_text<T: EventListener>(term: &Term<T>) -> String {
         let mut s = String::with_capacity(cols);
         for c in 0..cols {
             let cell = &row[Column(c)];
-            if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            // The blank left at a row's end when a wide character moved to the next is no text.
+            if !cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
                 s.push(cell.c);
             }
         }

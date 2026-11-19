@@ -632,11 +632,20 @@ pub fn screen_tail(app: &AppState, pty: Option<&str>) -> String {
     lines[end.saturating_sub(TAIL_LINES)..end].join("\n")
 }
 
-/// All a job's terminal still holds (its scrollback and screen), or nothing once it is gone.
-pub fn screen_buffer(app: &AppState, pty: Option<&str>) -> String {
-    let Some(pty) = pty else { return String::new() };
+/// All a job's terminal still holds (its scrollback and screen), or nothing once it is gone,
+/// and whether the scrollback is full, so its start may have scrolled away.
+pub fn screen_buffer(app: &AppState, pty: Option<&str>) -> (String, bool) {
+    let Some(pty) = pty else { return (String::new(), false) };
+    let limit = app.app_data.read().preferences.scrollback_limit as usize;
     let registry = app.terminal_registry.read();
-    registry.get(pty).map(|h| crate::terminal::render::buffer_text(&h.term)).unwrap_or_default()
+    registry
+        .get(pty)
+        .map(|h| {
+            use alacritty_terminal::grid::Dimensions;
+            let full = h.term.grid().history_size() >= limit;
+            (crate::terminal::render::buffer_text(&h.term), full)
+        })
+        .unwrap_or_default()
 }
 
 /// The file a job's whole output is kept in, beside its profile and marks.
@@ -645,7 +654,8 @@ pub const OUTPUT_LOG: &str = "output.log";
 /// Keeps a finished job's whole output in its run folder, and answers the line its tail ends
 /// with so the reader can find it: the ⟦HIVE RUN⟧ and land messages show only the last lines.
 /// Nothing when there was no output or it couldn't be written (logged). Blocks.
-pub(crate) fn keep_output(paths: &HivePaths, job_id: &str, output: &str) -> Option<String> {
+/// `cut`: the terminal's scrollback was full, so its start may be gone, and the line says so.
+pub(crate) fn keep_output(paths: &HivePaths, job_id: &str, output: &str, cut: bool) -> Option<String> {
     if output.trim().is_empty() {
         return None;
     }
@@ -653,6 +663,10 @@ pub(crate) fn keep_output(paths: &HivePaths, job_id: &str, output: &str) -> Opti
     let file = dir.join(OUTPUT_LOG);
     let written = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, format!("{output}\n")));
     match written {
+        Ok(()) if cut => Some(format!(
+            "(maiTerm: its output, as far back as its terminal kept it, is in {}; it printed more than that, so its start is cut)",
+            file.display()
+        )),
         Ok(()) => Some(format!("(maiTerm: its whole output is in {})", file.display())),
         Err(e) => {
             log::warn!("hive: {job_id}'s output not kept: {e}");
@@ -927,7 +941,7 @@ pub(crate) async fn queue_reviewer_installs<W: HiveWindow>(ctx: &Ctx<'_, W>, cal
                     "⟦HIVE RUN⟧ `{words}` in {folder} wasn\u{2019}t queued for you: {}. Run it with hiveRun before you build or test.",
                     one_line(&e, 300)
                 );
-                let (d, key) = (dir.clone(), format!("install-{folder}-{}", queued.len()));
+                let (d, key) = (dir.clone(), format!("install-{}", uuid::Uuid::new_v4().simple()));
                 if let Err(e) = blocking(move || record_result(&d, &key, &text)).await {
                     log::warn!("hive {}: {} not told its install wasn't queued: {e}", caller.hive.id, worker_label(w));
                 }
