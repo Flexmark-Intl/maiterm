@@ -828,6 +828,12 @@
                 onclick={(e) => { e.stopPropagation(); if (workspace.id !== workspacesStore.activeWorkspaceId) handleItemClick(workspace.id); window.dispatchEvent(new CustomEvent('open-mesh-cockpit')); }}
               >{agentMeshStore.isLinkedMesh(workspace.id) ? 'MESH ⇄' : 'MESH'}</button>
             {/if}
+            {#if workspace.hive}
+              <!-- Not a button: opening the workspace already opens its Hive (docs/hive.md §4.1). -->
+              <Tooltip text="Hive: a coordinator and its workers">
+                <span class="hive-badge">HIVE</span>
+              </Tooltip>
+            {/if}
             {#if preferencesStore.overlordEnabled && !workspace.overlord}
               <!-- Overlord exemption for the whole workspace (docs/overlord.md §11). Stays
                    visible while exempt, not hover-only: an exemption you can't see is one
@@ -1298,6 +1304,19 @@
     opacity: 0.85;
   }
   .mesh-badge:hover { opacity: 1; }
+  /* The mesh tag's shape, in the yellow of honey so the two read apart at a glance. */
+  .hive-badge {
+    flex-shrink: 0;
+    font-size: 0.55rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    line-height: 1;
+    padding: 2px 4px;
+    border-radius: 3px;
+    color: var(--bg-dark);
+    background: var(--yellow, #e0af68);
+    opacity: 0.85;
+  }
 
   .tab-count-badge {
     flex-shrink: 0;
