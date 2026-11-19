@@ -1351,6 +1351,12 @@ async fn launch_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, reg: &R
     if let Some(label) = builder_label {
         // Its copies start with no packages: their installs queue now, sandboxed, as its own.
         let installs: Vec<String> = super::run::queue_reviewer_installs(ctx, caller, &w).await.into_iter().map(|(j, c)| format!("{j} ({c})")).collect();
+        let note = if installs.is_empty() {
+            "It reviews exactly these commits and answers with hiveVerdict, which reaches you as ⟦HIVE VERDICT⟧."
+        } else {
+            "It reviews exactly these commits and answers with hiveVerdict, which reaches you as ⟦HIVE VERDICT⟧. maiTerm queued \
+             its copies' installs (installs): don't install for it."
+        };
         return Ok(json!({
             "worker": w.slug,
             "badge": w.badge,
@@ -1360,8 +1366,7 @@ async fn launch_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, reg: &R
             "reviewed": w.reviewed,
             "folders": folders,
             "installs": installs,
-            "note": "It reviews exactly these commits and answers with hiveVerdict, which reaches you as ⟦HIVE VERDICT⟧. maiTerm queued \
-                     its copies' installs (installs): don't install for it.",
+            "note": note,
         }));
     }
     Ok(json!({

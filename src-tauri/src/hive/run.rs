@@ -602,6 +602,9 @@ pub fn result_message(job: &Job, tail: &str) -> String {
             _ => "your worktree had uncommitted changes to tracked files when it started".to_string(),
         };
         out.push_str(&format!("\nThis run is no receipt: {why}. Commit, then run it again."));
+    } else if is_pass(job) && job.branch.is_none() && job.registries {
+        // An install proves its copies have packages, nothing about the builder's work.
+        out.push_str("\nIts packages are installed: you can build and test now.");
     } else if is_pass(job) && job.branch.is_none() {
         // Only a reviewer's copies are detached: its runs are evidence for its verdict, never receipts.
         out.push_str(&format!("\nCite it ({}) as evidence in your hiveVerdict.", job.id));
@@ -897,32 +900,42 @@ pub(crate) async fn run_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, a
 /// its profile, registries through the proxy, its result a ⟦HIVE RUN⟧ to it. What was queued,
 /// as `(job, command)`; a folder that couldn't be queued is logged and left to the reviewer.
 pub(crate) async fn queue_reviewer_installs<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord) -> Vec<(String, String)> {
-    let mut wanted: Vec<RunArgs> = Vec::new();
-    for f in w.git_folders().filter(|f| f.worktree.is_some()) {
-        let Some(hf) = caller.hive.git_folders().find(|h| h.name == f.name) else { continue };
-        for i in super::deps::detect(std::path::Path::new(&hf.path)) {
-            wanted.push(RunArgs { argv: i.setup.split_whitespace().map(str::to_string).collect(), folder: Some(f.name.clone()), timeout_s: 0 });
+    let mine: Vec<&str> = w.git_folders().filter(|f| f.worktree.is_some()).map(|f| f.name.as_str()).collect();
+    let wanted: Vec<RunArgs> = super::deps::lockfile_setups(&caller.hive, &mine)
+        .into_iter()
+        .map(|(folder, setup)| RunArgs { argv: setup.split_whitespace().map(str::to_string).collect(), folder: Some(folder), timeout_s: 0 })
+        .collect();
+    let dir = match worker::task_dir(&caller.paths, &w.task_id) {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!("hive {}: {}'s installs not queued: {e}", caller.hive.id, worker_label(w));
+            return Vec::new();
         }
-    }
+    };
     let stack = workspace_stack(ctx.data, caller);
     let mut queued = Vec::new();
     for a in wanted {
         let (c, rec, st, args) = (caller.clone(), w.clone(), stack.clone(), a.clone());
+        let words = a.argv.join(" ");
+        let folder = a.folder.clone().unwrap_or_default();
         let job = match blocking(move || build_spec(&c, &rec, &args, &st)).await.and_then(queue::enqueue) {
             Ok(j) => j,
             Err(e) => {
-                log::warn!("hive {}: {}'s install `{}` not queued: {e}", caller.hive.id, worker_label(w), a.argv.join(" "));
+                // Its brief says this was queued: it hears otherwise, as a result it is owed.
+                log::warn!("hive {}: {}'s install `{words}` not queued: {e}", caller.hive.id, worker_label(w));
+                let text = format!(
+                    "⟦HIVE RUN⟧ `{words}` in {folder} wasn\u{2019}t queued for you: {}. Run it with hiveRun before you build or test.",
+                    one_line(&e, 300)
+                );
+                let (d, key) = (dir.clone(), format!("install-{folder}-{}", queued.len()));
+                if let Err(e) = blocking(move || record_result(&d, &key, &text)).await {
+                    log::warn!("hive {}: {} not told its install wasn't queued: {e}", caller.hive.id, worker_label(w));
+                }
                 continue;
             }
         };
         let cmd = job.argv.join(" ");
-        let dir = match worker::task_dir(&caller.paths, &w.task_id) {
-            Ok(d) => d,
-            Err(e) => {
-                log::warn!("hive {}: {} not recorded as open for {}: {e}", caller.hive.id, job.id, worker_label(w));
-                continue;
-            }
-        };
+        let dir = dir.clone();
         let (id, c2) = (job.id.clone(), cmd.clone());
         if let Err(e) = blocking(move || record_open(&dir, &id, &c2)).await {
             log::warn!("hive {}: {} not recorded as open for {}: {e}", caller.hive.id, job.id, worker_label(w));

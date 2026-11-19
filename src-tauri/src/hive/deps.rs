@@ -225,6 +225,17 @@ pub fn installs_in(hive: &Hive, folders: &[&str]) -> Vec<(String, String)> {
     out
 }
 
+/// Each of `folders`' frozen lockfile installs (`Installer::setup`), read from the human's
+/// checkouts: what a reviewer's launch queues for it (`run::queue_reviewer_installs`) and its
+/// brief says was queued. Reads the disk.
+pub fn lockfile_setups(hive: &Hive, folders: &[&str]) -> Vec<(String, &'static str)> {
+    let mut out = Vec::new();
+    for f in hive.git_folders().filter(|f| folders.contains(&f.name.as_str())) {
+        out.extend(detect(Path::new(&f.path)).into_iter().map(|i| (f.name.clone(), i.setup)));
+    }
+    out
+}
+
 /// Each git folder's installs as queued commands of their own, read from the human's checkout's
 /// lockfiles, for a worker that changed a manifest (§6.8): beside the land checks, never over an
 /// entry of the human's that already matches. No needs or leases; the job gets its caches and the

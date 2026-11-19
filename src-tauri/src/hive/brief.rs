@@ -271,11 +271,18 @@ fn deps_line(hive: &Hive, folders: &[&str], setup_ran: bool) -> String {
         out.push_str(&format!("- Dependencies: your folders\u{2019} setup ran in your worktrees before you started ({}).", setups.join("; ")));
     }
     if !installs.is_empty() {
+        // What a reviewer's launch queues for it (`run::queue_reviewer_installs`): the same list.
+        let queued: Vec<String> = if setup_ran { Vec::new() } else { super::deps::lockfile_setups(hive, folders).into_iter().map(|(f, s)| format!("`{s}` in {f}")).collect() };
         let when = if setup_ran {
-            "After you change a manifest, reinstall"
+            "After you change a manifest, reinstall".to_string()
+        } else if queued.is_empty() {
+            "Nothing installed your copies\u{2019} dependencies: before you build or test, install them".to_string()
         } else {
-            "maiTerm queued your copies\u{2019} installs as you started: wait for their ⟦HIVE RUN⟧ results before you \
-             build or test, and if one failed or never came, install"
+            format!(
+                "maiTerm queued {} for you as you started: wait for the ⟦HIVE RUN⟧ result before you build or test, and if one \
+                 failed, install",
+                queued.join("; ")
+            )
         };
         out.push_str(&format!(
             "{}Your own shell can\u{2019}t install packages (the sandbox refuses the `.vscode` folders packages ship). {when} \
@@ -994,7 +1001,17 @@ mod tests {
         assert!(line.contains("reinstall with `hiveRun` (`pnpm install` in web)") && line.contains("`.vscode`"), "{line}");
         let reviewer = deps_line(&h, &["web"], false);
         assert!(!reviewer.contains("setup ran") && reviewer.starts_with("- Dependencies: Your own shell"), "{reviewer}");
-        assert!(reviewer.contains("maiTerm queued your copies\u{2019} installs as you started"), "{reviewer}");
+        assert!(reviewer.contains("maiTerm queued `pnpm install --frozen-lockfile` in web for you as you started"), "{reviewer}");
+        // Only what the launch queues is said to be queued: a human's install entry with no
+        // lockfile behind it is the reviewer's to run.
+        let bare = std::env::temp_dir().join(format!("hive-brief-bare-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&bare).unwrap();
+        let mut h2 = h.clone();
+        h2.folders[0].path = bare.to_string_lossy().to_string();
+        h2.settings.run_queue.commands.push(crate::hive::record::QueuedCommand { folder: "web".into(), prefix: "npm install".into(), ..Default::default() });
+        let r2 = deps_line(&h2, &["web"], false);
+        assert!(r2.contains("Nothing installed your copies\u{2019} dependencies") && !r2.contains("queued"), "{r2}");
+        let _ = std::fs::remove_dir_all(&bare);
         assert_eq!(deps_line(&h, &["api"], true), "", "only its own folders");
         // A broader entry of the human's covers the detected install: it's still the way in.
         h.settings.run_queue.commands.push(crate::hive::record::QueuedCommand { folder: "web".into(), prefix: "pnpm".into(), ..Default::default() });
@@ -1017,7 +1034,7 @@ mod tests {
         h.settings.run_queue.commands.clear();
         let reviewer = WorkerRecord { reviews: Some("t-auth".into()), ..w.clone() };
         let b = reviewer_brief_md(&h, &p, &reviewer, "", None, &[], McpConfigs::default());
-        assert!(b.contains("never came, install with `hiveRun` (`pnpm install` in web)") && !b.contains("setup ran"), "{b}");
+        assert!(b.contains("if one failed, install with `hiveRun` (`pnpm install` in web)") && !b.contains("setup ran"), "{b}");
         assert!(b.contains("Nothing but the installs is queued") && !b.contains("Nothing is queued"), "{b}");
         let b = worker_brief_md(&h, &p, &w, "", None, &[], McpConfigs::default());
         assert!(b.contains("setup ran in your worktrees") && b.contains("Nothing but the installs is queued"), "{b}");
