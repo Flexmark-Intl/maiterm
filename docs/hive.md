@@ -1341,6 +1341,11 @@ timeout?}`. `hiveRun` is worker-only, and it is **not a free command string**:
   setup gets the same Node (`launch::first_launch_setup`): an install on another one would
   build native addons for an ABI its jobs can't load. The brief tells each
   worker which Node its jobs use, so its own shell can match.
+- **A job's whole output is kept** (2026-11-19): as it ends, everything its terminal still holds
+  (scrollback and screen, wrapped lines joined, `terminal::render::buffer_text`) is written to
+  `runs/<job>/output.log`, and its tail ends with a maiTerm line naming that file, so a
+  ⟦HIVE RUN⟧ or a failed land check's message (which quote only the last lines) leads to the
+  rest. It holds what the tab's scrollback limit kept.
 - **Resources.** Hive settings declare, per repo, what jobs need: `cargo` (CPU-heavy, 2 at a
   time), `tauri-dev` (one at a time: its ports and data folder), `e2e` (one: a browser and a
   port), `gpu` (one: ComfyUI), `migrate:<db>` (exclusive per namespace). A job starts when
