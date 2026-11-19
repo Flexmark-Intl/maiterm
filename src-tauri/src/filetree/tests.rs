@@ -669,6 +669,12 @@ fn an_edge_relists_what_the_watcher_never_reported() {
 
     // Expanding a folder whose mtime moved lists it again rather than answering from the
     // snapshot; one that didn't is answered from the snapshot.
+    // The edges above left a/ listed young, so untrusted: age it and let an edge list it again,
+    // so its snapshot carries a trusted mtime that late.txt then moves.
+    age(&[&a]);
+    let asked = hub.reconcile_asked();
+    ft.note_command_in(&a);
+    assert!(probe.reconciled(&hub, asked).contains("a"));
     std::fs::write(a.join("late.txt"), "").unwrap();
     // Aged before this listing, so the one it records is trusted and the idle edge below has
     // nothing to re-list.
