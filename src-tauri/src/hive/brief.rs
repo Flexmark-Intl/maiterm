@@ -274,7 +274,8 @@ fn deps_line(hive: &Hive, folders: &[&str], setup_ran: bool) -> String {
         let when = if setup_ran {
             "After you change a manifest, reinstall"
         } else {
-            "Nothing installed your copies\u{2019} dependencies: before you build or test, install them"
+            "maiTerm queued your copies\u{2019} installs as you started: wait for their ⟦HIVE RUN⟧ results before you \
+             build or test, and if one failed or never came, install"
         };
         out.push_str(&format!(
             "{}Your own shell can\u{2019}t install packages (the sandbox refuses the `.vscode` folders packages ship). {when} \
@@ -993,7 +994,7 @@ mod tests {
         assert!(line.contains("reinstall with `hiveRun` (`pnpm install` in web)") && line.contains("`.vscode`"), "{line}");
         let reviewer = deps_line(&h, &["web"], false);
         assert!(!reviewer.contains("setup ran") && reviewer.starts_with("- Dependencies: Your own shell"), "{reviewer}");
-        assert!(reviewer.contains("Nothing installed your copies\u{2019} dependencies"), "{reviewer}");
+        assert!(reviewer.contains("maiTerm queued your copies\u{2019} installs as you started"), "{reviewer}");
         assert_eq!(deps_line(&h, &["api"], true), "", "only its own folders");
         // A broader entry of the human's covers the detected install: it's still the way in.
         h.settings.run_queue.commands.push(crate::hive::record::QueuedCommand { folder: "web".into(), prefix: "pnpm".into(), ..Default::default() });
@@ -1016,7 +1017,7 @@ mod tests {
         h.settings.run_queue.commands.clear();
         let reviewer = WorkerRecord { reviews: Some("t-auth".into()), ..w.clone() };
         let b = reviewer_brief_md(&h, &p, &reviewer, "", None, &[], McpConfigs::default());
-        assert!(b.contains("install them with `hiveRun` (`pnpm install` in web)") && !b.contains("setup ran"), "{b}");
+        assert!(b.contains("never came, install with `hiveRun` (`pnpm install` in web)") && !b.contains("setup ran"), "{b}");
         assert!(b.contains("Nothing but the installs is queued") && !b.contains("Nothing is queued"), "{b}");
         let b = worker_brief_md(&h, &p, &w, "", None, &[], McpConfigs::default());
         assert!(b.contains("setup ran in your worktrees") && b.contains("Nothing but the installs is queued"), "{b}");

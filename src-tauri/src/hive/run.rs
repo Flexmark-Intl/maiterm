@@ -861,6 +861,52 @@ pub(crate) async fn run_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, a
     Ok(v)
 }
 
+/// A reviewer's installs, queued for it as it launches (§7.7): its copies are the builder's
+/// unlanded code, so the folders' setup never runs there unsandboxed, and it used to start with
+/// no packages and spend its first turns asking for them. Each git folder's lockfile install
+/// (`deps::Installer::setup`, the frozen one) runs as the reviewer's own `hiveRun` would: under
+/// its profile, registries through the proxy, its result a ⟦HIVE RUN⟧ to it. What was queued,
+/// as `(job, command)`; a folder that couldn't be queued is logged and left to the reviewer.
+pub(crate) async fn queue_reviewer_installs<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord) -> Vec<(String, String)> {
+    let mut wanted: Vec<RunArgs> = Vec::new();
+    for f in w.git_folders().filter(|f| f.worktree.is_some()) {
+        let Some(hf) = caller.hive.git_folders().find(|h| h.name == f.name) else { continue };
+        for i in super::deps::detect(std::path::Path::new(&hf.path)) {
+            wanted.push(RunArgs { argv: i.setup.split_whitespace().map(str::to_string).collect(), folder: Some(f.name.clone()), timeout_s: 0 });
+        }
+    }
+    let stack = workspace_stack(ctx.data, caller);
+    let mut queued = Vec::new();
+    for a in wanted {
+        let (c, rec, st, args) = (caller.clone(), w.clone(), stack.clone(), a.clone());
+        let job = match blocking(move || build_spec(&c, &rec, &args, &st)).await.and_then(queue::enqueue) {
+            Ok(j) => j,
+            Err(e) => {
+                log::warn!("hive {}: {}'s install `{}` not queued: {e}", caller.hive.id, worker_label(w), a.argv.join(" "));
+                continue;
+            }
+        };
+        let cmd = job.argv.join(" ");
+        let dir = match worker::task_dir(&caller.paths, &w.task_id) {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!("hive {}: {} not recorded as open for {}: {e}", caller.hive.id, job.id, worker_label(w));
+                continue;
+            }
+        };
+        let (id, c2) = (job.id.clone(), cmd.clone());
+        if let Err(e) = blocking(move || record_open(&dir, &id, &c2)).await {
+            log::warn!("hive {}: {} not recorded as open for {}: {e}", caller.hive.id, job.id, worker_label(w));
+        }
+        log::info!("hive {}: queued {} ({cmd}) for reviewer {}", caller.hive.id, job.id, worker_label(w));
+        queued.push((job.id, cmd));
+    }
+    if !queued.is_empty() {
+        ctx.window.workers_changed(&caller.workspace_id);
+    }
+    queued
+}
+
 /// `hiveRunPriority`: a job of the coordinator's own Hive, to the top or one place up.
 pub(crate) async fn priority_tool(caller: &Caller, args: &Value) -> Result<Value, String> {
     let id = args.get("job").and_then(Value::as_str).map(str::trim).unwrap_or_default();

@@ -4101,7 +4101,11 @@ several releases a day).
    scratch (measured: a skill and a subagent in an add-dir were listed under `project`, not under
    `local`). The copies go in as `--add-dir`, no
    `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD`, no setup commands (they would run the builder's
-   code unsandboxed), and the builder's scratch readable. `hive/probe.rs`
+   code unsandboxed), and the builder's scratch readable. Instead each copy's lockfile install
+   (the frozen one, `npm ci`) is queued for the reviewer as it launches
+   (`run::queue_reviewer_installs`, 2026-11-19): a job under its own profile with the
+   registries through the proxy, a run it is owed, so it starts building once the ⟦HIVE RUN⟧
+   arrives rather than spending turns asking for packages. `hive/probe.rs`
    `hive_reviewer_never_loads_the_reviewed_branchs_settings_probe` planted a SessionStart and
    UserPromptSubmit hook, a CLAUDE.md, a skill, a slash command and a subagent on the branch: none
    loaded, and maiTerm's own `--settings` hooks still ran (run, passes, 2.1.310; under `project`
@@ -5023,7 +5027,8 @@ several releases a day).
    worktree's own (`an_install_job_writes_node_modules_config_and_reaches_only_the_registry_proxy`
    runs it under `sandbox-exec`; `real_pnpm_install_probe`, ignored, installed a real package
    through the proxy). Workers' briefs say the setup ran and how to reinstall; reviewers', whose
-   copies get no setup, say to install through `hiveRun` before building.
+   copies get no setup, say their installs were queued as they started and to wait for the
+   results (or install through `hiveRun` if one failed).
 10. New goal (§11.5). **Backend built** (2026-10-31): `hive/new_goal.rs` (`hive_new_goal_preview`,
    `hive_new_goal`, `hive_ask_queen_to_land`), `Hive.chapters` and `HiveChapter`, `WorkerRecord.chapter` and
    `SessionEntry.chapter`, `worker::current_workers` under `finish::check` and the board, `tools::free_slug`,

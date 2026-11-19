@@ -1349,6 +1349,8 @@ async fn launch_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, reg: &R
         .map(|f| json!({ "name": f.name, "kind": f.kind, "branch": f.branch, "worktree": f.worktree, "target": f.target }))
         .collect();
     if let Some(label) = builder_label {
+        // Its copies start with no packages: their installs queue now, sandboxed, as its own.
+        let installs: Vec<String> = super::run::queue_reviewer_installs(ctx, caller, &w).await.into_iter().map(|(j, c)| format!("{j} ({c})")).collect();
         return Ok(json!({
             "worker": w.slug,
             "badge": w.badge,
@@ -1357,7 +1359,9 @@ async fn launch_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, reg: &R
             "reviews": label,
             "reviewed": w.reviewed,
             "folders": folders,
-            "note": "It reviews exactly these commits and answers with hiveVerdict, which reaches you as ⟦HIVE VERDICT⟧.",
+            "installs": installs,
+            "note": "It reviews exactly these commits and answers with hiveVerdict, which reaches you as ⟦HIVE VERDICT⟧. maiTerm queued \
+                     its copies' installs (installs): don't install for it.",
         }));
     }
     Ok(json!({
@@ -3739,6 +3743,28 @@ mod tests {
         assert_eq!(rig.ws().tasks.into_iter().find(|t| t.id == r.task_id).unwrap().status, "done");
         assert_eq!(rig.headroom().live, 1);
         rig.spawn(accept, args("Third")).await.expect("the slot is free again");
+    }
+
+    /// A reviewer's copies hold the builder's unlanded code, so setup never runs there: their
+    /// lockfile installs queue for it as it launches, sandboxed, each a run it is owed.
+    #[tokio::test]
+    async fn a_reviewer_s_installs_are_queued_as_it_launches() {
+        let rig = Rig::new("review-installs", 3);
+        fs::write(rig.web.join("package-lock.json"), "{}").unwrap();
+        let b = rig.reported("Login").await;
+        let out = rig.spawn(accept, json!({ "title": "Review login", "role": "code-reviewer", "brief": "b", "reviews": b.slug })).await.unwrap();
+        let installs: Vec<String> = out["installs"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        assert_eq!(installs.len(), 1, "{out}");
+        assert!(installs[0].ends_with("(npm ci)"), "the frozen install, never npm install: {installs:?}");
+        let r = worker::list_workers(&rig.caller.paths).into_iter().find(|w| w.title == "Review login").unwrap();
+        let job = crate::hive::queue::job(installs[0].split(' ').next().unwrap()).expect("queued");
+        assert_eq!((job.task_id.as_str(), job.registries), (r.task_id.as_str(), true), "the reviewer's own install, registries reachable");
+        assert!(job.target.ends_with(rig.worktree(&r, "web").to_string_lossy().as_ref()), "in its copy: {}", job.target);
+        assert!(r.pending_runs.iter().any(|p| p.job == job.id && p.state == worker::RUN_OPEN), "it is owed the result");
+        // A builder's launch queues nothing: its setup ran.
+        let w = rig.worker("Signup").await;
+        assert!(rig.record(&w.task_id).pending_runs.is_empty());
+        crate::hive::queue::release_worker(&r.task_id, "test over");
     }
 
     #[tokio::test]
