@@ -287,6 +287,37 @@ fn deps_line(hive: &Hive, folders: &[&str], setup_ran: bool) -> String {
     if !out.is_empty() {
         out.push('\n');
     }
+    out.push_str(&node_line(hive, folders));
+    out
+}
+
+/// The Node each of `folders` asks for and the one its jobs run on (`node::bin_for`), so the
+/// worker's own shell can match: it starts on the human's default `node`. Read in the human's
+/// checkout of each folder. Nothing for a folder that names no Node. Reads the disk.
+fn node_line(hive: &Hive, folders: &[&str]) -> String {
+    let home = dirs::home_dir();
+    let installed = super::node::installed(home.as_deref());
+    let mut out = String::new();
+    for f in hive.git_folders().filter(|f| folders.contains(&f.name.as_str())) {
+        let dir = std::path::Path::new(&f.path);
+        let Some(want) = super::node::wanted_in(dir) else { continue };
+        let said = format!("{} says `{}`", want.from, want.said);
+        out.push_str(&match super::node::pick(&want, &installed) {
+            Some(i) => format!(
+                "- Node in {}: {said}, so your `hiveRun` jobs there run on Node {} (`{}` first on PATH). Your own shell starts on \
+                 the machine\u{2019}s default `node`: run Node commands there as `export PATH=\"{}:$PATH\"; …` to match.\n",
+                f.name,
+                i.version,
+                i.bin.display(),
+                i.bin.display()
+            ),
+            None => format!(
+                "- Node in {}: {said}, and no installed Node fits, so its jobs run on the machine\u{2019}s default `node`. Tell your \
+                 coordinator if an install or a check fails on the version.\n",
+                f.name
+            ),
+        });
+    }
     out
 }
 

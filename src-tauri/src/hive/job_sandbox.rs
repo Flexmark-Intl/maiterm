@@ -174,6 +174,9 @@ pub struct LineSpec {
     /// Set for the job, in order: `TMPDIR`, the worker's `CARGO_TARGET_DIR`, `CARGO_NET_OFFLINE`,
     /// then the queued command's, already expanded.
     pub env: Vec<(String, String)>,
+    /// A folder put first on the shell's own PATH (`node::bin_for`): the Node the folder asks
+    /// for. Left out when the job's env sets PATH itself.
+    pub path_first: Option<PathBuf>,
     pub profile: PathBuf,
     pub argv: Vec<String>,
     pub pass_mark: PathBuf,
@@ -227,6 +230,10 @@ fn line_text(l: &LineSpec) -> Result<String, String> {
         }
         plain_word(&format!("{k}'s value"), v)?;
         line.push_str(&format!(" {k}={}", sh_quote(v)));
+    }
+    // `"$PATH"` is the shell's, expanded where the line is typed: the human's PATH, behind it.
+    if let Some(bin) = l.path_first.as_ref().filter(|_| !l.env.iter().any(|(k, _)| k == "PATH")) {
+        line.push_str(&format!(" PATH={}:\"$PATH\"", abs("The job's Node", bin)?));
     }
     line.push_str(&format!(" {SANDBOX_EXEC} -f {}", abs("The job's profile", &l.profile)?));
     for a in &l.argv {
@@ -378,6 +385,7 @@ mod tests {
                 ("CARGO_NET_OFFLINE".into(), "true".into()),
                 ("DATABASE_URL".into(), "postgres://localhost/app_auth".into()),
             ],
+            path_first: None,
             profile: PathBuf::from("/h/runs/j-0000abcd/profile.sb"),
             argv: vec!["cargo".into(), "test".into(), "--".into(), "it's".into()],
             pass_mark: PathBuf::from("/h/runs/j-0000abcd/passed"),
@@ -399,6 +407,22 @@ mod tests {
              && /usr/bin/touch '/h/runs/j-0000abcd/passed'; /usr/bin/touch '/h/runs/j-0000abcd/exited'"
         );
         assert!(!got.contains("sh -c"));
+    }
+
+    /// The folder's Node goes first on the shell's own PATH; a job whose env sets PATH keeps its own.
+    #[cfg(unix)]
+    #[test]
+    fn the_folders_node_goes_first_on_the_path() {
+        let mut l = line();
+        l.path_first = Some(PathBuf::from("/opt/homebrew/Cellar/node@22/22.23.5/bin"));
+        let got = line_text(&l).unwrap();
+        assert!(got.contains(" PATH='/opt/homebrew/Cellar/node@22/22.23.5/bin':\"$PATH\" /usr/bin/sandbox-exec "), "{got}");
+        l.env.push(("PATH".into(), "/usr/bin".into()));
+        let got = line_text(&l).unwrap();
+        assert!(got.contains(" PATH='/usr/bin' /usr/bin/sandbox-exec ") && !got.contains("node@22"), "{got}");
+        l.env.pop();
+        l.path_first = Some(PathBuf::from("node/bin"));
+        assert!(line_text(&l).is_err(), "never a relative folder");
     }
 
     #[cfg(unix)]

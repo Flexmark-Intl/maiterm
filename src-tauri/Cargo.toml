@@ -16,6 +16,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # Already in the tree via regex; direct for scanning the Claude binary for hook event names.
 memchr = "2.8"
+# Already in the tree; direct for matching a Hive folder's Node range to an installed Node.
+semver = "1"
 tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-shell = "2"
 tauri-plugin-fs = "2"

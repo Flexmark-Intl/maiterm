@@ -1330,6 +1330,15 @@ timeout?}`. `hiveRun` is worker-only, and it is **not a free command string**:
   unsandboxed execution. A job's network is closed but for loopback to its own ports; a package
   install also reaches the registries the worker's sandbox allows, and nothing else, through
   maiTerm's registry proxy (`registry_proxy`, §16 "First real-use fixes").
+- **A job runs on the Node its folder asks for** (`hive/node.rs`, 2026-11-19). Its line is typed
+  into a shell at the human's default PATH, so `npm ci` ran on Node 24 while the repo's
+  `engines` wanted 22: refused, or forced past and adding a package that broke `npm ci` on 22.
+  The nearest `.nvmrc`, `.node-version` or `.tool-versions` from the job's folder up to its
+  worktree, else `package.json` `engines.node` (an npm range), picks the newest installed Node
+  that fits (Homebrew's Cellar, nvm, fnm, Volta, asdf, mise, nodenv), and its `bin` goes first on
+  the job's PATH ahead of the shell's own (`PATH='<bin>':"$PATH"`). None fits: the job runs as
+  before and maiTerm logs it. A job whose entry sets PATH keeps its own. The brief tells each
+  worker which Node its jobs use, so its own shell can match.
 - **Resources.** Hive settings declare, per repo, what jobs need: `cargo` (CPU-heavy, 2 at a
   time), `tauri-dev` (one at a time: its ports and data folder), `e2e` (one: a browser and a
   port), `gpu` (one: ComfyUI), `migrate:<db>` (exclusive per namespace). A job starts when

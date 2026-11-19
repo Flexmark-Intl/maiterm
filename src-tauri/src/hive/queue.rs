@@ -1644,10 +1644,14 @@ pub(crate) fn prepare_in(data: &parking_lot::RwLock<AppData>, job: &Job, paths: 
         line_env.retain(|(o, _)| o != "HOST");
         line_env.push(("HOST".to_string(), "127.0.0.1".to_string()));
     }
+    // The Node the folder asks for, not the shell's default (an install on the wrong one is
+    // refused by `engines`, or forced past it and breaks the lockfile for everyone).
+    let root = std::fs::canonicalize(&worktree).map(|p| crate::share::canon(&p)).unwrap_or_else(|_| worktree.clone());
     let line = super::job_sandbox::job_line(&super::job_sandbox::LineSpec {
         cwd: cwd.clone(),
         unset: super::launch::unset_vars(&prefs),
         env: line_env,
+        path_first: super::node::bin_for(&cwd, &root),
         profile: profile_path,
         argv,
         pass_mark: mark,

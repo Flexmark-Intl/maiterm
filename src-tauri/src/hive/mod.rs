@@ -80,6 +80,7 @@ pub mod layout;
 pub mod media;
 pub mod memory;
 pub mod new_goal;
+pub mod node;
 pub mod owed;
 pub mod paths;
 pub mod phone;

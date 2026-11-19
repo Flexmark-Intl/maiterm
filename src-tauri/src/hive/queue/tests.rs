@@ -787,6 +787,7 @@ fn job_sandbox_probe() {
             cwd: wt.clone(),
             unset: vec!["CLAUDECODE".into()],
             env: vec![("TMPDIR".into(), paths.worker_job_tmp("auth").to_string_lossy().to_string()), ("CARGO_NET_OFFLINE".into(), "true".into())],
+            path_first: None,
             profile: profile_file.clone(),
             argv,
             pass_mark: run_dir.join(PASS_MARK),
