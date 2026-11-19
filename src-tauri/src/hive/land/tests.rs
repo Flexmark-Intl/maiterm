@@ -835,6 +835,41 @@ fn seeding_never_writes_through_a_link_the_merged_tree_tracks() {
     assert!(fs::read_dir(&elsewhere).unwrap().next().is_none(), "nothing went through the link");
 }
 
+/// A check of Base alone starts from the human checkout's installed packages, at any depth,
+/// and from nothing else it ignores: never its `.env`, never through a link.
+#[cfg(unix)] // seeding copies with /bin/cp
+#[test]
+fn a_base_check_starts_from_the_checkouts_packages_only() {
+    let base = std::env::temp_dir().join(format!("hive-seed-deps-{}", uuid::Uuid::new_v4().simple()));
+    let repo = base.join("repo");
+    fs::create_dir_all(repo.join("packages/a")).unwrap();
+    git(&repo, &["init", "-q"]);
+    fs::write(repo.join(".gitignore"), "node_modules/\n.env\n.venv/\nbuild/\n").unwrap();
+    fs::write(repo.join("packages/a/index.js"), "x").unwrap();
+    for d in ["node_modules/pkg", "packages/a/node_modules/dep", "build", ".venv/bin"] {
+        fs::create_dir_all(repo.join(d)).unwrap();
+        fs::write(repo.join(d).join("f"), "x").unwrap();
+    }
+    fs::write(repo.join(".env"), "SECRET=1").unwrap();
+    let tmp = base.join("tmp");
+    fs::create_dir_all(&tmp).unwrap();
+    // `packages` is a link in the temporary worktree: nothing is seeded through it.
+    let elsewhere = base.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, tmp.join("packages")).unwrap();
+    let mut seeded = git::seed_dependencies(&repo, &tmp);
+    seeded.sort();
+    assert_eq!(seeded, vec![".venv".to_string(), "node_modules".to_string()], "{seeded:?}");
+    assert_eq!(fs::read_to_string(tmp.join("node_modules/pkg/f")).unwrap(), "x");
+    assert!(fs::symlink_metadata(tmp.join(".env")).is_err() && fs::symlink_metadata(tmp.join("build")).is_err());
+    assert!(fs::read_dir(&elsewhere).unwrap().next().is_none(), "nothing went through the link");
+    // With `packages` a real folder, the nested one is found too.
+    fs::remove_file(tmp.join("packages")).unwrap();
+    fs::create_dir_all(tmp.join("packages/a")).unwrap();
+    assert_eq!(git::seed_dependencies(&repo, &tmp), vec!["packages/a/node_modules".to_string()], "the others are there already");
+    let _ = fs::remove_dir_all(&base);
+}
+
 /// The third live test logged `seeded web from worker …'s worktree: .claude`. Agent config the
 /// config rule lists, the human's extra paths included, never reaches a check's tree.
 #[cfg(unix)] // seeding copies with /bin/cp

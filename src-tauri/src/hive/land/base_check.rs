@@ -93,6 +93,12 @@ pub(crate) async fn run<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &Wo
     let made = blocking(move || {
         let tip = lg::branch_tip(&rp, &t).ok_or_else(|| format!("{t} doesn't exist"))?;
         let tmp = seeded_temp(&paths, &rp, &i, &f, &tip)?;
+        // Base alone, with the checkout's installed packages (never a worker's): with none it
+        // failed on a missing install and Base was blamed (`git::seed_dependencies`).
+        let seeded = lg::seed_dependencies(&rp, &tmp.path);
+        if !seeded.is_empty() {
+            log::info!("hive land: post-land check {i} starts from the checkout's {}", seeded.join(", "));
+        }
         Ok((tip, tmp))
     })
     .await;

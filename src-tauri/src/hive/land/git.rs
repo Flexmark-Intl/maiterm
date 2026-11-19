@@ -180,26 +180,79 @@ pub fn seed_ignored(f: &WorkerFolder, tmp: &Path, extra: &[String]) -> Vec<Strin
         if !real_parents || fs::symlink_metadata(&dest).is_ok() {
             continue;
         }
-        let src = wt.join(&rel);
-        let copy = |clone: bool| {
-            let mut cmd = Command::new("/bin/cp");
-            cmd.arg(if clone { "-cRPp" } else { "-RPp" }).arg(&src).arg(&dest);
-            crate::util::proc::output_timeout(&mut cmd, SEED_TIMEOUT).map_err(|e| e.to_string()).and_then(|o| {
-                if o.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&o.stderr).trim().to_string()) }
-            })
-        };
-        // APFS clones on macOS, so a big folder costs little; a plain copy where that fails.
-        let mut res = if cfg!(target_os = "macos") { copy(true) } else { Err(String::new()) };
-        if res.is_err() {
-            let _ = crate::hive::retire::remove_path(&dest);
-            res = copy(false);
-        }
-        match res {
+        match clone_entry(&wt.join(&rel), &dest) {
             Ok(()) => seeded.push(rel),
-            Err(e) => {
-                log::info!("hive land: {rel} not seeded into {}: {e}", tmp.display());
-                let _ = crate::hive::retire::remove_path(&dest);
-            }
+            Err(e) => log::info!("hive land: {rel} not seeded into {}: {e}", tmp.display()),
+        }
+    }
+    seeded
+}
+
+/// `src` copied to `dest`, links inside copied as links: an APFS clone on macOS, so a big folder
+/// costs little, and a plain copy where that fails. Nothing left at `dest` when both fail.
+fn clone_entry(src: &Path, dest: &Path) -> Result<(), String> {
+    let copy = |clone: bool| {
+        let mut cmd = Command::new("/bin/cp");
+        cmd.arg(if clone { "-cRPp" } else { "-RPp" }).arg(src).arg(dest);
+        crate::util::proc::output_timeout(&mut cmd, SEED_TIMEOUT).map_err(|e| e.to_string()).and_then(|o| {
+            if o.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&o.stderr).trim().to_string()) }
+        })
+    };
+    let mut res = if cfg!(target_os = "macos") { copy(true) } else { Err(String::new()) };
+    if res.is_err() {
+        let _ = crate::hive::retire::remove_path(dest);
+        res = copy(false);
+    }
+    if res.is_err() {
+        let _ = crate::hive::retire::remove_path(dest);
+    }
+    res
+}
+
+/// The installed-package folders a check of Base alone may start from: never a worker's
+/// (`seed_ignored` is for a land's own check), the human's checkout's.
+const DEPENDENCY_DIRS: &[&str] = &["node_modules", ".venv"];
+
+/// A check of Base alone (post-land, undo) starts from the human's checkout's installed
+/// packages, never a worker's: before this it ran with none (`svelte-kit: command not found`)
+/// and blamed Base for a missing install. Only `DEPENDENCY_DIRS` at any depth git lists as
+/// ignored in `repo`, each a real folder there and not yet in `tmp`, under real folders in
+/// `tmp`; never `.env` or other config. What was copied. Blocks.
+pub fn seed_dependencies(repo: &Path, tmp: &Path) -> Vec<String> {
+    let out = crate::util::proc::output_timeout(lgit(repo).args(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"]), QUERY_TIMEOUT);
+    let listed = match out {
+        Ok(o) if o.status.success() => o.stdout,
+        Ok(o) => {
+            log::info!("hive land: {}'s ignored files not listed: {}", repo.display(), String::from_utf8_lossy(&o.stderr).trim());
+            return Vec::new();
+        }
+        Err(e) => {
+            log::info!("hive land: {}'s ignored files not listed: {e}", repo.display());
+            return Vec::new();
+        }
+    };
+    let mut seeded = Vec::new();
+    for rel in listed.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+        let rel = String::from_utf8_lossy(rel).trim_end_matches('/').to_string();
+        let parts: Vec<&str> = rel.split('/').collect();
+        if parts.iter().any(|p| p.is_empty() || *p == "." || *p == ".." || p.eq_ignore_ascii_case(".git")) {
+            continue;
+        }
+        if !parts.last().is_some_and(|l| DEPENDENCY_DIRS.contains(l)) {
+            continue;
+        }
+        let src = repo.join(&rel);
+        if !fs::symlink_metadata(&src).is_ok_and(|m| m.is_dir()) {
+            continue;
+        }
+        let dest = tmp.join(&rel);
+        let real_parents = (1..parts.len()).all(|k| fs::symlink_metadata(tmp.join(parts[..k].join("/"))).is_ok_and(|m| m.is_dir()));
+        if !real_parents || fs::symlink_metadata(&dest).is_ok() {
+            continue;
+        }
+        match clone_entry(&src, &dest) {
+            Ok(()) => seeded.push(rel),
+            Err(e) => log::info!("hive land: {rel} not seeded into {}: {e}", tmp.display()),
         }
     }
     seeded

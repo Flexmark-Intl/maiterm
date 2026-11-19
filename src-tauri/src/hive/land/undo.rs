@@ -487,6 +487,11 @@ pub(crate) async fn drive<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, id: 
                             log::info!("hive undo: {uid}'s cargo target not seeded: {e}");
                         }
                     }
+                    // And the checkout's installed packages, never a worker's (`git::seed_dependencies`).
+                    let seeded = lg::seed_dependencies(&rp, &req.tmp.path);
+                    if !seeded.is_empty() {
+                        log::info!("hive undo: {uid}'s check starts from the checkout's {}", seeded.join(", "));
+                    }
                     checker.start(&req)
                 })
                 .await;
