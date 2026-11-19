@@ -2374,12 +2374,14 @@ mod mtime_tests {
     /// mtime (docs/file-tree.md §6.1).
     #[test]
     fn a_listing_mtime_is_trusted_only_when_a_later_change_must_move_it() {
+        // Every fraction here is a whole number of 100 ns: Windows' SystemTime counts in 100 ns
+        // ticks, so a finer one would be truncated to a whole second there before the check sees it.
         let t = |s: u64, n: u32| UNIX_EPOCH + Duration::new(s, n);
-        // Nanoseconds kept (APFS): any later change moves it, however recent.
-        assert!(trusted_mtime(t(100, 1), t(100, 2)));
+        // A fraction kept (APFS, NTFS): any later change moves it, however recent.
+        assert!(trusted_mtime(t(100, 100), t(100, 200)));
         // Whole seconds: a second change within the same tick (FAT's is 2 s) may not move it.
         assert!(!trusted_mtime(t(100, 0), t(100, 500_000_000)));
-        assert!(!trusted_mtime(t(100, 0), t(101, 999_999_999)));
+        assert!(!trusted_mtime(t(100, 0), t(101, 999_999_900)));
         assert!(trusted_mtime(t(100, 0), t(102, 0)));
         // Before the epoch: nothing to compare, so re-listed.
         assert!(!trusted_mtime(UNIX_EPOCH - Duration::from_secs(1), t(200, 0)));
