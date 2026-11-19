@@ -126,6 +126,17 @@ impl GateLedger {
         self.candidates.as_ref().is_some_and(|c| !c.is_empty())
     }
 
+    /// The one call that asked and hasn't ended, by `tool_use_id`: the dialog on screen is its
+    /// for as long as it waits, however the screen redraws it. None when no call asked (a Claude
+    /// without the `PermissionRequest` hook) or several did (which dialog is on top is unknown).
+    pub fn asking(&self) -> Option<&str> {
+        let mut asked = self.in_flight.iter().filter(|c| c.asked && !c.tool_use_id.is_empty());
+        match (asked.next(), asked.next()) {
+            (Some(c), None) => Some(c.tool_use_id.as_str()),
+            _ => None,
+        }
+    }
+
     /// Whether a call to `tool_name` is in flight — used to keep an open AskUserQuestion alive
     /// while another agent's calls come and go.
     pub fn has_in_flight(&self, tool_name: &str) -> bool {
@@ -260,6 +271,25 @@ mod tests {
 
         assert_eq!(g.call_ended("main-1"), GateChange::Released);
         assert!(!g.held());
+    }
+
+    /// The one call that asked names the dialog, from the ask until the call ends; none asked, or
+    /// two agents asking, names nothing.
+    #[test]
+    fn the_asking_call_names_the_dialog_only_when_it_is_the_only_one() {
+        let mut g = GateLedger::default();
+        g.call_started(call("main-1", "", "Bash"));
+        assert_eq!(g.asking(), None, "running, not asking");
+        g.call_asked("", "Bash", "fp-main-1");
+        assert_eq!(g.asking(), Some("main-1"));
+        g.call_started(call("sub-1", "agent-a", "Write"));
+        assert_eq!(g.asking(), Some("main-1"), "another call running changes nothing");
+        g.call_asked("agent-a", "Write", "fp-sub-1");
+        assert_eq!(g.asking(), None, "two dialogs: which is on top is unknown");
+        g.call_ended("sub-1");
+        assert_eq!(g.asking(), Some("main-1"));
+        g.call_ended("main-1");
+        assert_eq!(g.asking(), None);
     }
 
     /// Review finding 2: a long call that was merely running when the prompt opened used to be a

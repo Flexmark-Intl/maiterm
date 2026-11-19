@@ -1908,6 +1908,19 @@ The `prompt_id` stale guard and the screen read stay. The 1.5 s guard does not a
 UI guard against a human's stray click (`PromptCard.svelte`, `BlockerCard.svelte`), not part of
 the answer path, and an agent's answer is checked against the `prompt_id` instead.
 
+**One dialog, one route, however it is redrawn** (2026-11-19, `prompts::rekey`). A permission
+dialog's `prompt_id` is a digest of the dialog as drawn. On a live worker (2026-11-18) one
+unchanged Bash dialog got a new digest every few seconds: each was routed and told as a new
+prompt, the old one closed as unanswered, and all three of the queen's answers were refused as
+stale, so it fell to the human. A route now also records the call the dialog belongs to
+(`PromptView.asking`: the `tool_use_id` of the ONE call the gate ledger says asked,
+`GateLedger::asking`; none when no call asked or several did). A new key whose dialog is the same
+call's takes over its route — routing, the lapse sweep and `hiveAnswerWorker` all check it first —
+keeping the route's timeout, which is re-armed under the new key, and telling nobody again. An
+answer by any key the route held goes to the dialog on screen now. Another call's dialog is still
+refused as stale. What changes the digest was not found (a probe of a default-mode dialog redrew
+nothing); this follows the call, whatever it is.
+
 **Who a worker's need goes to.** One channel per question, so nothing reaches the human twice:
 
 | A worker needs | Goes to | How |

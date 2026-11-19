@@ -1916,6 +1916,17 @@ pub(crate) fn hive_prompt_view(app: &AppState, tab_id: &str) -> Option<crate::hi
         "permission" => {
             let (tool, detail) = prompt_tool(app, tab_id);
             (view.tool, view.detail) = (tool, detail);
+            // The call the dialog belongs to, which stays put while the screen's digest moves.
+            let asking: Vec<String> = app
+                .agent_sessions
+                .read()
+                .values()
+                .filter(|s| s.tab_id == tab_id)
+                .filter_map(|s| s.claude_gate.asking().map(str::to_string))
+                .collect();
+            if let [one] = asking.as_slice() {
+                view.asking = one.clone();
+            }
             // Codex's approvals aren't Claude's dialogs: no shape, so the coordinator never gets one.
             if let Some(d) = (runtime != AgentRuntime::Codex).then(|| permission_dialog_for_tab(app, tab_id)).flatten() {
                 view.shape = match d.shape {

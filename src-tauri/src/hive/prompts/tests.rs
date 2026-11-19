@@ -453,6 +453,47 @@ async fn a_stale_or_missing_prompt_is_refused() {
     assert!(rig.win.st().answered.is_empty());
 }
 
+/// Live, 2026-11-18: one unchanged dialog on a worker got a new screen digest every few
+/// seconds, so each was routed anew, the old closed as unanswered, and every answer of the
+/// coordinator's refused as stale. The same call's dialog redrawn keeps its route, once told,
+/// and the coordinator's answer by the id it was given goes to what is on screen now.
+#[tokio::test]
+async fn the_same_dialog_redrawn_keeps_its_route_and_takes_the_answer() {
+    let rig = Rig::new();
+    let mut first = bash(&rig.wtab);
+    first.asking = "toolu_1".into();
+    rig.show(Some(first.clone()));
+    maybe_route(&rig.ctx(), &rig.caller, &rig.wtab).await;
+    assert!(find(&rig.wtab, &first.key).is_some());
+    let told = rig.to_coordinator().len();
+
+    let mut redrawn = first.clone();
+    redrawn.key = format!("p_{}_def456", rig.wtab);
+    rig.show(Some(redrawn.clone()));
+    gone(&rig.ctx(), &rig.caller, &rig.wtab).await;
+    maybe_route(&rig.ctx(), &rig.caller, &rig.wtab).await;
+    assert!(find(&rig.wtab, &first.key).is_none() && find(&rig.wtab, &redrawn.key).is_some(), "one route, under the new key");
+    assert_eq!(rig.to_coordinator().len(), told, "neither closed nor told again");
+    assert!(!rig.lines().iter().any(|l| l.event == "lapsed"));
+    assert_eq!(rig.win.st().scheduled.last().map(|(k, _)| k.clone()), Some(redrawn.key.clone()), "its timeout follows it");
+
+    // Redrawn once more after the coordinator read it: its answer still goes in.
+    let mut again = redrawn.clone();
+    again.key = format!("p_{}_789abc", rig.wtab);
+    rig.show(Some(again.clone()));
+    let out = rig.answer(json!({ "prompt_id": first.key, "answer": "Yes" })).await.unwrap();
+    assert_eq!(out["prompt_id"], json!(again.key));
+    assert_eq!(rig.win.st().answered.last().map(|a| a.1.clone()), Some(again.key.clone()));
+
+    // Another call's dialog is another prompt, whatever it looks like.
+    let mut other = bash(&rig.wtab);
+    (other.key, other.asking) = (format!("p_{}_other", rig.wtab), "toolu_2".into());
+    rig.route(first.clone(), 1).await.unwrap();
+    rig.show(Some(other.clone()));
+    let e = rig.answer(json!({ "prompt_id": first.key, "answer": "Yes" })).await.unwrap_err();
+    assert!(e.starts_with("stale"), "{e}");
+}
+
 #[tokio::test]
 async fn yes_and_no_go_in_as_rows_or_esc_and_nothing_else_does() {
     let rig = Rig::new();

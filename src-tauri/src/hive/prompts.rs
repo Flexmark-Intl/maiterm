@@ -77,6 +77,10 @@ pub(crate) struct PromptView {
     pub blocker: Option<TaskBlocker>,
     /// A blocker's task.
     pub task_id: String,
+    /// A permission dialog's call, by `tool_use_id`, when the hooks name exactly one
+    /// (`GateLedger::asking`): what tells the same dialog redrawn from a new one, since `key` is a
+    /// digest of the screen.
+    pub asking: String,
 }
 
 impl PromptView {
@@ -129,6 +133,11 @@ pub(crate) struct Routed {
     pub answering: bool,
     /// maiTerm's words for what is asked, for the log.
     pub question: String,
+    /// The view's `asking`: the call this dialog belongs to, empty when unknown.
+    pub asking: String,
+    /// The keys it had before the same dialog was redrawn (`rekey`): the coordinator may still
+    /// hold one, and its answer by that id is to this dialog.
+    pub former_keys: Vec<String>,
 }
 
 /// A route as the window sees it.
@@ -653,6 +662,8 @@ pub(crate) async fn route_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w
         recommendation: None,
         answering: false,
         question: asked_text(&view),
+        asking: view.asking.clone(),
+        former_keys: Vec::new(),
     };
     if !admit(r.clone()) {
         return None;
@@ -685,10 +696,42 @@ pub(crate) async fn route_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w
     Some(r)
 }
 
+/// Whether `v` is the dialog `r` was routed for, drawn again: a permission dialog of the same
+/// call, by its `tool_use_id`. A permission's key is a digest of the screen, which moved under
+/// one unchanged dialog every few seconds on a live worker (2026-11-18): each new key was routed
+/// as a new prompt, closed the old one as unanswered, and refused the coordinator's answer as
+/// stale. Unknown calls are never the same.
+pub(crate) fn same_dialog(r: &Routed, v: &PromptView) -> bool {
+    r.kind == KIND_PERMISSION && v.kind == KIND_PERMISSION && !r.asking.is_empty() && r.asking == v.asking
+}
+
+/// A route whose dialog is `v` drawn again (`same_dialog`) takes `v`'s key: one prompt, one
+/// timeout (re-armed under the new key), told once. Whether one did.
+pub(crate) fn rekey<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, tab: &str, v: &PromptView) -> bool {
+    let moved = {
+        let mut all = routes();
+        let Some(list) = all.get_mut(tab) else { return false };
+        if list.iter().any(|r| r.key == v.key) {
+            return false;
+        }
+        let Some(r) = list.iter_mut().find(|r| same_dialog(r, v)) else { return false };
+        let old = std::mem::replace(&mut r.key, v.key.clone());
+        r.former_keys.push(old.clone());
+        (old, r.clone())
+    };
+    let (old, r) = moved;
+    log::info!("hive {}: {}\u{2019}s {} {old} is {} now (the same dialog, redrawn)", r.hive_id, r.worker_name, r.kind, r.key);
+    if r.owner == OWNER_COORDINATOR && !r.timed_out {
+        ctx.window.schedule_due(caller, tab, &r.key, r.due_ms);
+    }
+    emit(ctx, &caller.workspace_id);
+    true
+}
+
 /// A worker's prompt hook: after the screen settles, route what is open there if it is new.
 pub(crate) async fn maybe_route<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, tab: &str) {
     let Some(view) = ctx.window.prompt_view(tab) else { return };
-    if find(tab, &view.key).is_some() {
+    if find(tab, &view.key).is_some() || rekey(ctx, caller, tab, &view) {
         return;
     }
     let (paths, t) = (caller.paths.clone(), tab.to_string());
@@ -703,7 +746,12 @@ pub(crate) async fn gone<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, tab: 
     if !has_screen_routes(tab) {
         return;
     }
-    let open = ctx.window.prompt_view(tab).map(|v| v.key);
+    let view = ctx.window.prompt_view(tab);
+    // The same dialog redrawn is still open: its route follows the new key, not dropped.
+    if let Some(v) = &view {
+        rekey(ctx, caller, tab, v);
+    }
+    let open = view.map(|v| v.key);
     let dropped = drop_gone(tab, open.as_deref());
     if dropped.is_empty() {
         return;
@@ -953,7 +1001,7 @@ fn blocker_view(data: &parking_lot::RwLock<crate::state::AppData>, caller: &Call
 }
 
 pub(crate) async fn answer_worker_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, args: &Value) -> Result<Value, String> {
-    let prompt_id = args.get("prompt_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).ok_or("prompt_id is required: the one maiTerm gave")?.to_string();
+    let mut prompt_id = args.get("prompt_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).ok_or("prompt_id is required: the one maiTerm gave")?.to_string();
     let precedent = super::precedents::cited(&caller.paths, args).await?;
     let reason = args.get("reason").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(|r| one_line(r, MAX_REASON));
     let w = super::control::named_worker(caller, args).await?;
@@ -971,6 +1019,13 @@ pub(crate) async fn answer_worker_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: 
     } else {
         match ctx.window.prompt_view(&tab) {
             Some(v) if v.key == prompt_id => v,
+            // The same dialog drawn differently (its id is a digest of the screen): the route
+            // follows it, and the answer goes to what is on screen now.
+            Some(v) if routes().get(&tab).is_some_and(|l| l.iter().any(|r| (r.key == prompt_id || r.former_keys.contains(&prompt_id)) && same_dialog(r, &v))) => {
+                rekey(ctx, caller, &tab, &v);
+                prompt_id = v.key.clone();
+                v
+            }
             Some(v) => return Err(format!("stale: the prompt on screen is now {}", v.key)),
             None => return Err("no prompt is open on that worker".to_string()),
         }
