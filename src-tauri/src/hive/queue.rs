@@ -1841,7 +1841,7 @@ async fn finish(d: &'static Driver, e: Ended) {
     let mut job = e.job.clone();
     // Read before anything closes its tab: the result's tail is the job's own screen.
     let mut tail = super::run::screen_tail(&d.app, job.pty_id.as_deref());
-    let (output, cut) = super::run::screen_buffer(&d.app, job.pty_id.as_deref());
+    let output = super::run::screen_buffer(&d.app, job.pty_id.as_deref());
     set_row(&d.app, &job, None);
     crate::stack::ports::release(&job.id);
     super::registry_proxy::close(&job.id);
@@ -1859,7 +1859,7 @@ async fn finish(d: &'static Driver, e: Ended) {
             Some(root) => {
                 let paths = HivePaths::new(root);
                 super::run::recheck_tree(&paths, &mut logged);
-                kept = super::run::keep_output(&paths, &logged.id, &output, cut);
+                kept = super::run::keep_output(&paths, &logged.id, &output);
                 append_run(&paths, &logged)
             }
             None => Err("no Hive folder".to_string()),

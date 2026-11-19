@@ -210,8 +210,10 @@ fn clone_entry(src: &Path, dest: &Path) -> Result<(), String> {
 }
 
 /// The installed-package folders a check of Base alone may start from: never a worker's
-/// (`seed_ignored` is for a land's own check), the human's checkout's.
-const DEPENDENCY_DIRS: &[&str] = &["node_modules", ".venv"];
+/// (`seed_ignored` is for a land's own check), the human's checkout's. Never a `.venv`: its
+/// scripts' shebangs and an editable install's `.pth` name the folder it was made in, so a
+/// copy would run the human's checkout and test its code instead of Base's.
+const DEPENDENCY_DIRS: &[&str] = &["node_modules"];
 
 /// A check of Base alone (post-land, undo) starts from the human's checkout's installed
 /// packages, never a worker's: before this it ran with none (`svelte-kit: command not found`)

@@ -583,17 +583,16 @@ fn the_humans_run_queue_is_checked_before_it_is_saved() {
     assert!(with(&|q| { q.resources.insert("Bad Name".into(), 1); }).contains("resource name"));
 }
 
-/// A job's output is kept whole, and the line pointing to it says when its start was cut.
+/// A job's output is kept, and the line pointing to it never claims it is whole: the
+/// terminal's scrollback is capped.
 #[test]
-fn a_jobs_output_is_kept_and_a_cut_start_is_said() {
+fn a_jobs_output_is_kept_and_never_called_whole() {
     let base = std::env::temp_dir().join(format!("hive-keep-output-{}", uuid::Uuid::new_v4().simple()));
     let paths = HivePaths::new(base.join("hive"));
-    assert_eq!(keep_output(&paths, "j-0000abcd", "  \n", false), None, "nothing printed, nothing kept");
-    let line = keep_output(&paths, "j-0000abcd", "one\ntwo", false).unwrap();
+    assert_eq!(keep_output(&paths, "j-0000abcd", "  \n"), None, "nothing printed, nothing kept");
+    let line = keep_output(&paths, "j-0000abcd", "one\ntwo").unwrap();
     let file = paths.run("j-0000abcd").join(OUTPUT_LOG);
     assert_eq!(fs::read_to_string(&file).unwrap(), "one\ntwo\n");
-    assert!(line.contains("its whole output") && line.contains(&file.display().to_string()), "{line}");
-    let cut = keep_output(&paths, "j-0000abcd", "late lines", true).unwrap();
-    assert!(cut.contains("its start is cut") && !cut.contains("whole"), "{cut}");
+    assert!(line.contains("as far back as its terminal") && line.contains(&file.display().to_string()) && !line.contains("whole"), "{line}");
     let _ = fs::remove_dir_all(&base);
 }

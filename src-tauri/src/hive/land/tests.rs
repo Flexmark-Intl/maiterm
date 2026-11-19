@@ -857,9 +857,8 @@ fn a_base_check_starts_from_the_checkouts_packages_only() {
     let elsewhere = base.join("elsewhere");
     fs::create_dir_all(&elsewhere).unwrap();
     std::os::unix::fs::symlink(&elsewhere, tmp.join("packages")).unwrap();
-    let mut seeded = git::seed_dependencies(&repo, &tmp);
-    seeded.sort();
-    assert_eq!(seeded, vec![".venv".to_string(), "node_modules".to_string()], "{seeded:?}");
+    let seeded = git::seed_dependencies(&repo, &tmp);
+    assert_eq!(seeded, vec!["node_modules".to_string()], "never a .venv, which runs its own checkout: {seeded:?}");
     assert_eq!(fs::read_to_string(tmp.join("node_modules/pkg/f")).unwrap(), "x");
     assert!(fs::symlink_metadata(tmp.join(".env")).is_err() && fs::symlink_metadata(tmp.join("build")).is_err());
     assert!(fs::read_dir(&elsewhere).unwrap().next().is_none(), "nothing went through the link");
