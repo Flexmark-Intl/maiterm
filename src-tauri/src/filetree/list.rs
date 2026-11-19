@@ -17,8 +17,6 @@ use std::path::{Path, PathBuf};
 
 
 use super::ignore_cache::IgnoreLock;
-#[cfg(test)]
-use super::ignore_cache::IgnoreStack;
 use super::types::{Entry, FLAG_HIDDEN, FLAG_IGNORED, FLAG_LOOP, FLAG_UNREADABLE};
 
 pub const MAX_ENTRIES: usize = 50_000;
@@ -331,7 +329,7 @@ mod tests {
         std::os::unix::fs::symlink(t.join("nope"), t.join("broken")).unwrap();
         // A link back to an ancestor: expanding it would never end.
         std::os::unix::fs::symlink(&t, t.join("src/deep/up")).unwrap();
-        let ig = IgnoreLock::new(IgnoreStack::for_test(&t, Some(&t.join(".git")), None, &[]));
+        let ig = IgnoreLock::new(super::super::ignore_cache::IgnoreStack::for_test(&t, Some(&t.join(".git")), None, &[]));
         let l = list_dir(&t, "", &ig).unwrap();
         let get = |n: &str| l.entries.iter().find(|e| e.n == n).cloned();
         assert!(get(".git").is_none() && get(".DS_Store").is_none());
