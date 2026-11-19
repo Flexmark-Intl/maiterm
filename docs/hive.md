@@ -4218,7 +4218,10 @@ several releases a day).
    temporary worktree; a conflict refuses ("fix forward"), nothing to revert refuses, then the
    config rule, the land check under the new `land` profile (`queue::PROFILE_LAND`: only the
    temporary worktree, its temp folder and the shared package caches, the repo's `config`, `hooks`
-   and `info` denied, its own cargo target in the land temp folder, seeded from the checkout's),
+   and `info` denied, its own cargo target in the land temp folder, seeded from the checkout's, and
+   the checkout's ignored `node_modules`/`.venv` folders cloned in — `land::git::seed_dependencies`,
+   2026-11-19, as the post-land check's are: with none, a re-check of Base failed on a missing
+   install and marked a good Base suspect),
    step 2 with the dirty hold and three Base-moved rebuilds; a held undo resumes on the next undo
    of the same line. It logs `kind: undo`, marks the worker `undone` (its waiters block, "…'s land
    was undone") and never reopens it. `hiveUndoLand {land, reason}` (coordinator; refused in an
