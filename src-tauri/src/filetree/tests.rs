@@ -42,6 +42,27 @@ fn temp_root(tag: &str) -> PathBuf {
     crate::share::canon(&t)
 }
 
+/// Gives each path an mtime long past, as a folder last changed before the tree opened has. A
+/// listing trusts only an mtime at least 2 s old (`hub::trusted_mtime`), so a fixture made a
+/// moment ago would be re-listed on every edge. Each call's time is new, so an aged folder's
+/// mtime still differs from any it had before.
+fn age(paths: &[&Path]) {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    for p in paths {
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let t = std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000 + n);
+        #[cfg(unix)]
+        let f = std::fs::File::open(p);
+        #[cfg(windows)]
+        let f = {
+            use std::os::windows::fs::OpenOptionsExt;
+            // FILE_WRITE_ATTRIBUTES; FILE_FLAG_BACKUP_SEMANTICS opens a folder.
+            std::fs::OpenOptions::new().access_mode(0x100).custom_flags(0x0200_0000).open(p)
+        };
+        f.and_then(|f| f.set_modified(t)).unwrap_or_else(|e| panic!("age {}: {e}", p.display()));
+    }
+}
+
 /// A client that follows the wire protocol, as the frontend's TreeModel will.
 #[derive(Default)]
 struct Client {
@@ -590,6 +611,7 @@ fn an_edge_relists_what_the_watcher_never_reported() {
         std::fs::create_dir_all(root.join(d)).unwrap();
         std::fs::write(root.join(d).join("one.txt"), "").unwrap();
     }
+    age(&[&root, &root.join("a"), &root.join("b")]);
     let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
@@ -648,6 +670,9 @@ fn an_edge_relists_what_the_watcher_never_reported() {
     // Expanding a folder whose mtime moved lists it again rather than answering from the
     // snapshot; one that didn't is answered from the snapshot.
     std::fs::write(a.join("late.txt"), "").unwrap();
+    // Aged before this listing, so the one it records is trusted and the idle edge below has
+    // nothing to re-list.
+    age(&[&a]);
     let gen = |rel: &str| hub.dirs.lock().get(rel).map(|d| d.gen).unwrap();
     let rec2 = Arc::new(Recorder::default());
     let reqs = vec![DirReq { rel: "a".into(), known_gen: Some(gen("a")) }, DirReq { rel: "b".into(), known_gen: Some(gen("b")) }];
@@ -750,6 +775,7 @@ fn idle_edges_over_a_future_dated_gitignore_do_nothing() {
     std::fs::write(root.join(".gitignore"), "dist/\n").unwrap();
     let future = std::time::UNIX_EPOCH + Duration::from_secs(1_900_000_000);
     std::fs::File::options().write(true).open(root.join(".gitignore")).unwrap().set_modified(future).unwrap();
+    age(&[&root, &root.join("a"), &root.join("a/b")]);
     let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
@@ -782,6 +808,7 @@ fn a_lost_gitignore_in_a_closed_folder_shows_when_reopened() {
     std::fs::create_dir_all(root.join("pkg/gen")).unwrap();
     std::fs::create_dir_all(root.join("other")).unwrap();
     std::fs::write(root.join("pkg/gen/x.js"), "").unwrap();
+    age(&[&root, &root.join("pkg"), &root.join("pkg/gen"), &root.join("other")]);
     let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
