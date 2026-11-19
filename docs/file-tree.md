@@ -1451,8 +1451,9 @@ All backends feed one **coalescer thread per hub**:
   Any mtime is trusted only once the clock is 2 s past it (FAT's tick, the coarsest), since a
   second change within its tick wouldn't move it. A fraction of a second doesn't exempt it: NTFS
   stores 100 ns but advances about every 15.6 ms and exFAT every 10 ms. The cost is only work: a
-  folder changed in the last 2 s is re-listed on the next edge, and a `.gitignore` changed in the
-  last 2 s is checked by its bytes. Events still patch snapshots as before; a
+  folder changed in the last 2 s is re-listed on the next edge, and a `.gitignore` loaded within
+  2 s of its last change is checked by its bytes on each pass until its folder's rules are loaded
+  again. Events still patch snapshots as before; a
   patched folder's mtime no longer matches, so the next edge re-lists it once. A pass first
   checks the root's repository: a `.git` that appeared or went (a `git init` whose event was
   lost) reopens the views, as the event would. The edges, all events that already exist,
