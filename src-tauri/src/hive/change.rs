@@ -108,8 +108,9 @@ pub fn check_socket(raw: &str) -> Result<String, String> {
     let s = raw.trim();
     let p = std::path::Path::new(s);
     // A quote or backslash can't be named in a job's Seatbelt profile (`job_sandbox::sb_path`),
-    // which would fail every builder job, not only its database's.
-    if !p.is_absolute() || s.chars().any(|c| c.is_control() || c == '"' || c == '\\') || p.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::CurDir)) {
+    // which would fail every builder job, not only its database's. A Unix socket's path starts at
+    // `/` on every host: `is_absolute` would also want a drive letter on Windows.
+    if !s.starts_with('/') || s.chars().any(|c| c.is_control() || c == '"' || c == '\\') || p.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::CurDir)) {
         return Err(format!("\u{201c}{}\u{201d} isn\u{2019}t a full path to a socket, such as /tmp/.s.PGSQL.5432.", one_line(s, 80)));
     }
     let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
