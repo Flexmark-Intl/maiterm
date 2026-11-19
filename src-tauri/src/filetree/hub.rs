@@ -2090,25 +2090,23 @@ fn dir_mtime(abs: &Path) -> Option<SystemTime> {
 }
 
 /// The mtime a listing of `abs` read at `now` can be checked against later, or None when it
-/// can't be trusted. A coarse timestamp (1 s on HFS+, 2 s on FAT) doesn't move for a second
-/// change made within the same tick, so an mtime that recent proves nothing: the folder is
-/// re-listed on the next edge instead. This only ever adds a re-list; it never skips one.
+/// can't be trusted. A timestamp doesn't move for a second change made within the same tick
+/// (1 s on HFS+, 2 s on FAT, 10 ms on exFAT, ~15.6 ms on NTFS), so an mtime that recent proves
+/// nothing: the folder is re-listed on the next edge instead. This only ever adds a re-list; it
+/// never skips one.
 fn listing_mtime(abs: &Path, now: SystemTime) -> Option<SystemTime> {
     let m = dir_mtime(abs)?;
     trusted_mtime(m, now).then_some(m)
 }
 
-/// Whether a change after `m` (read at `now`) is sure to move it. An mtime with a fraction of
-/// a second comes from a volume that keeps nanoseconds (APFS), where any later change moves it.
-/// A whole-second one may come from a coarse volume, so it is trusted only once the clock has
-/// passed the coarsest tick (FAT's 2 s) that could still hold it.
+/// Whether a change after `m` (read at `now`) is sure to move it: only once the clock is at
+/// least 2 s past it, the coarsest tick (FAT's) that could still hold it. A fraction of a second
+/// proves nothing: NTFS stores 100 ns but advances once per timer tick (~15.6 ms) and exFAT in
+/// 10 ms steps, so a second change in the same tick leaves it where it was. A younger mtime
+/// only costs work: the folder is re-listed, or the rules file is checked by its bytes.
 pub(super) fn trusted_mtime(m: SystemTime, now: SystemTime) -> bool {
-    let Ok(d) = m.duration_since(UNIX_EPOCH) else { return false };
-    if d.subsec_nanos() != 0 {
-        return true;
-    }
-    let now = now.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    d.as_secs() + 2 <= now
+    let Ok(age) = now.duration_since(m) else { return false };
+    m.duration_since(UNIX_EPOCH).is_ok() && age >= Duration::from_secs(2)
 }
 
 /// (added, deleted names, changed) from `old` to `new`, both sorted.
@@ -2377,8 +2375,9 @@ mod mtime_tests {
         // Every fraction here is a whole number of 100 ns: Windows' SystemTime counts in 100 ns
         // ticks, so a finer one would be truncated to a whole second there before the check sees it.
         let t = |s: u64, n: u32| UNIX_EPOCH + Duration::new(s, n);
-        // A fraction kept (APFS, NTFS): any later change moves it, however recent.
-        assert!(trusted_mtime(t(100, 100), t(100, 200)));
+        // A fraction proves no fine clock (NTFS ticks ~15.6 ms, exFAT 10 ms): still 2 s or not trusted.
+        assert!(!trusted_mtime(t(100, 100), t(100, 200)));
+        assert!(trusted_mtime(t(100, 100), t(102, 100)));
         // Whole seconds: a second change within the same tick (FAT's is 2 s) may not move it.
         assert!(!trusted_mtime(t(100, 0), t(100, 500_000_000)));
         assert!(!trusted_mtime(t(100, 0), t(101, 999_999_900)));

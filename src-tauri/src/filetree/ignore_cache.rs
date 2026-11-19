@@ -34,8 +34,9 @@ use super::paths::{join_rel, split_parent};
 enum Stamp {
     Absent,
     At(SystemTime, u64),
-    /// Its mtime can't tell a later edit apart (a whole second, within or after the clock's
-    /// tick: a file unzipped from a later timezone is hours ahead), so its bytes are kept too,
+    /// Its mtime can't tell a later edit apart (under 2 s old, so within a tick that may still
+    /// hold it, or in the future: a file unzipped from a later timezone is hours ahead), so its
+    /// bytes are kept too,
     /// as a hash: (mtime, length, content hash).
     Unsure(Option<SystemTime>, u64, u64),
 }

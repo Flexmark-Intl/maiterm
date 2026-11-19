@@ -1433,8 +1433,8 @@ All backends feed one **coalescer thread per hub**:
   decide what the open folders show (each open folder's and its ancestors' `.gitignore` and
   nested `.git`/`info/exclude`, and the root's `info/exclude`: open folders × depth, not every
   folder the stack ever read) with the disk: its mtime and length, or its absence, taken just
-  before it was read (`ignore_cache::Stamps`). A whole-second mtime that can't tell a later edit
-  apart (recent, or in the future, as from a zip made in a later timezone) is decided by a hash
+  before it was read (`ignore_cache::Stamps`). An mtime that can't tell a later edit
+  apart (under 2 s old, or in the future, as from a zip made in a later timezone) is decided by a hash
   of the bytes instead, so it is re-read on each pass but never taken as changed for that alone.
   One that changed is handled as its event would have been:
   that folder's matcher is dropped (all of them for the root's `info/exclude`), every open
@@ -1448,8 +1448,11 @@ All backends feed one **coalescer thread per hub**:
   rules). Refresh runs the rules half of an edge as it lists, and so does a kept hub that gets
   a subscriber again after its grace (nothing reconciled it while nobody watched); the folders
   they list read their entries off the disk themselves, so the mtime half would list them twice.
-  A whole-second mtime (HFS+, FAT) is trusted only once the clock is past its tick, since a
-  second change within that tick wouldn't move it. Events still patch snapshots as before; a
+  Any mtime is trusted only once the clock is 2 s past it (FAT's tick, the coarsest), since a
+  second change within its tick wouldn't move it. A fraction of a second doesn't exempt it: NTFS
+  stores 100 ns but advances about every 15.6 ms and exFAT every 10 ms. The cost is only work: a
+  folder changed in the last 2 s is re-listed on the next edge, and a `.gitignore` changed in the
+  last 2 s is checked by its bytes. Events still patch snapshots as before; a
   patched folder's mtime no longer matches, so the next edge re-lists it once. A pass first
   checks the root's repository: a `.git` that appeared or went (a `git init` whose event was
   lost) reopens the views, as the event would. The edges, all events that already exist,
