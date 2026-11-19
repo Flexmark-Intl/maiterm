@@ -43,7 +43,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use parking_lot::Mutex;
 
 use super::git::{Failure, GitConfig, GitCore, Status, Trigger};
-use super::ignore_cache::IgnoreStack;
+use super::ignore_cache::{IgnoreLock, IgnoreStack};
 use super::list::{self, ListError, Listing, CHUNK};
 use super::paths::{self, join_rel, name_key, rel_to_native, split_rel};
 use super::remote::RemoteRoot;
@@ -420,7 +420,7 @@ pub struct RootHub {
     pub(super) search: Arc<SearchState>,
     pub(super) dirs: Mutex<HashMap<String, DirSnap>>,
     subs: Mutex<HashMap<u64, Sub>>,
-    pub(super) ignore: Mutex<IgnoreStack>,
+    pub(super) ignore: IgnoreLock,
     jobs: Mutex<Jobs>,
     max_workers: usize,
     slots: Arc<Slots>,
@@ -543,7 +543,7 @@ impl RootHub {
             git_dirs,
             dirs: Mutex::new(HashMap::new()),
             subs: Mutex::new(HashMap::new()),
-            ignore: Mutex::new(ignore),
+            ignore: IgnoreLock::new(ignore),
             jobs: Mutex::new(Jobs::default()),
             max_workers: if network { 2 } else { 4 },
             slots,

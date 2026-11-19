@@ -336,7 +336,7 @@ fn converge(variant: Variant, seed: u64) {
     };
     quiet(&mut client);
 
-    let fresh_ignore = Mutex::new(IgnoreStack::for_test(&root, None, None, &[]));
+    let fresh_ignore = super::ignore_cache::IgnoreLock::new(IgnoreStack::for_test(&root, None, None, &[]));
     // The events alone brought the hub to the disk: every open folder it holds is what a fresh
     // listing says, before any edge could re-list one.
     for rel in &client.expanded {
@@ -599,7 +599,7 @@ fn an_edge_relists_what_the_watcher_never_reported() {
     probe.watching(&hub);
     probe.idle(&hub);
     hub.go_deaf();
-    let ignore = Mutex::new(IgnoreStack::for_test(&root, None, None, &[]));
+    let ignore = super::ignore_cache::IgnoreLock::new(IgnoreStack::for_test(&root, None, None, &[]));
     let disk = |rel: &str| list::list_dir(&root, rel, &ignore).unwrap().entries;
     let held = |rel: &str| hub.dirs.lock().get(rel).map(|d| d.entries.clone()).unwrap();
     let about = |rel: &str, from: usize| -> Vec<TreeEvent> {
@@ -940,16 +940,14 @@ fn rules_files_are_read_without_the_ignore_lock() {
     let hub = ft.hub_of(ack.sub_id).unwrap();
     probe.watching(&hub);
     probe.idle(&hub);
-    // Whether the hub's ignore lock is held, each time the rules files are read.
+    // Whether the thread reading the rules files holds the ignore lock, each time. Another
+    // thread holding it meanwhile (a listing matching its rows) is no fault.
     let seen: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
     let key = PathBuf::from(root.file_name().unwrap());
     {
         let seen = seen.clone();
-        let weak = Arc::downgrade(&hub);
         super::ignore_cache::MOVED_HOOKS.lock().push((key.clone(), Arc::new(move || {
-            if let Some(h) = weak.upgrade() {
-                seen.lock().push(h.ignore.is_locked());
-            }
+            seen.lock().push(super::ignore_cache::held_here());
         })));
     }
     let take = |what: &str| {

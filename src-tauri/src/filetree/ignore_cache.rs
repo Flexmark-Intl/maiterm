@@ -168,6 +168,68 @@ impl DirMatcher<'_> {
     }
 }
 
+/// The hub's lock on its `IgnoreStack`. A plain mutex; in tests its guard also counts, per
+/// thread, how many it holds (`held_here`), so a test can ask whether the thread it runs on
+/// holds the lock, which `is_locked` (any thread) can't tell.
+pub struct IgnoreLock(parking_lot::Mutex<IgnoreStack>);
+
+#[cfg(not(test))]
+pub type IgnoreGuard<'a> = parking_lot::MutexGuard<'a, IgnoreStack>;
+
+impl IgnoreLock {
+    pub fn new(stack: IgnoreStack) -> Self {
+        IgnoreLock(parking_lot::Mutex::new(stack))
+    }
+
+    #[cfg(not(test))]
+    pub fn lock(&self) -> IgnoreGuard<'_> {
+        self.0.lock()
+    }
+
+    #[cfg(test)]
+    pub fn lock(&self) -> IgnoreGuard<'_> {
+        let g = self.0.lock();
+        HELD.with(|h| h.set(h.get() + 1));
+        IgnoreGuard(g)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static HELD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Tests: whether the calling thread holds an `IgnoreLock`.
+#[cfg(test)]
+pub fn held_here() -> bool {
+    HELD.with(|h| h.get() != 0)
+}
+
+#[cfg(test)]
+pub struct IgnoreGuard<'a>(parking_lot::MutexGuard<'a, IgnoreStack>);
+
+#[cfg(test)]
+impl Drop for IgnoreGuard<'_> {
+    fn drop(&mut self) {
+        HELD.with(|h| h.set(h.get() - 1));
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for IgnoreGuard<'_> {
+    type Target = IgnoreStack;
+    fn deref(&self) -> &IgnoreStack {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl std::ops::DerefMut for IgnoreGuard<'_> {
+    fn deref_mut(&mut self) -> &mut IgnoreStack {
+        &mut self.0
+    }
+}
+
 pub struct IgnoreStack {
     root: PathBuf,
     /// The root is inside a repository (its own top level or deeper).

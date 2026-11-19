@@ -15,8 +15,9 @@ use std::cmp::Ordering;
 use std::fs::FileType;
 use std::path::{Path, PathBuf};
 
-use parking_lot::Mutex;
 
+use super::ignore_cache::IgnoreLock;
+#[cfg(test)]
 use super::ignore_cache::IgnoreStack;
 use super::types::{Entry, FLAG_HIDDEN, FLAG_IGNORED, FLAG_LOOP, FLAG_UNREADABLE};
 
@@ -254,7 +255,7 @@ pub fn stat_entry(dir_abs: &Path, name: &str) -> Option<Entry> {
 }
 
 /// Set the ignore flag on `entries` of folder `rel`.
-pub fn flag_ignored(entries: &mut [Entry], rel: &str, ignore: &Mutex<IgnoreStack>) {
+pub fn flag_ignored(entries: &mut [Entry], rel: &str, ignore: &IgnoreLock) {
     let mut ig = ignore.lock();
     let m = ig.for_dir(rel);
     for e in entries.iter_mut() {
@@ -269,13 +270,13 @@ pub fn flag_ignored(entries: &mut [Entry], rel: &str, ignore: &Mutex<IgnoreStack
 /// The folder `rel` under `root`, ready to send. The disk is read before the ignore stack is
 /// locked, so a folder that hangs on a dead mount never holds up another folder's listing.
 #[cfg(test)]
-pub fn list_dir(root: &Path, rel: &str, ignore: &Mutex<IgnoreStack>) -> Result<Listing, ListError> {
+pub fn list_dir(root: &Path, rel: &str, ignore: &IgnoreLock) -> Result<Listing, ListError> {
     list_dir_with(root, rel, ignore, &mut |_, _, _| {})
 }
 
 /// `list_dir`, calling `on_head(first 512 entries, total, truncated)` before the rest is
 /// sorted when the folder is bigger than one chunk.
-pub fn list_dir_with(root: &Path, rel: &str, ignore: &Mutex<IgnoreStack>, on_head: &mut dyn FnMut(&[Entry], u32, bool)) -> Result<Listing, ListError> {
+pub fn list_dir_with(root: &Path, rel: &str, ignore: &IgnoreLock, on_head: &mut dyn FnMut(&[Entry], u32, bool)) -> Result<Listing, ListError> {
     let abs = super::paths::rel_to_native(root, rel).map_err(ListError::Other)?;
     let mut entries = read_raw(&abs)?;
     flag_ignored(&mut entries, rel, ignore);
@@ -330,7 +331,7 @@ mod tests {
         std::os::unix::fs::symlink(t.join("nope"), t.join("broken")).unwrap();
         // A link back to an ancestor: expanding it would never end.
         std::os::unix::fs::symlink(&t, t.join("src/deep/up")).unwrap();
-        let ig = Mutex::new(IgnoreStack::for_test(&t, Some(&t.join(".git")), None, &[]));
+        let ig = IgnoreLock::new(IgnoreStack::for_test(&t, Some(&t.join(".git")), None, &[]));
         let l = list_dir(&t, "", &ig).unwrap();
         let get = |n: &str| l.entries.iter().find(|e| e.n == n).cloned();
         assert!(get(".git").is_none() && get(".DS_Store").is_none());
