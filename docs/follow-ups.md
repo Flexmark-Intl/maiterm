@@ -435,10 +435,11 @@ waits on conditions on THAT machine, so its script runs there:
   its tunnel (`-x -C root@eca`) and said "unreachable" for days beside an open tab, missing real
   DDoS alerts. The approval is still keyed by the stored spelling.
 - **…but not forever beside an open connection** (`stranded`). 10 minutes of runs that found no
-  tunnel the watch can use (its own clock, `no_tunnel_from`: time spent failing on its own tunnel
-  doesn't count), while maiTerm holds a tunnel to the same user@host by another route (another
-  key, another jump host), is a broken run, saying so. The streak goes on, so the next two runs break too and
-  wake the agent. A watch whose OWN tunnel fails (a saturated host refusing new sessions) still
+  tunnel the watch can use, every one of them while maiTerm held a tunnel to the same user@host
+  by another route (another key, another jump host), is a broken run, saying so. Its own clock,
+  `no_tunnel_from`: time spent failing on its own tunnel, or in an outage nothing reaches the host
+  through, doesn't count. That clock keeps going through a broken run, so the next two break too
+  and wake the agent. A watch whose OWN tunnel fails (a saturated host refusing new sessions) still
   just waits: re-scheduling would put it on that same tunnel.
 - **Cleanup there** is the wrapper's: files untouched for 8 days are removed on every run (a
   follow-up waits at most 7, and every run touches its own two).

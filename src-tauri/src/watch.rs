@@ -114,9 +114,10 @@ struct Run {
     starts: std::collections::VecDeque<i64>,
     /// When the current unreachable streak began (ms); 0 when reachable.
     unreachable_from: i64,
-    /// When runs of a remote watch began finding NO tunnel it can use (ms); 0 once one does.
+    /// When runs of a remote watch began finding NO tunnel it can use while another route to its
+    /// user@host was open (ms); 0 once a run finds a usable tunnel, or finds no route at all.
     /// `stranded`'s clock, apart from `unreachable_from`: minutes spent failing on its own
-    /// tunnel (a saturated host) are not minutes without one.
+    /// tunnel (a saturated host), or in an outage nothing reaches the host through, don't count.
     no_tunnel_from: i64,
     /// When its last run started (ms); 0 before the first.
     last_start: i64,
@@ -669,6 +670,12 @@ pub async fn watch_loop(state: Arc<AppState>, app: tauri::AppHandle) {
                 continue;
             }
             r.started = Some(Instant::now());
+            // A gap in its runs (a parked workspace, the Overlord off, the Mac asleep) is time
+            // nobody watched the routes: `stranded`'s clock starts over rather than count it.
+            let gap_ms = 2 * c.every.as_millis() as i64 + 60_000;
+            if r.last_start > 0 && now_ms() - r.last_start > gap_ms {
+                r.no_tunnel_from = 0;
+            }
             c.last_run = (r.last_start > 0).then_some(r.last_start / 1000);
             r.note_start(now_ms());
             r.status.running = true;
@@ -682,7 +689,9 @@ pub async fn watch_loop(state: Arc<AppState>, app: tauri::AppHandle) {
 async fn run_and_record(state: Arc<AppState>, app: tauri::AppHandle, c: Candidate) {
     let began = Instant::now();
     // `was_unreachable`: no run happened for want of a connection — a stranded run (`stranded`)
-    // included, which is Broken but keeps the streak going. `no_tunnel`: none it could use.
+    // included. `no_tunnel`: no tunnel it could use, WHILE another route to its user@host was
+    // open (`tunnel_to_same_label`) — the only time `stranded` counts. An outage nothing reaches
+    // the host through is a plain wait, however long.
     let (outcome, was_unreachable, no_tunnel) = match (&c.host, scripts_dir()) {
         (Some(host), _) => match tunnel_args(&state, host) {
             // Its own tunnel failing (a saturated host refusing new sessions) is a plain wait,
@@ -697,7 +706,8 @@ async fn run_and_record(state: Arc<AppState>, app: tauri::AppHandle, c: Candidat
                     "maiTerm has no connection to {} — it runs once an ssh tab to it is open",
                     host_label(host)
                 );
-                (stranded(&state, &c, Outcome::Unreachable(why)), true, true)
+                let other_route = tunnel_to_same_label(&state, host).is_some();
+                (stranded(&state, &c, Outcome::Unreachable(why)), true, other_route)
             }
         },
         (None, Some(dir)) => (execute(&c, &dir).await, false, false),
@@ -709,14 +719,14 @@ async fn run_and_record(state: Arc<AppState>, app: tauri::AppHandle, c: Candidat
         r.status.running = false;
         r.status.last_run_at = Some(crate::commands::workspace::iso_now());
         r.status.last_duration_ms = Some(began.elapsed().as_millis() as u64);
-        // A stranded run (`stranded`) is still unreachable: its streak goes on, so the next
-        // runs count as broken at once and three wake the agent two runs later, not thirty
-        // minutes later.
+        // A stranded run (`stranded`) didn't run either: the unreachable streak the list shows
+        // goes on.
         if !was_unreachable {
             r.unreachable_from = 0;
             r.status.unreachable_since = None;
         }
-        // `stranded`'s own clock: only runs that found no tunnel at all keep it going.
+        // `stranded`'s own clock (`no_tunnel`). It keeps going through a stranded run, so the
+        // next runs break at once and three wake the agent two runs later.
         if !no_tunnel {
             r.no_tunnel_from = 0;
         } else if r.no_tunnel_from == 0 {
@@ -767,8 +777,8 @@ const STRANDED_AFTER_MS: i64 = 10 * 60 * 1000;
 
 /// Called only when `tunnel_args` found NO tunnel for the watch. An unreachable run is the
 /// host's fault only while there is no way to it. When every run for `STRANDED_AFTER_MS` has
-/// found no tunnel it can use (`Run::no_tunnel_from` — time spent failing on its own tunnel
-/// doesn't count) and maiTerm holds a connection to the same user@host now, the fault is the
+/// found no tunnel it can use while maiTerm held a connection to the same user@host by another
+/// route (`Run::no_tunnel_from`), and it still does, the fault is the
 /// watch's (or maiTerm's), and waiting won't mend it: it counts as broken, so three of them wake
 /// the agent instead of "unreachable" standing forever beside an open tab.
 fn stranded(state: &AppState, c: &Candidate, outcome: Outcome) -> Outcome {
