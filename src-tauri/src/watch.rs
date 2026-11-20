@@ -36,13 +36,28 @@ mod remote;
 /// script runs only over one, so the connection is maiTerm's own and already authenticated.
 /// Returned: the tunnel's own key (its ControlMaster socket is named by it) and the args to
 /// connect with — `connect_args`, never the tunnel's whole command line.
+///
+/// The same spelling first; failing that, any tunnel that reaches the same place as the same
+/// user (`same_route`). A watch keeps the spelling its tab had when it was created, and a tab's
+/// ssh command can change under it: a reconnect, or a fix to how maiTerm spells it. When a
+/// `alias ssh='ssh -x -C'` stopped growing saved commands (2026-11-18), every watch created over
+/// a grown one (`-x -C -o ControlMaster=no -x -C root@eca`) lost its tunnel (`-x -C root@eca`)
+/// for good, and said "unreachable" while a tab to the host sat open.
 fn tunnel_args(state: &AppState, host: &str) -> Option<(String, String)> {
-    state
-        .ssh_tunnels
-        .read()
+    let tunnels = state.ssh_tunnels.read();
+    tunnels
         .values()
         .find(|t| same_host(&t.host_key, host))
+        .or_else(|| tunnels.values().find(|t| same_route(&t.host_key, host)))
         .map(|t| (t.host_key.clone(), connect_args(&t.ssh_args)))
+}
+
+/// Is there a tunnel to the same user@host (`host_label`), whatever its options? Then a watch
+/// that finds no tunnel of its own isn't waiting for a connection: its route differs (another
+/// key, another jump host), and waiting won't change that.
+fn tunnel_to_same_label(state: &AppState, host: &str) -> Option<String> {
+    let want = host_label(host);
+    state.ssh_tunnels.read().values().map(|t| host_label(&t.host_key)).find(|l| *l == want)
 }
 
 pub const MIN_EVERY_SECS: u32 = 15;
@@ -334,6 +349,73 @@ pub fn same_host(a: &str, b: &str) -> bool {
     connect_args(a) == connect_args(b)
 }
 
+/// ssh switches that change how a connection behaves, never where it goes or as whom: X11,
+/// compression, verbosity, tty, agent forwarding, no-command, background, GSSAPI.
+const INERT_SWITCHES: &str = "xXCvqTtYyAakKgNnfs";
+/// ssh options taking an argument that likewise leave the destination alone: forwards, cipher,
+/// MAC, escape char, log file, and every `-o` key in `INERT_KEYS`.
+const INERT_ARG_FLAGS: &str = "LRDcmeEQwOS";
+const INERT_KEYS: &[&str] = &[
+    "controlmaster", "controlpath", "controlpersist", "compression", "forwardx11", "forwardx11trusted",
+    "forwardagent", "serveraliveinterval", "serveralivecountmax", "connecttimeout", "batchmode",
+    "loglevel", "requesttty", "sendenv", "setenv", "tcpkeepalive", "exitonforwardfailure",
+    "localforward", "remoteforward", "dynamicforward", "escapechar", "ciphers", "macs",
+];
+
+/// What decides where an ssh goes and as whom: its destination and every option that could
+/// change either (`-i`, `-J`, `-F`, `-p`, `-l`, `-o HostName=`…), in a canonical order, with
+/// repeats and the inert ones (`INERT_SWITCHES`, `INERT_ARG_FLAGS`, `INERT_KEYS`) left out.
+/// Anything not known to be inert counts, so two routes are equal only when nothing in them
+/// could take a connection elsewhere.
+fn route_key(host: &str) -> Option<Vec<String>> {
+    let p = parse_ssh(host);
+    let dest = p.dest.clone()?;
+    let words = p.connect;
+    let mut keep: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        let w = &words[i];
+        let Some(flags) = w.strip_prefix('-').filter(|f| !f.is_empty()) else {
+            i += 1;
+            continue;
+        };
+        for (j, ch) in flags.char_indices() {
+            if !SSH_ARG_FLAGS.contains(ch) {
+                if !INERT_SWITCHES.contains(ch) {
+                    keep.push(format!("-{ch}"));
+                }
+                continue;
+            }
+            let rest = &flags[j + ch.len_utf8()..];
+            let arg = if rest.is_empty() {
+                i += 1;
+                words.get(i).cloned().unwrap_or_default()
+            } else {
+                rest.to_string()
+            };
+            let inert = INERT_ARG_FLAGS.contains(ch)
+                || (ch == 'o'
+                    && INERT_KEYS.contains(&arg.split(['=', ' ']).next().unwrap_or("").to_ascii_lowercase().as_str()));
+            if !inert {
+                keep.push(format!("-{ch} {arg}"));
+            }
+            break;
+        }
+        i += 1;
+    }
+    keep.sort();
+    keep.dedup();
+    keep.push(dest);
+    Some(keep)
+}
+
+/// Two ssh spellings that reach the same place as the same user (`route_key`), however their
+/// inert options differ. Used only to FIND a live connection for a host already approved — an
+/// approval is still keyed by `same_host`'s spelling.
+pub fn same_route(a: &str, b: &str) -> bool {
+    matches!((route_key(a), route_key(b)), (Some(x), Some(y)) if x == y)
+}
+
 /// A place for a human: `place` with the host's label.
 pub fn place_label(f: &FollowUp) -> Option<String> {
     f.due.cwd.as_deref().map(|cwd| place(f.due.host.as_deref().map(host_label).as_deref(), cwd))
@@ -606,13 +688,17 @@ async fn run_and_record(state: Arc<AppState>, app: tauri::AppHandle, c: Candidat
         (None, Some(dir)) => execute(&c, &dir).await,
         (None, None) => Outcome::Broken("maiTerm has no data folder to run it from".into()),
     };
+    let was_unreachable = matches!(outcome, Outcome::Unreachable(_));
+    let outcome = stranded(&state, &c, outcome);
     let met = {
         let mut map = runs().lock();
         let r = map.entry(c.id.clone()).or_default();
         r.status.running = false;
         r.status.last_run_at = Some(crate::commands::workspace::iso_now());
         r.status.last_duration_ms = Some(began.elapsed().as_millis() as u64);
-        if !matches!(outcome, Outcome::Unreachable(_)) {
+        // A stranded run (`stranded`) is still unreachable: its streak goes on, so the next
+        // runs count as broken at once and three wake the agent within a minute, not thirty.
+        if !was_unreachable {
             r.unreachable_from = 0;
             r.status.unreachable_since = None;
         }
@@ -653,6 +739,27 @@ async fn run_and_record(state: Arc<AppState>, app: tauri::AppHandle, c: Candidat
     if let Some((outcome, report)) = met {
         meet(&state, &app, &c, outcome, report);
     }
+}
+
+/// How long a remote watch may go unrun while maiTerm HAS a connection to its user@host before
+/// its runs count as broken.
+const STRANDED_AFTER_MS: i64 = 10 * 60 * 1000;
+
+/// An unreachable run is the host's fault only while there is no way to it. When maiTerm holds a
+/// connection to the same user@host and the watch still hasn't run for `STRANDED_AFTER_MS`, the
+/// fault is the watch's (or maiTerm's), and waiting won't mend it: it counts as broken, so three
+/// of them wake the agent instead of "unreachable" standing forever beside an open tab.
+fn stranded(state: &AppState, c: &Candidate, outcome: Outcome) -> Outcome {
+    let (Outcome::Unreachable(why), Some(host)) = (&outcome, &c.host) else { return outcome };
+    let from = runs().lock().get(&c.id).map_or(0, |r| r.unreachable_from);
+    if from == 0 || now_ms() - from < STRANDED_AFTER_MS {
+        return outcome;
+    }
+    let Some(label) = tunnel_to_same_label(state, host) else { return outcome };
+    Outcome::Broken(format!(
+        "it has not run for {} minutes although maiTerm is connected to {label} ({why}). Cancel it and schedule it again from a tab connected to {label}",
+        (now_ms() - from) / 60_000
+    ))
 }
 
 /// Mark it met wherever it now is — the tab may have moved workspace or window since the pass
@@ -991,6 +1098,87 @@ mod tests {
         assert_eq!(clean(b"\x1b[201~hi\r\n", 100, false), "[201~hi");
         assert_eq!(clean(b"abcdef", 3, false), "abc…");
         assert_eq!(clean(b"abcdef", 3, true), "…def");
+    }
+
+    fn tunnel(state: &AppState, key: &str) {
+        state.ssh_tunnels.write().insert(
+            key.into(),
+            crate::state::app_state::SshTunnel { pid: 1, remote_port: 1, host_key: key.into(), tab_ids: Default::default(), ssh_args: key.into() },
+        );
+    }
+
+    /// The root@eca DDoS watch (2026-11-18): created while `alias ssh='ssh -x -C'` grew the tab's
+    /// saved command, it kept the grown spelling after the fix, and never found its tunnel again.
+    #[test]
+    fn a_watch_finds_a_tunnel_whose_spelling_differs_only_in_inert_options() {
+        let state = AppState::new();
+        tunnel(&state, "-x -C root@eca");
+        for stored in [
+            "-x -C -o ControlMaster=no -x -C root@eca",
+            "-x -C -o ControlMaster=no -x -C -o ControlMaster=no -x -C root@eca",
+            "root@eca",
+            "-tt -XC -v -o ServerAliveInterval=10 root@eca",
+        ] {
+            assert_eq!(tunnel_args(&state, stored).map(|(k, _)| k).as_deref(), Some("-x -C root@eca"), "{stored}");
+        }
+        // The exact spelling wins over a merely equivalent one.
+        tunnel(&state, "-x -C -o ControlMaster=no root@eca");
+        assert_eq!(
+            tunnel_args(&state, "-x -C -o ControlMaster=no root@eca").map(|(k, _)| k).as_deref(),
+            Some("-x -C -o ControlMaster=no root@eca")
+        );
+    }
+
+    /// Anything that can change where ssh goes, or as whom, keeps two spellings apart.
+    #[test]
+    fn a_watch_never_borrows_a_tunnel_that_may_go_elsewhere() {
+        let state = AppState::new();
+        tunnel(&state, "-x -C root@eca");
+        for other in [
+            "-J bastion root@eca",
+            "-i ~/.ssh/other root@eca",
+            "-p 2222 root@eca",
+            "-o HostName=10.0.0.9 root@eca",
+            "-F ~/.ssh/alt root@eca",
+            "-x -C enagic@eca",
+            "-l enagic eca",
+            "-x -C root@nova2",
+        ] {
+            assert!(tunnel_args(&state, other).is_none(), "{other}");
+        }
+        assert_eq!(tunnel_to_same_label(&state, "-J bastion root@eca").as_deref(), Some("root@eca"));
+        assert_eq!(tunnel_to_same_label(&state, "-x -C enagic@eca"), None);
+    }
+
+    /// Unreachable for ten minutes while maiTerm holds a connection to the same user@host is
+    /// broken, so three runs wake the agent; with no connection at all it waits, as before.
+    #[test]
+    fn an_unreachable_watch_beside_an_open_connection_breaks_after_ten_minutes() {
+        let state = AppState::new();
+        let mut c = Candidate {
+            id: format!("stranded-{}", uuid::Uuid::new_v4()),
+            tab_id: "t".into(),
+            script: "exit 1".into(),
+            cwd: "/root".into(),
+            host: Some("-J bastion root@eca".into()),
+            every: Duration::from_secs(15),
+            timeout: Duration::from_secs(10),
+            last_run: None,
+        };
+        let unreachable = || Outcome::Unreachable("no tunnel".into());
+        runs().lock().entry(c.id.clone()).or_default().unreachable_from = now_ms() - STRANDED_AFTER_MS - 1000;
+        // No connection to root@eca at all: still just unreachable.
+        assert!(matches!(stranded(&state, &c, unreachable()), Outcome::Unreachable(_)));
+        tunnel(&state, "-x -C root@eca");
+        assert!(matches!(stranded(&state, &c, unreachable()), Outcome::Broken(_)));
+        // A fresh streak waits its ten minutes first.
+        runs().lock().get_mut(&c.id).unwrap().unreachable_from = now_ms() - 1000;
+        assert!(matches!(stranded(&state, &c, unreachable()), Outcome::Unreachable(_)));
+        // A local script is never stranded.
+        c.host = None;
+        runs().lock().get_mut(&c.id).unwrap().unreachable_from = now_ms() - STRANDED_AFTER_MS - 1000;
+        assert!(matches!(stranded(&state, &c, unreachable()), Outcome::Unreachable(_)));
+        runs().lock().remove(&c.id);
     }
 
     /// A `due.host` (or a Files root) persisted before ssh args were shell words keeps its old

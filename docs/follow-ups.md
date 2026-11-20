@@ -425,6 +425,18 @@ waits on conditions on THAT machine, so its script runs there:
   (exit 255), or nothing back within the limit + 20 s is `Unreachable`: not a broken run, so it
   never "BROKE" a follow-up three times over a laptop lid. The list says "waiting for the
   connection (…)". It runs again once an ssh tab to that host is open.
+- **A watch finds its connection by where it goes, not how it was spelled** (`tunnel_args`,
+  2026-11-20). `due.host` is the tab's ssh command when the watch was created, and that command
+  can change under it: a reconnect, or a fix to how maiTerm spells it. The same spelling is tried
+  first, then any tunnel with the same `route_key`: the destination plus every option that could
+  change where ssh goes or as whom (`-i`, `-J`, `-F`, `-p`, `-l`, `-o HostName=`…), with inert
+  ones (`-x -C -v`, `-o ControlMaster=`…) ignored. When the `alias ssh='ssh -x -C'` growth was
+  fixed, every watch created over a grown command (`-x -C -o ControlMaster=no -x -C root@eca`) lost
+  its tunnel (`-x -C root@eca`) and said "unreachable" for days beside an open tab, missing real
+  DDoS alerts. The approval is still keyed by the stored spelling.
+- **…but not forever beside an open connection** (`stranded`). Unreachable for 10 minutes while
+  maiTerm holds a tunnel to the same user@host (another key, another jump host) is a broken run,
+  saying so. The streak goes on, so three in a row wake the agent within a minute.
 - **Cleanup there** is the wrapper's: files untouched for 8 days are removed on every run (a
   follow-up waits at most 7, and every run touches its own two).
 - **A local project move** (`relocate`) leaves a remote script's folder alone.
