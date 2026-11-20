@@ -434,9 +434,12 @@ waits on conditions on THAT machine, so its script runs there:
   fixed, every watch created over a grown command (`-x -C -o ControlMaster=no -x -C root@eca`) lost
   its tunnel (`-x -C root@eca`) and said "unreachable" for days beside an open tab, missing real
   DDoS alerts. The approval is still keyed by the stored spelling.
-- **…but not forever beside an open connection** (`stranded`). Unreachable for 10 minutes while
-  maiTerm holds a tunnel to the same user@host (another key, another jump host) is a broken run,
-  saying so. The streak goes on, so three in a row wake the agent within a minute.
+- **…but not forever beside an open connection** (`stranded`). 10 minutes of runs that found no
+  tunnel the watch can use (its own clock, `no_tunnel_from`: time spent failing on its own tunnel
+  doesn't count), while maiTerm holds a tunnel to the same user@host by another route (another
+  key, another jump host), is a broken run, saying so. The streak goes on, so the next two runs break too and
+  wake the agent. A watch whose OWN tunnel fails (a saturated host refusing new sessions) still
+  just waits: re-scheduling would put it on that same tunnel.
 - **Cleanup there** is the wrapper's: files untouched for 8 days are removed on every run (a
   follow-up waits at most 7, and every run touches its own two).
 - **A local project move** (`relocate`) leaves a remote script's folder alone.

@@ -114,6 +114,10 @@ struct Run {
     starts: std::collections::VecDeque<i64>,
     /// When the current unreachable streak began (ms); 0 when reachable.
     unreachable_from: i64,
+    /// When runs of a remote watch began finding NO tunnel it can use (ms); 0 once one does.
+    /// `stranded`'s clock, apart from `unreachable_from`: minutes spent failing on its own
+    /// tunnel (a saturated host) are not minutes without one.
+    no_tunnel_from: i64,
     /// When its last run started (ms); 0 before the first.
     last_start: i64,
     status: WatchStatus,
@@ -677,19 +681,28 @@ pub async fn watch_loop(state: Arc<AppState>, app: tauri::AppHandle) {
 
 async fn run_and_record(state: Arc<AppState>, app: tauri::AppHandle, c: Candidate) {
     let began = Instant::now();
-    let outcome = match (&c.host, scripts_dir()) {
+    // `was_unreachable`: no run happened for want of a connection — a stranded run (`stranded`)
+    // included, which is Broken but keeps the streak going. `no_tunnel`: none it could use.
+    let (outcome, was_unreachable, no_tunnel) = match (&c.host, scripts_dir()) {
         (Some(host), _) => match tunnel_args(&state, host) {
-            Some((tunnel_key, ssh_args)) => remote::execute(&c, &tunnel_key, &ssh_args).await,
-            None => Outcome::Unreachable(format!(
-                "maiTerm has no connection to {} — it runs once an ssh tab to it is open",
-                host_label(host)
-            )),
+            // Its own tunnel failing (a saturated host refusing new sessions) is a plain wait,
+            // never `stranded`: re-scheduling would land it on that same tunnel.
+            Some((tunnel_key, ssh_args)) => {
+                let o = remote::execute(&c, &tunnel_key, &ssh_args).await;
+                let u = matches!(o, Outcome::Unreachable(_));
+                (o, u, false)
+            }
+            None => {
+                let why = format!(
+                    "maiTerm has no connection to {} — it runs once an ssh tab to it is open",
+                    host_label(host)
+                );
+                (stranded(&state, &c, Outcome::Unreachable(why)), true, true)
+            }
         },
-        (None, Some(dir)) => execute(&c, &dir).await,
-        (None, None) => Outcome::Broken("maiTerm has no data folder to run it from".into()),
+        (None, Some(dir)) => (execute(&c, &dir).await, false, false),
+        (None, None) => (Outcome::Broken("maiTerm has no data folder to run it from".into()), false, false),
     };
-    let was_unreachable = matches!(outcome, Outcome::Unreachable(_));
-    let outcome = stranded(&state, &c, outcome);
     let met = {
         let mut map = runs().lock();
         let r = map.entry(c.id.clone()).or_default();
@@ -697,10 +710,17 @@ async fn run_and_record(state: Arc<AppState>, app: tauri::AppHandle, c: Candidat
         r.status.last_run_at = Some(crate::commands::workspace::iso_now());
         r.status.last_duration_ms = Some(began.elapsed().as_millis() as u64);
         // A stranded run (`stranded`) is still unreachable: its streak goes on, so the next
-        // runs count as broken at once and three wake the agent within a minute, not thirty.
+        // runs count as broken at once and three wake the agent two runs later, not thirty
+        // minutes later.
         if !was_unreachable {
             r.unreachable_from = 0;
             r.status.unreachable_since = None;
+        }
+        // `stranded`'s own clock: only runs that found no tunnel at all keep it going.
+        if !no_tunnel {
+            r.no_tunnel_from = 0;
+        } else if r.no_tunnel_from == 0 {
+            r.no_tunnel_from = now_ms();
         }
         match &outcome {
             Outcome::Met(out) => {
@@ -745,13 +765,15 @@ async fn run_and_record(state: Arc<AppState>, app: tauri::AppHandle, c: Candidat
 /// its runs count as broken.
 const STRANDED_AFTER_MS: i64 = 10 * 60 * 1000;
 
-/// An unreachable run is the host's fault only while there is no way to it. When maiTerm holds a
-/// connection to the same user@host and the watch still hasn't run for `STRANDED_AFTER_MS`, the
-/// fault is the watch's (or maiTerm's), and waiting won't mend it: it counts as broken, so three
-/// of them wake the agent instead of "unreachable" standing forever beside an open tab.
+/// Called only when `tunnel_args` found NO tunnel for the watch. An unreachable run is the
+/// host's fault only while there is no way to it. When every run for `STRANDED_AFTER_MS` has
+/// found no tunnel it can use (`Run::no_tunnel_from` — time spent failing on its own tunnel
+/// doesn't count) and maiTerm holds a connection to the same user@host now, the fault is the
+/// watch's (or maiTerm's), and waiting won't mend it: it counts as broken, so three of them wake
+/// the agent instead of "unreachable" standing forever beside an open tab.
 fn stranded(state: &AppState, c: &Candidate, outcome: Outcome) -> Outcome {
     let (Outcome::Unreachable(why), Some(host)) = (&outcome, &c.host) else { return outcome };
-    let from = runs().lock().get(&c.id).map_or(0, |r| r.unreachable_from);
+    let from = runs().lock().get(&c.id).map_or(0, |r| r.no_tunnel_from);
     if from == 0 || now_ms() - from < STRANDED_AFTER_MS {
         return outcome;
     }
@@ -1166,17 +1188,17 @@ mod tests {
             last_run: None,
         };
         let unreachable = || Outcome::Unreachable("no tunnel".into());
-        runs().lock().entry(c.id.clone()).or_default().unreachable_from = now_ms() - STRANDED_AFTER_MS - 1000;
+        runs().lock().entry(c.id.clone()).or_default().no_tunnel_from = now_ms() - STRANDED_AFTER_MS - 1000;
         // No connection to root@eca at all: still just unreachable.
         assert!(matches!(stranded(&state, &c, unreachable()), Outcome::Unreachable(_)));
         tunnel(&state, "-x -C root@eca");
         assert!(matches!(stranded(&state, &c, unreachable()), Outcome::Broken(_)));
         // A fresh streak waits its ten minutes first.
-        runs().lock().get_mut(&c.id).unwrap().unreachable_from = now_ms() - 1000;
+        runs().lock().get_mut(&c.id).unwrap().no_tunnel_from = now_ms() - 1000;
         assert!(matches!(stranded(&state, &c, unreachable()), Outcome::Unreachable(_)));
         // A local script is never stranded.
         c.host = None;
-        runs().lock().get_mut(&c.id).unwrap().unreachable_from = now_ms() - STRANDED_AFTER_MS - 1000;
+        runs().lock().get_mut(&c.id).unwrap().no_tunnel_from = now_ms() - STRANDED_AFTER_MS - 1000;
         assert!(matches!(stranded(&state, &c, unreachable()), Outcome::Unreachable(_)));
         runs().lock().remove(&c.id);
     }
