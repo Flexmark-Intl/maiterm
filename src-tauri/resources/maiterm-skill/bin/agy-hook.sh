@@ -7,7 +7,9 @@
 # endpoint (?runtime=gemini&tab_id=...).
 #
 # Args / env (set by maiTerm at PTY spawn):
-#   $1               (optional) MCP server port baked at install time (SSH remote bridge).
+#   --event <Name>   (optional) explicit hook event name passed by hooks.json so untrusted
+#                    toolCall.args can never spoof event classification
+#   <port>           (optional) MCP server port baked at install time (SSH remote bridge).
 #                    Local installs omit it and read the per-process $MAITERM_PORT so dev
 #                    and prod share one plugin definition cleanly.
 #   $MAITERM_PORT    the owning maiTerm instance's MCP server port
@@ -25,7 +27,20 @@
 #   - All other events (PostInvocation, PostToolUse, Stop): print `{}` so
 #     Stop never blocks/continues and Post* gets valid JSON.
 
-baked_port="${1:-}"
+explicit_event=""
+baked_port=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --event)
+      explicit_event="${2:-}"
+      shift 2 2>/dev/null || shift
+      ;;
+    *)
+      baked_port="$1"
+      shift
+      ;;
+  esac
+done
 
 # tmux / sudo / su don't inherit maiTerm env vars; fall back to ~/.aiterm when present.
 if [ -z "${MAITERM_TAB_ID:-}" ] || [ -z "${MAITERM_PORT:-}" ] || [ -z "${MAITERM_AUTH:-}" ]; then
@@ -39,39 +54,55 @@ tab="${MAITERM_TAB_ID:-}"
 # Always drain stdin so the pipe never blocks agy.
 payload="$(cat)"
 
-# Classify event on the raw JSON payload (no jq/python dependency).
+# Classify event authoritatively from `--event` (from hooks.json) when present; otherwise fall
+# back to payload inspection with PreToolUse checked FIRST so tool args can't spoof it.
 event_kind="other"
-case "$payload" in
-  *'"hookEventName":"SessionStart"'* | *'"hookEventName": "SessionStart"'*)
-    event_kind="prime_capable"
-    ;;
-  *'"hookEventName":"PreInvocation"'* | *'"hookEventName": "PreInvocation"'*)
-    # Only ask for priming / turn context on invocationNum == 0 (protojson omits zero fields).
-    case "$payload" in
-      *'"invocationNum":0'* | *'"invocationNum": 0'*) event_kind="prime_capable" ;;
-      *'"invocationNum"'*) event_kind="other" ;;
-      *) event_kind="prime_capable" ;;
-    esac
-    ;;
-  *'"hookEventName":"PreToolUse"'* | *'"hookEventName": "PreToolUse"'*)
-    event_kind="pre_tool"
-    ;;
-esac
+if [ -n "$explicit_event" ]; then
+  case "$explicit_event" in
+    PreToolUse) event_kind="pre_tool" ;;
+    SessionStart) event_kind="prime_capable" ;;
+    PreInvocation)
+      case "$payload" in
+        *'"invocationNum":0'* | *'"invocationNum": 0'*) event_kind="prime_capable" ;;
+        *'"invocationNum"'*) event_kind="other" ;;
+        *) event_kind="prime_capable" ;;
+      esac
+      ;;
+  esac
+else
+  case "$payload" in
+    *'"hookEventName":"PreToolUse"'* | *'"hookEventName": "PreToolUse"'*)
+      event_kind="pre_tool"
+      ;;
+    *'"hookEventName":"SessionStart"'* | *'"hookEventName": "SessionStart"'*)
+      event_kind="prime_capable"
+      ;;
+    *'"hookEventName":"PreInvocation"'* | *'"hookEventName": "PreInvocation"'*)
+      # Only ask for priming / turn context on invocationNum == 0 (protojson omits zero fields).
+      case "$payload" in
+        *'"invocationNum":0'* | *'"invocationNum": 0'*) event_kind="prime_capable" ;;
+        *'"invocationNum"'*) event_kind="other" ;;
+        *) event_kind="prime_capable" ;;
+      esac
+      ;;
+  esac
+fi
 
 reply=""
 if [ -n "$port" ] && [ "$port" != "0" ] && [ -n "$token" ]; then
+  # Pipe payload over stdin (`--data-binary @-`) rather than argv to avoid Linux 128 KiB E2BIG.
   if [ "$event_kind" = "prime_capable" ]; then
-    reply="$(curl -fsS -m 3 \
+    reply="$(printf '%s' "$payload" | curl -fsS -m 3 \
       -H "Authorization: Bearer ${token}" \
       -H "Content-Type: application/json" \
-      --data-binary "$payload" \
+      --data-binary @- \
       "http://127.0.0.1:${port}/hooks?runtime=gemini&tab_id=${tab}&prime=1&format=agy" \
       2>/dev/null)" || reply=""
   else
-    curl -fsS -m 2 \
+    printf '%s' "$payload" | curl -fsS -m 2 \
       -H "Authorization: Bearer ${token}" \
       -H "Content-Type: application/json" \
-      --data-binary "$payload" \
+      --data-binary @- \
       "http://127.0.0.1:${port}/hooks?runtime=gemini&tab_id=${tab}" \
       >/dev/null 2>&1 || true
   fi

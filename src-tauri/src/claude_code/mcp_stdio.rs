@@ -159,13 +159,17 @@ async fn run_bridge<R: BufRead, W: Write>(cfg: BridgeConfig, mut reader: R, mut 
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("")
                     .to_string();
-                let body = resp.text().await.unwrap_or_default();
-                if status == reqwest::StatusCode::ACCEPTED {
-                    None
-                } else if status.is_success() {
-                    extract_rpc_payload(&content_type, &body)
-                } else {
-                    rpc_error_for(trimmed, &format!("maiTerm MCP HTTP {}", status.as_u16()))
+                match resp.text().await {
+                    Ok(body) => {
+                        if status == reqwest::StatusCode::ACCEPTED {
+                            None
+                        } else if status.is_success() {
+                            extract_rpc_payload(&content_type, &body)
+                        } else {
+                            rpc_error_for(trimmed, &format!("maiTerm MCP HTTP {}", status.as_u16()))
+                        }
+                    }
+                    Err(e) => rpc_error_for(trimmed, &format!("maiTerm MCP read failed: {e}")),
                 }
             }
             Err(e) => rpc_error_for(trimmed, &format!("maiTerm MCP unreachable: {e}")),

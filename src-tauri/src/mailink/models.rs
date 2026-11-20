@@ -354,21 +354,31 @@ fn agy_builtin_list() -> Vec<ModelOption> {
     out
 }
 
-/// Models available to an Antigravity (`agy`) tab. Queries `agy models` and caches the result
-/// for 5 minutes so repeated picker opens are instant; falls back to [`AGY_BUILTIN`] if `agy`
-/// is unavailable.
+/// Models available to an Antigravity (`agy`) tab. Queries `agy models` (with a 5 s timeout so a
+/// slow/offline RPC never hangs a worker thread) and caches both successes (5 min) and failures
+/// (60 s, returning [`AGY_BUILTIN`]) so an offline or `agy`-less machine does not re-spawn on
+/// every picker open.
 pub fn available_agy() -> Vec<ModelOption> {
+    use std::io::Read;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
-    static CACHE: std::sync::LazyLock<Mutex<Option<(Instant, Vec<ModelOption>)>>> =
+    struct AgyCache {
+        at: Instant,
+        ttl: Duration,
+        list: Vec<ModelOption>,
+    }
+
+    static CACHE: std::sync::LazyLock<Mutex<Option<AgyCache>>> =
         std::sync::LazyLock::new(|| Mutex::new(None));
-    const TTL: Duration = Duration::from_secs(300);
+    const OK_TTL: Duration = Duration::from_secs(300);
+    const ERR_TTL: Duration = Duration::from_secs(60);
+    const CMD_TIMEOUT: Duration = Duration::from_secs(5);
 
     if let Ok(guard) = CACHE.lock() {
-        if let Some((at, list)) = guard.as_ref() {
-            if at.elapsed() < TTL && !list.is_empty() {
-                return list.clone();
+        if let Some(entry) = guard.as_ref() {
+            if entry.at.elapsed() < entry.ttl && !entry.list.is_empty() {
+                return entry.list.clone();
             }
         }
     }
@@ -390,24 +400,57 @@ pub fn available_agy() -> Vec<ModelOption> {
     let sep = if cfg!(windows) { ";" } else { ":" };
     let search_path = path_parts.join(sep);
 
-    let queried = std::process::Command::new("agy")
-        .arg("models")
-        .env("PATH", search_path)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| parse_agy_models(&String::from_utf8_lossy(&o.stdout)))
-        .filter(|list| !list.is_empty());
+    let queried = (|| -> Option<Vec<ModelOption>> {
+        let mut child = std::process::Command::new("agy")
+            .arg("models")
+            .env("PATH", &search_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        let mut stdout_pipe = child.stdout.take()?;
+        let reader = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = stdout_pipe.read_to_end(&mut buf);
+            buf
+        });
+        let start = Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(st)) => break Some(st),
+                Ok(None) if start.elapsed() < CMD_TIMEOUT => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+            }
+        };
+        let bytes = reader.join().unwrap_or_default();
+        if status.is_some_and(|s| s.success()) {
+            let list = parse_agy_models(&String::from_utf8_lossy(&bytes));
+            if !list.is_empty() {
+                return Some(list);
+            }
+        }
+        None
+    })();
 
     if let Some(list) = queried {
         if let Ok(mut guard) = CACHE.lock() {
-            *guard = Some((Instant::now(), list.clone()));
+            *guard = Some(AgyCache { at: Instant::now(), ttl: OK_TTL, list: list.clone() });
         }
         return list;
     }
 
-    agy_builtin_list()
+    let fallback = agy_builtin_list();
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = Some(AgyCache { at: Instant::now(), ttl: ERR_TTL, list: fallback.clone() });
+    }
+    fallback
 }
 
 #[cfg(test)]

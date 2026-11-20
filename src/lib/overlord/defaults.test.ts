@@ -193,9 +193,29 @@ describe('seedDefaultOverlordRules — a flagged rule that is still ours', () =>
     });
   });
 
-  it('compacts on Codex too, so a Codex tab never repeats the prep with nothing to show for it', () => {
+  it('compacts on Codex and Antigravity too, so tabs never repeat the prep with nothing to show for it', () => {
     for (const id of [ID, 'checkpoint_busy_agent']) {
-      expect(DEFAULT_OVERLORD_RULES[id].sequence[1].runtimes).toEqual(['claude', 'codex']);
+      expect(DEFAULT_OVERLORD_RULES[id].sequence[1].runtimes).toEqual(['claude', 'codex', 'gemini']);
+    }
+  });
+
+  it('migrates workspace-scoped checkpoint rules from the previous claude+codex template onto gemini too', () => {
+    for (const id of [ID, 'checkpoint_busy_agent']) {
+      const current = DEFAULT_OVERLORD_RULES[id];
+      const preGeminiSeq = structuredClone(current.sequence);
+      preGeminiSeq[1].runtimes = ['claude', 'codex'];
+      const scoped = rule({
+        ...structuredClone(current),
+        default_id: id,
+        workspaces: ['ws-1'],
+        sequence: preGeminiSeq,
+        user_modified: true,
+      });
+      const seeded = seedDefaultOverlordRules([scoped], []);
+      const row = seeded!.find((x) => x.default_id === id)!;
+      expect(row.sequence[1].runtimes).toEqual(['claude', 'codex', 'gemini']);
+      expect(row.workspaces).toEqual(['ws-1']);
+      expect(row.user_modified).toBe(false);
     }
   });
 

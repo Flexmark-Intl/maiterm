@@ -32,7 +32,7 @@ const claudeAdapter: AgentAdapter = {
     // A permission prompt, or an active interactive elicitation tool (AskUserQuestion),
     // is a multiple-choice question for the human — never inject a peer message over it.
     if (state.state === 'permission') return true;
-    if (state.state === 'active' && state.toolName === 'AskUserQuestion') return true;
+    if (state.state === 'active' && (state.toolName === 'AskUserQuestion' || state.staleTool === 'AskUserQuestion')) return true;
     return false;
   },
   supportsFork: supportsFork('claude'),
@@ -88,7 +88,7 @@ const geminiAdapter: AgentAdapter = {
   isAwaitingHumanInput(state) {
     if (!state) return false;
     if (state.state === 'permission') return true;
-    if (state.state === 'active' && state.toolName === 'ask_question') return true;
+    if (state.state === 'active' && (state.toolName === 'ask_question' || state.staleTool === 'ask_question')) return true;
     return false;
   },
   supportsFork: supportsFork('gemini'),

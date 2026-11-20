@@ -571,7 +571,11 @@ async fn models_list(
     if !is_designated(&s.app, &tab) {
         return Err(StatusCode::NOT_FOUND);
     }
-    Ok(Json(json!(models_for_tab(&s.app, &tab))))
+    let app = s.app.clone();
+    let list = tokio::task::spawn_blocking(move || models_for_tab(&app, &tab))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!(list)))
 }
 
 /// What THIS tab can be switched to: Antigravity (`agy`) tabs query `agy models`, while Claude

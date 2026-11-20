@@ -2123,7 +2123,13 @@ fn agy_last_commit_from_tail(tail: &str) -> Option<u64> {
                 });
             if calls_commit {
                 pending_commit_ts = ts;
+            } else {
+                // Any subsequent model call without `git commit` ends the previous commit's
+                // output window so a failed commit cannot match unrelated later tool output.
+                pending_commit_ts = None;
             }
+        } else if ty == "USER_INPUT" {
+            pending_commit_ts = None;
         } else if ty == "GENERIC" && pending_commit_ts.is_some() {
             if v.get("content").and_then(|c| c.as_str()).is_some_and(names_a_new_commit) {
                 last_landed = ts.or(pending_commit_ts);

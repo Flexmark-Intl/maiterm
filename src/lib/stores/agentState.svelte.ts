@@ -261,7 +261,7 @@ function createAgentStateStore() {
       staleTimers.set(tabId, setTimeout(() => {
         const s = sessions.get(tabId);
         if (s?.toolName === toolName) {
-          setState(tabId, sessionId, state);
+          setState(tabId, sessionId, state, undefined, undefined, s.runtime);
           // setState writes a fresh record, so any later event drops this again.
           const after = sessions.get(tabId);
           if (after) {

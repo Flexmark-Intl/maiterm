@@ -77,30 +77,50 @@ fn box_lines(screen: &str) -> Option<Vec<&str>> {
     Some(out)
 }
 
+/// True when the non-empty text inside a box matches a known empty-box placeholder — either
+/// verbatim (after rejoining lines wrapped across a narrow split pane) or as a truncated prefix
+/// of a long Antigravity mode hint (at least 16 chars so a short human draft like "Auto" never
+/// matches).
+fn is_placeholder_text(lines: &[&str]) -> bool {
+    let joined: String = lines
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if joined.is_empty() {
+        return false;
+    }
+    PLACEHOLDERS.iter().any(|&p| {
+        p == joined || (joined.len() >= 16 && p.starts_with(joined.as_str()))
+    })
+}
+
 pub fn parse(screen: &str) -> InputBox {
     let Some(lines) = box_lines(screen) else { return InputBox::Unknown };
-    // Claude's own hints in an EMPTY box, should one arrive undimmed. Whole-line match only: a
-    // draft that merely starts the same way is still the human's.
-    if lines.len() == 1 && PLACEHOLDERS.contains(&lines[0].trim()) {
+    // Known agent hints in an EMPTY box, should one arrive undimmed (including wrapped/truncated
+    // Antigravity mode hints in narrow split panes).
+    if is_placeholder_text(&lines) {
         return InputBox::Empty;
     }
     if lines.iter().any(|l| !l.trim().is_empty()) { InputBox::HasText } else { InputBox::Empty }
 }
 
-/// `parse` on the undimmed screen, knowing what the full screen shows. Claude draws a hint the
-/// way Ink draws any placeholder: its first letter inverse (the cursor sitting on it), the rest
-/// dim — so the undimmed screen shows "❯ P", which alone reads as a one-letter draft. The full
-/// screen tells them apart: there the box holds exactly a known hint, and the undimmed box only
-/// its opening. A real "P" typed by the human shows as "P" on both.
+/// `parse` on the undimmed screen, knowing what the full screen shows. Claude/Antigravity draw a
+/// hint with its first letter inverse (the cursor sitting on it) and the rest dim — so the
+/// undimmed screen shows "❯ P" or "> A", which alone reads as a one-letter draft. The full screen
+/// tells them apart: there the box holds a known hint (possibly wrapped in a narrow pane), and the
+/// undimmed box holds only its opening. A real "P" typed by the human shows as "P" on both.
 pub fn parse_screens(undimmed: &str, full: &str) -> InputBox {
     let r = parse(undimmed);
     if r != InputBox::HasText {
         return r;
     }
-    let (Some(u), Some(f)) = (box_lines(undimmed), box_lines(full)) else { return r };
-    if u.len() == 1 && f.len() == 1 {
-        let (u, f) = (u[0].trim(), f[0].trim());
-        if PLACEHOLDERS.contains(&f) && f.len() > u.len() && f.starts_with(u) {
+    let (Some(u_lines), Some(f_lines)) = (box_lines(undimmed), box_lines(full)) else { return r };
+    if is_placeholder_text(&f_lines) {
+        let u: String = u_lines.iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
+        let f: String = f_lines.iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
+        if f.len() > u.len() && f.starts_with(&u) {
             return InputBox::Empty;
         }
     }
@@ -259,6 +279,26 @@ mod tests {
             "? for shortcuts",
         ]);
         assert_eq!(parse(&placeholder), InputBox::Empty);
+
+        // Narrow split pane (<68 cols): placeholder wraps across 2 lines or truncates — still Empty.
+        let wrapped = screen(&[
+            RULE,
+            "> Auto mode: edits & safe commands auto-approved",
+            "  (shift+tab to cycle)",
+            RULE,
+            "? for shortcuts",
+        ]);
+        assert_eq!(parse(&wrapped), InputBox::Empty);
+        let truncated = screen(&[
+            RULE,
+            "> Auto mode: edits & safe commands auto-approv",
+            RULE,
+            "? for shortcuts",
+        ]);
+        assert_eq!(parse(&truncated), InputBox::Empty);
+        // First-letter cursor highlight on a wrapped placeholder still reads Empty via parse_screens.
+        let wrapped_undimmed = screen(&[RULE, "> A", "  ", RULE, "? for shortcuts"]);
+        assert_eq!(parse_screens(&wrapped_undimmed, &wrapped), InputBox::Empty);
 
         let draft = screen(&[RULE, "> do a test maiterm decision card", RULE, "? for shortcuts"]);
         assert_eq!(parse(&draft), InputBox::HasText);

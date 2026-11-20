@@ -162,7 +162,10 @@ pub fn refresh_tabs(app: &Arc<AppState>, tab_ids: &[String]) {
                     .iter()
                     .find(|(_, s)| {
                         s.tab_id == *tab
-                            && s.runtime == crate::state::AgentRuntime::Claude
+                            && matches!(
+                                s.runtime,
+                                crate::state::AgentRuntime::Claude | crate::state::AgentRuntime::Gemini
+                            )
                             && s.transcript_path.is_some()
                     })
                     .map(|(sid, s)| (tab.clone(), sid.clone(), s.transcript_path.clone().unwrap()))

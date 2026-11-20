@@ -1214,6 +1214,7 @@ pub fn run() {
             commands::ssh_tunnel::get_maiterm_skill_scripts,
             commands::ssh_tunnel::build_codex_setup_script,
             commands::ssh_tunnel::build_agy_setup_script,
+            commands::ssh_tunnel::build_agy_proxy_refresh_script,
             commands::ssh_tunnel::ssh_run_setup,
             commands::ssh_tunnel::probe_ssh_host,
             commands::workspace::create_diff_tab,

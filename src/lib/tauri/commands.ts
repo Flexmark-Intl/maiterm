@@ -2368,6 +2368,10 @@ export async function buildAgySetupScript(hooks: boolean): Promise<string> {
   return invoke('build_agy_setup_script', { hooks });
 }
 
+export async function buildAgyProxyRefreshScript(): Promise<string> {
+  return invoke('build_agy_proxy_refresh_script');
+}
+
 export async function checkFullDiskAccess(): Promise<boolean> {
   return invoke('check_full_disk_access');
 }

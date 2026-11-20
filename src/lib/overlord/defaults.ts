@@ -30,14 +30,12 @@ const CHECKPOINT_SEQUENCE: OverlordRule['sequence'] = [
     on_timeout: 'abort',
   },
   {
-    // Claude and Codex both take /compact (Codex tested on 0.157.1, by paste: it records the
-    // smaller size at once, so `context_below` clears). Gemini's is /compress, but with no
-    // transcript it has no context reading, so no `context_pct` rule fires there. Without a
-    // runtime listed here, the prep turn would run and the context would stay high, so the
-    // rule would prep the same tab again every time its limits allowed.
+    // Claude, Codex, and Antigravity (agy, wire key 'gemini') all take /compact.
+    // Without a runtime listed here, the prep turn would run and the context would stay high,
+    // so the rule would prep the same tab again every time its limits allowed.
     kind: 'slash',
     text: '/compact',
-    runtimes: ['claude', 'codex'],
+    runtimes: ['claude', 'codex', 'gemini'],
     await: { until: 'context_below', pct: 30 },
     timeout_seconds: 300,
     on_timeout: 'notify_human',
@@ -317,6 +315,72 @@ const PREVIOUS_DEFAULT_OVERLORD_RULES: Record<string, OverlordRuleTemplate[]> = 
           kind: 'slash',
           text: '/compact',
           runtimes: ['claude'],
+          await: { until: 'context_below', pct: 30 },
+          timeout_seconds: 300,
+          on_timeout: 'notify_human',
+        },
+      ],
+    },
+    // Until 2026-11-20: /compact skipped Gemini before Antigravity (`agy`) gained transcript context telemetry.
+    {
+      name: 'Checkpoint before compaction',
+      description:
+        'When an idle agent reaches 35% context and 130k tokens, have it commit finished work, update docs/memory, clean up its tasks and note where it is, then compact.',
+      cooldown: 1800,
+      when: { event: 'context_pct', at_or_above: 35, min_tokens: 130_000 },
+      guards: {
+        agent_state: ['idle'],
+        min_quiet_ms: 3000,
+        require_live_repl: true,
+        max_per_hour: 1,
+        only_if_no_outstanding: true,
+      },
+      sequence: [
+        {
+          kind: 'process',
+          text: "Prepare for compaction: commit finished work (never half-finished work) and update any docs, memory and code comments that need it. Clean up your own tasks on the maiTerm board (listTasks, scope 'tab'): mark finished ones done, drop ones that are outdated or superseded, and fix any stale status or title. On the task you are in the middle of, add a note saying where you are and what comes next, so you can pick it up after compaction. Leave other tabs' tasks and anything waiting on your human alone.",
+          await: { until: 'turn_end' },
+          timeout_seconds: 900,
+          on_timeout: 'abort',
+        },
+        {
+          kind: 'slash',
+          text: '/compact',
+          runtimes: ['claude', 'codex'],
+          await: { until: 'context_below', pct: 30 },
+          timeout_seconds: 300,
+          on_timeout: 'notify_human',
+        },
+      ],
+    },
+  ],
+  checkpoint_busy_agent: [
+    // Until 2026-11-20: /compact skipped Gemini before Antigravity (`agy`) gained transcript context telemetry.
+    {
+      name: 'Checkpoint a busy agent',
+      description:
+        'When a working agent reaches 55% context and 130k tokens, interrupt it to run the same checkpoint, instead of hitting the auto-compact wall mid-thought.',
+      cooldown: 1800,
+      when: { event: 'context_pct', at_or_above: 55, min_tokens: 130_000 },
+      guards: {
+        agent_state: ['idle', 'active'],
+        min_quiet_ms: 3000,
+        require_live_repl: true,
+        max_per_hour: 1,
+        only_if_no_outstanding: true,
+      },
+      sequence: [
+        {
+          kind: 'process',
+          text: "Prepare for compaction: commit finished work (never half-finished work) and update any docs, memory and code comments that need it. Clean up your own tasks on the maiTerm board (listTasks, scope 'tab'): mark finished ones done, drop ones that are outdated or superseded, and fix any stale status or title. On the task you are in the middle of, add a note saying where you are and what comes next, so you can pick it up after compaction. Leave other tabs' tasks and anything waiting on your human alone.",
+          await: { until: 'turn_end' },
+          timeout_seconds: 900,
+          on_timeout: 'abort',
+        },
+        {
+          kind: 'slash',
+          text: '/compact',
+          runtimes: ['claude', 'codex'],
           await: { until: 'context_below', pct: 30 },
           timeout_seconds: 300,
           on_timeout: 'notify_human',

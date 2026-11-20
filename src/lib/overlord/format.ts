@@ -92,18 +92,18 @@ export function conditionChip(when: OverlordCondition): string {
  *
  * It also has to be honest about WHICH RUNTIMES resolve it, because a rule that silently
  * covers two of your three agent kinds is the same defect as one that can't fire at all.
- * `overlord_facts_for` returns nothing for Gemini, so every tail-derived signal is blind
- * there; Codex's tail carries turns and token usage but no commit markers and no todos.
+ * Claude and Antigravity (`agy`, wire key `'gemini'`) carry turns, token usage, and git
+ * commit detection; Codex's tail carries turns and token usage but no commit markers.
  * Only `commit` used to disclose its limit, and it named the wrong set.
  */
 export function conditionSource(when: OverlordCondition): string {
   switch (when.event) {
     case 'context_pct':
-    case 'tab_idle': return 'transcript tail · cached · not Gemini';
+    case 'tab_idle': return 'transcript tail · cached · every runtime';
     case 'turn_end':
     case 'permission_pending': return 'agent hooks';
-    case 'commit': return 'git commit tool calls · Claude only';
-    case 'no_todo_list': return 'maiTerm tasks + context size · not Gemini';
+    case 'commit': return 'git commit tool calls · Claude & Antigravity';
+    case 'no_todo_list': return 'maiTerm tasks + context size · every runtime';
     case 'task_stale': return 'board timers · every runtime';
     case 'agent_unready': return 'agent state + liveness probe · every runtime';
     case 'directive_unacked': return 'directive ledger · every runtime';

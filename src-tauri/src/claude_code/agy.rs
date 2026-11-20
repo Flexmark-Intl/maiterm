@@ -328,7 +328,8 @@ fn build_mcp_stdio_wrapper(fallback_exe: &str) -> String {
 if [ -z "${{MAITERM_PORT:-}}" ] || [ -z "${{MAITERM_AUTH:-}}" ] || [ -z "${{MAITERM_TAB_ID:-}}" ]; then
   [ -f "$HOME/.aiterm" ] && . "$HOME/.aiterm" 2>/dev/null || true
 fi
-bin="${{MAITERM_BIN:-'{escaped}'}}"
+bin="${{MAITERM_BIN:-}}"
+[ -n "$bin" ] || bin='{escaped}'
 [ -n "$bin" ] && [ -x "$bin" ] || exit 0
 exec "$bin" --mcp-stdio "$@"
 "#
@@ -364,138 +365,162 @@ fn is_our_mcp_entry(entry: &Value) -> bool {
 
 /// Build `hooks.json` in Antigravity's named-hook format (verified on agy 1.5.13).
 /// Flat handler arrays for SessionStart / PreInvocation / PostInvocation / Stop;
-/// `{ matcher, hooks }` groups for PreToolUse / PostToolUse.
+/// `{ matcher, hooks }` groups for PreToolUse / PostToolUse. Passes `--event <Name>` so
+/// `agy-hook.sh` classifies each event authoritatively without scanning untrusted tool args.
 pub fn build_hooks_json(baked_port: Option<u16>) -> Value {
-    let cmd = match baked_port {
-        Some(p) => format!("bash ./hooks/agy-hook.sh {p}"),
-        None => "bash ./hooks/agy-hook.sh".to_string(),
-    };
-    let handler = |timeout: u64| {
+    let handler = |event: &str, timeout: u64| {
+        let cmd = match baked_port {
+            Some(p) => format!("bash ./hooks/agy-hook.sh --event {event} {p}"),
+            None => format!("bash ./hooks/agy-hook.sh --event {event}"),
+        };
         json!({
             "type": "command",
             "command": cmd,
             "timeout": timeout,
         })
     };
-    let tool_group = || {
+    let tool_group = |event: &str| {
         json!([{
             "matcher": "*",
-            "hooks": [handler(5)],
+            "hooks": [handler(event, 5)],
         }])
     };
     json!({
         "maiterm": {
-            "SessionStart": [handler(5)],
-            "PreInvocation": [handler(5)],
-            "PostInvocation": [handler(5)],
-            "PreToolUse": tool_group(),
-            "PostToolUse": tool_group(),
-            "Stop": [handler(5)],
+            "SessionStart": [handler("SessionStart", 5)],
+            "PreInvocation": [handler("PreInvocation", 5)],
+            "PostInvocation": [handler("PostInvocation", 5)],
+            "PreToolUse": tool_group("PreToolUse"),
+            "PostToolUse": tool_group("PostToolUse"),
+            "Stop": [handler("Stop", 5)],
         }
     })
 }
 
-/// Read an existing JSON object file; returns `Ok(None)` if absent, `Err` if malformed or not
-/// a JSON object (so we never clobber a broken user config).
-fn read_json_object(path: &Path) -> Result<Option<Value>, String> {
-    if !path.exists() {
-        return Ok(None);
+/// Safely read-modify-write a shared JSON object file (`~/.gemini/config/mcp_config.json` or
+/// `~/.gemini/antigravity-cli/settings.json`) under `util::json_file::write_lock()` with
+/// `stamp` + `replace_if_unchanged` (preserving symlinks, concurrent `mcp_proxy::entries`
+/// edits, and `agy` writes). Refuses malformed or non-object JSON.
+fn edit_json_object(
+    path: &Path,
+    create_if_absent: bool,
+    mut f: impl FnMut(&mut Value) -> Result<bool, String>,
+) -> Result<bool, String> {
+    let _serial = crate::util::json_file::write_lock();
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    for _ in 0..5 {
+        let before = crate::util::json_file::stamp(&target);
+        let raw = match fs::read_to_string(&target) {
+            Ok(r) => Some(r),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("read {}: {e}", target.display())),
+        };
+        let mut doc: Value = match &raw {
+            Some(r) if r.trim().is_empty() => json!({}),
+            Some(r) => {
+                let parsed: Value = serde_json::from_str(r)
+                    .map_err(|e| format!("refusing to overwrite unparseable {}: {e}", target.display()))?;
+                if !parsed.is_object() {
+                    return Err(format!("refusing to overwrite non-object {}", target.display()));
+                }
+                parsed
+            }
+            None if create_if_absent => json!({}),
+            None => return Ok(false),
+        };
+        if !f(&mut doc)? {
+            return Ok(false);
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        }
+        let rendered = serde_json::to_string_pretty(&doc)
+            .map_err(|e| format!("serialize {}: {e}", target.display()))?;
+        if crate::util::json_file::replace_if_unchanged(&target, before, rendered.as_bytes())
+            .map_err(|e| format!("write {}: {e}", target.display()))?
+        {
+            return Ok(true);
+        }
     }
-    let raw = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    if raw.trim().is_empty() {
-        return Ok(Some(json!({})));
-    }
-    let parsed: Value = serde_json::from_str(&raw)
-        .map_err(|e| format!("refusing to overwrite unparseable {}: {e}", path.display()))?;
-    if !parsed.is_object() {
-        return Err(format!("refusing to overwrite non-object {}", path.display()));
-    }
-    Ok(Some(parsed))
+    Err(format!("{} kept changing while being updated", target.display()))
 }
 
 /// Merge our `mcpServers.maiterm` entry into `~/.gemini/config/mcp_config.json`.
 fn upsert_mcp_config(path: &Path, entry: Value) -> Result<bool, String> {
-    let mut doc = read_json_object(path)?.unwrap_or_else(|| json!({}));
-    let obj = doc.as_object_mut().unwrap();
-    let servers = obj.entry("mcpServers").or_insert_with(|| json!({}));
-    let Some(servers_obj) = servers.as_object_mut() else {
-        return Err(format!("refusing to edit {}: mcpServers is not an object", path.display()));
-    };
-    if servers_obj.get(MCP_SERVER_KEY) == Some(&entry) {
-        return Ok(false);
-    }
-    // Don't clobber a non-maiterm user entry under the same key.
-    if let Some(existing) = servers_obj.get(MCP_SERVER_KEY) {
-        if !is_our_mcp_entry(existing) {
-            log::warn!(
-                "Agy install: leaving existing custom mcpServers.{} in {} untouched",
-                MCP_SERVER_KEY,
-                path.display()
-            );
+    edit_json_object(path, true, |doc| {
+        let obj = doc.as_object_mut().unwrap();
+        let servers = obj.entry("mcpServers").or_insert_with(|| json!({}));
+        let Some(servers_obj) = servers.as_object_mut() else {
+            return Err(format!("refusing to edit {}: mcpServers is not an object", path.display()));
+        };
+        if servers_obj.get(MCP_SERVER_KEY) == Some(&entry) {
             return Ok(false);
         }
-    }
-    servers_obj.insert(MCP_SERVER_KEY.to_string(), entry);
-    let json = serde_json::to_string_pretty(&doc).map_err(|e| format!("serialize mcp_config.json: {e}"))?;
-    write_if_changed(path, &json, false)
+        // Don't clobber a non-maiterm user entry under the same key.
+        if let Some(existing) = servers_obj.get(MCP_SERVER_KEY) {
+            if !is_our_mcp_entry(existing) {
+                log::warn!(
+                    "Agy install: leaving existing custom mcpServers.{} in {} untouched",
+                    MCP_SERVER_KEY,
+                    path.display()
+                );
+                return Ok(false);
+            }
+        }
+        servers_obj.insert(MCP_SERVER_KEY.to_string(), entry.clone());
+        Ok(true)
+    })
 }
 
 fn remove_mcp_config(path: &Path) -> Result<bool, String> {
-    let Some(mut doc) = read_json_object(path)? else {
-        return Ok(false);
-    };
-    let Some(servers) = doc.get_mut("mcpServers").and_then(|v| v.as_object_mut()) else {
-        return Ok(false);
-    };
-    if !servers.get(MCP_SERVER_KEY).is_some_and(is_our_mcp_entry) {
-        return Ok(false);
-    }
-    servers.remove(MCP_SERVER_KEY);
-    let json = serde_json::to_string_pretty(&doc).map_err(|e| format!("serialize mcp_config.json: {e}"))?;
-    write_if_changed(path, &json, false)
+    edit_json_object(path, false, |doc| {
+        let Some(servers) = doc.get_mut("mcpServers").and_then(|v| v.as_object_mut()) else {
+            return Ok(false);
+        };
+        if !servers.get(MCP_SERVER_KEY).is_some_and(is_our_mcp_entry) {
+            return Ok(false);
+        }
+        servers.remove(MCP_SERVER_KEY);
+        Ok(true)
+    })
 }
 
 /// Ensure `"mcp(maiterm/*)"` is in `~/.gemini/antigravity-cli/settings.json` → `permissions.allow`.
 /// Preserves all other settings and user permission rules (and `agy`'s Deny > Ask > Allow order
 /// still lets the user override any specific tool).
 fn upsert_allow_permission(path: &Path) -> Result<bool, String> {
-    let mut doc = read_json_object(path)?.unwrap_or_else(|| json!({}));
-    let obj = doc.as_object_mut().unwrap();
-    let perms = obj.entry("permissions").or_insert_with(|| json!({}));
-    let Some(perms_obj) = perms.as_object_mut() else {
-        return Err(format!("refusing to edit {}: permissions is not an object", path.display()));
-    };
-    let allow = perms_obj.entry("allow").or_insert_with(|| json!([]));
-    let Some(allow_arr) = allow.as_array_mut() else {
-        return Err(format!("refusing to edit {}: permissions.allow is not an array", path.display()));
-    };
-    if allow_arr.iter().any(|v| v.as_str() == Some(MCP_ALLOW_RULE)) {
-        return Ok(false);
-    }
-    allow_arr.push(Value::String(MCP_ALLOW_RULE.to_string()));
-    let json = serde_json::to_string_pretty(&doc).map_err(|e| format!("serialize settings.json: {e}"))?;
-    write_if_changed(path, &json, false)
+    edit_json_object(path, true, |doc| {
+        let obj = doc.as_object_mut().unwrap();
+        let perms = obj.entry("permissions").or_insert_with(|| json!({}));
+        let Some(perms_obj) = perms.as_object_mut() else {
+            return Err(format!("refusing to edit {}: permissions is not an object", path.display()));
+        };
+        let allow = perms_obj.entry("allow").or_insert_with(|| json!([]));
+        let Some(allow_arr) = allow.as_array_mut() else {
+            return Err(format!("refusing to edit {}: permissions.allow is not an array", path.display()));
+        };
+        if allow_arr.iter().any(|v| v.as_str() == Some(MCP_ALLOW_RULE)) {
+            return Ok(false);
+        }
+        allow_arr.push(Value::String(MCP_ALLOW_RULE.to_string()));
+        Ok(true)
+    })
 }
 
 fn remove_allow_permission(path: &Path) -> Result<bool, String> {
-    let Some(mut doc) = read_json_object(path)? else {
-        return Ok(false);
-    };
-    let Some(allow_arr) = doc
-        .get_mut("permissions")
-        .and_then(|v| v.as_object_mut())
-        .and_then(|p| p.get_mut("allow"))
-        .and_then(|v| v.as_array_mut())
-    else {
-        return Ok(false);
-    };
-    let before = allow_arr.len();
-    allow_arr.retain(|v| v.as_str() != Some(MCP_ALLOW_RULE));
-    if allow_arr.len() == before {
-        return Ok(false);
-    }
-    let json = serde_json::to_string_pretty(&doc).map_err(|e| format!("serialize settings.json: {e}"))?;
-    write_if_changed(path, &json, false)
+    edit_json_object(path, false, |doc| {
+        let Some(allow_arr) = doc
+            .get_mut("permissions")
+            .and_then(|v| v.as_object_mut())
+            .and_then(|p| p.get_mut("allow"))
+            .and_then(|v| v.as_array_mut())
+        else {
+            return Ok(false);
+        };
+        let before = allow_arr.len();
+        allow_arr.retain(|v| v.as_str() != Some(MCP_ALLOW_RULE));
+        Ok(allow_arr.len() != before)
+    })
 }
 
 /// Write or update all files managed by `AgyRegistrar`. Returns `Ok(true)` if any file changed.
@@ -521,8 +546,17 @@ fn install_into(
 
     #[cfg(unix)]
     {
+        let wrapper_path = paths.plugin_dir.join("mcp-stdio.sh");
         let wrapper = build_mcp_stdio_wrapper(exe);
-        changed |= write_if_changed(&paths.plugin_dir.join("mcp-stdio.sh"), &wrapper, true)?;
+        // When a sibling maiTerm (dev + prod) is live, avoid 30s reassert ping-pong over
+        // fallback_exe as long as a valid executable wrapper using `[ -n "$bin" ] || bin=` exists.
+        let keep_sibling_wrapper = keep_shared_hooks
+            && fs::read_to_string(&wrapper_path)
+                .ok()
+                .is_some_and(|s| s.contains("exec \"$bin\" --mcp-stdio \"$@\"") && s.contains("[ -n \"$bin\" ] || bin='"));
+        if !keep_sibling_wrapper {
+            changed |= write_if_changed(&wrapper_path, &wrapper, true)?;
+        }
     }
 
     // Always-inlined plugin rule giving agy immediate awareness of maiTerm tools from turn 0.
@@ -596,7 +630,9 @@ fn write_if_changed(path: &Path, content: &str, executable: bool) -> Result<bool
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
-    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("tmp-{}-{}", std::process::id(), seq));
     fs::write(&tmp, content).map_err(|e| format!("write {}: {e}", tmp.display()))?;
     #[cfg(unix)]
     if executable {
@@ -714,7 +750,14 @@ mod tests {
         assert!(group["Stop"].is_array());
         assert_eq!(group["PreToolUse"][0]["matcher"], "*");
         assert_eq!(group["PostToolUse"][0]["matcher"], "*");
-        assert_eq!(group["PreToolUse"][0]["hooks"][0]["command"], "bash ./hooks/agy-hook.sh");
+        assert_eq!(
+            group["PreToolUse"][0]["hooks"][0]["command"],
+            "bash ./hooks/agy-hook.sh --event PreToolUse"
+        );
+        assert_eq!(
+            group["SessionStart"][0]["command"],
+            "bash ./hooks/agy-hook.sh --event SessionStart"
+        );
     }
 
     #[cfg(unix)]
@@ -728,9 +771,10 @@ mod tests {
         install_into(&paths, "/bin/true", true, false).unwrap();
         let shim = paths.plugin_dir.join("hooks/agy-hook.sh");
 
-        let run = |payload: &str| {
+        let run = |extra_args: &[&str], payload: &str| {
             let mut child = Command::new("bash")
                 .arg(&shim)
+                .args(extra_args)
                 .env_remove("MAITERM_PORT")
                 .env_remove("MAITERM_AUTH")
                 .env_remove("MAITERM_TAB_ID")
@@ -745,10 +789,65 @@ mod tests {
             String::from_utf8(out.stdout).unwrap()
         };
 
-        // CRITICAL: PreToolUse MUST print nothing (printing {} causes agy to hard-deny the call).
-        assert_eq!(run(r#"{"hookEventName":"PreToolUse","conversationId":"c1"}"#), "");
-        assert_eq!(run(r#"{"hookEventName":"Stop","conversationId":"c1"}"#), "{}");
-        assert_eq!(run(r#"{"hookEventName":"SessionStart","conversationId":"c1"}"#), "{}");
+        // CRITICAL: PreToolUse MUST print nothing (printing {} causes agy to hard-deny the call),
+        // even if tool args contain `"hookEventName":"SessionStart"`.
+        assert_eq!(run(&["--event", "PreToolUse"], r#"{"hookEventName":"PreToolUse","toolCall":{"args":{"text":"\"hookEventName\":\"SessionStart\""}}}"#), "");
+        assert_eq!(run(&[], r#"{"hookEventName":"PreToolUse","toolCall":{"args":{"text":"\"hookEventName\":\"SessionStart\""}}}"#), "");
+        assert_eq!(run(&["--event", "Stop"], r#"{"hookEventName":"Stop","conversationId":"c1"}"#), "{}");
+        assert_eq!(run(&["--event", "SessionStart"], r#"{"hookEventName":"SessionStart","conversationId":"c1"}"#), "{}");
+
+        // Verify mcp-stdio.sh fallback_exe works when MAITERM_BIN is unset (no literal single quotes!).
+        let fake_bin = home.join("fake-aiterm.sh");
+        fs::write(&fake_bin, "#!/usr/bin/env bash\nprintf 'FALLBACK_OK:%s' \"$*\"\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&fake_bin, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        install_into(&paths, &fake_bin.to_string_lossy(), true, false).unwrap();
+        let wrapper = paths.plugin_dir.join("mcp-stdio.sh");
+        let out = Command::new("bash")
+            .arg(&wrapper)
+            .args(["--path", "/mcp/x/linear"])
+            .env_remove("MAITERM_BIN")
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(
+            String::from_utf8(out.stdout).unwrap(),
+            "FALLBACK_OK:--mcp-stdio --path /mcp/x/linear"
+        );
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_preserves_symlinked_json_configs() {
+        use std::os::unix::fs::symlink;
+
+        let home = temp_home();
+        let paths = AgyPaths::under(&home);
+        let dotfiles = home.join("dotfiles");
+        fs::create_dir_all(&dotfiles).unwrap();
+        let real_mcp = dotfiles.join("mcp_config.json");
+        let real_settings = dotfiles.join("settings.json");
+        fs::write(&real_mcp, r#"{"mcpServers":{}}"#).unwrap();
+        fs::write(&real_settings, r#"{"colorScheme":"dark"}"#).unwrap();
+
+        fs::create_dir_all(paths.mcp_config.parent().unwrap()).unwrap();
+        fs::create_dir_all(paths.cli_settings.parent().unwrap()).unwrap();
+        symlink(&real_mcp, &paths.mcp_config).unwrap();
+        symlink(&real_settings, &paths.cli_settings).unwrap();
+
+        install_into(&paths, "/usr/local/bin/aiterm", true, false).unwrap();
+
+        assert!(fs::symlink_metadata(&paths.mcp_config).unwrap().file_type().is_symlink());
+        assert!(fs::symlink_metadata(&paths.cli_settings).unwrap().file_type().is_symlink());
+        let mcp: Value = serde_json::from_str(&fs::read_to_string(&real_mcp).unwrap()).unwrap();
+        assert!(mcp["mcpServers"]["maiterm"].is_object());
+        let settings: Value = serde_json::from_str(&fs::read_to_string(&real_settings).unwrap()).unwrap();
+        assert_eq!(settings["permissions"]["allow"][0], "mcp(maiterm/*)");
 
         let _ = fs::remove_dir_all(&home);
     }

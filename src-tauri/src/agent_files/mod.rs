@@ -164,6 +164,18 @@ impl Phase {
             "PostToolUse" => Some(Phase::Post { failed: false }),
             "PostToolUseFailure" => Some(Phase::Post { failed: true }),
             "UserPromptSubmit" => Some(Phase::Prompt),
+            // Antigravity (`agy`) has no UserPromptSubmit; `PreInvocation` with `invocationNum == 0`
+            // (protojson omits zero fields) starts a user turn, while `> 0` is a mid-turn tool loop.
+            "PreInvocation"
+                if event.get("invocationNum").and_then(|v| v.as_u64()).unwrap_or(0) == 0 =>
+            {
+                Some(Phase::Prompt)
+            }
+            "Stop"
+                if event.get("terminationReason").and_then(|v| v.as_str()) == Some("USER_CANCELED") =>
+            {
+                Some(Phase::Interrupt)
+            }
             "Stop" => Some(Phase::Stop),
             "Notification" if event.get("notification_type").and_then(|v| v.as_str()) == Some("idle_prompt") => Some(Phase::Idle),
             "Interrupt" => Some(Phase::Interrupt),

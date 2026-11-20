@@ -5136,15 +5136,8 @@ function createOverlordStore() {
       if (isExemptTab(tabId)) return { sent: false, reason: 'exempt', detail: EXEMPT_DETAIL };
       if (isHiveTab(tabId)) return { sent: false, reason: 'hive', detail: HIVE_SUPERVISED_DETAIL };
       const step: OverlordStep = { kind, text };
-      if (kind === 'slash') {
-        const rt = workspacesStore.getTabRuntime(tabId);
-        // Unknown-slash risk is the caller's to manage per §6; only hard-block Gemini
-        // (no slash surface at all today).
-        if (rt === 'gemini') {
-          ledger(tabId, null, 'overlord_judgment', 0, step, 'skipped_runtime');
-          return { sent: false, reason: 'runtime_mismatch' };
-        }
-      }
+      // Claude, Codex, and Antigravity (`agy`, wire key `'gemini'`) all support slash commands
+      // (`/compact`, `/model`, `/effort`); unknown-slash risk is the caller's to manage per §6.
       // Name what holds the tab. This was the one refusal in this function with no `detail`,
       // and a bare `outstanding_directive` reads as "busy, retry" — so the agent retried a
       // step the engine was already part-way through sending, three times over ninety

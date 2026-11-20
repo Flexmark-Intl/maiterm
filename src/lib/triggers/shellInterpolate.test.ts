@@ -15,7 +15,7 @@ describe('interpolateShellWith', () => {
     expect(interpolateShellWith(v, getResumeCommand('codex'), true)).toBe('codex resume 0199a7b2-3c4d-7e8f-9a0b-1c2d3e4f5a6b');
     expect(interpolateShellWith(v, getResumeCommand('codex', { bypassHookTrust: true }), true))
       .toBe('codex resume --dangerously-bypass-hook-trust 0199a7b2-3c4d-7e8f-9a0b-1c2d3e4f5a6b');
-    expect(interpolateShellWith(v, getResumeCommand('gemini'))).toBe('gemini --resume b3f1c2d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d');
+    expect(interpolateShellWith(v, getResumeCommand('gemini'))).toBe('agy --conversation b3f1c2d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d');
     // The shell-conditional form users write keeps working.
     expect(interpolateShellWith(v, '[ -n "%claudeSessionId" ] && claude --resume %claudeSessionId || claude', true))
       .toBe('[ -n "7c1e2a4b-90d3-4f6e-8a21-3b5c9d0e1f42" ] && claude --resume 7c1e2a4b-90d3-4f6e-8a21-3b5c9d0e1f42 || claude');

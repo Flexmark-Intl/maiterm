@@ -1443,7 +1443,7 @@ const AGY_MCP_CONFIG_MERGE_PY: &str = concat!(
     "    servers[name]=entry\n",
     "    changed=True\n",
     "if changed:\n",
-    " tmp=p+\".maiterm-tmp\"\n",
+    " tmp=p+\".maiterm-tmp-\"+str(os.getpid())\n",
     " open(tmp,\"w\").write(json.dumps(cur,indent=2)+\"\\n\")\n",
     " os.replace(tmp,p)\n",
 );
@@ -1480,10 +1480,15 @@ const AGY_SETTINGS_ALLOW_MERGE_PY: &str = concat!(
     " sys.exit(0)\n",
     "if rule not in allow:\n",
     " allow.append(rule)\n",
-    " tmp=p+\".maiterm-tmp\"\n",
+    " tmp=p+\".maiterm-tmp-\"+str(os.getpid())\n",
     " open(tmp,\"w\").write(json.dumps(cur,indent=2)+\"\\n\")\n",
     " os.replace(tmp,p)\n",
 );
+
+/// Non-interactive sshd PATH augmentation so default `agy` installs (`~/.local/bin/agy`,
+/// `/opt/homebrew/bin/agy`, `$HOME/bin/agy`) are found during `ssh_run_setup`.
+const AGY_REMOTE_PATH_LINE: &str =
+    "PATH=\"$HOME/.local/bin:$HOME/.antigravity/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\"";
 
 /// Build the shell script that installs maiTerm's Antigravity (`agy`) integration on a REMOTE
 /// host over the SSH reverse tunnel, reusing the same Rust renderers (`render_agy_remote_artifacts`)
@@ -1499,6 +1504,7 @@ pub fn build_agy_setup_script(hooks: bool) -> String {
     let q = |s: &str| s.replace('\'', "'\\''");
 
     let mut lines: Vec<String> = Vec::new();
+    lines.push(AGY_REMOTE_PATH_LINE.to_string());
     lines.push("if command -v agy >/dev/null 2>&1; then".to_string());
     lines.push("__agy_plugin=\"$HOME/.gemini/config/plugins/maiterm\"".to_string());
     lines.push("mkdir -p \"$__agy_plugin/rules\" \"$__agy_plugin/skills/maiterm\"".to_string());
@@ -1540,6 +1546,23 @@ pub fn build_agy_setup_script(hooks: bool) -> String {
     lines.push("fi".to_string());
 
     lines.join("\n")
+}
+
+/// Lightweight remote proxy-only refresh script for already-bridged SSH hosts (called when a
+/// proxied MCP server is added/enabled via `mcp-proxy-entries-changed`). Only touches
+/// `~/.gemini/config/mcp_config.json` if `agy` is installed and the maiTerm plugin wrapper exists.
+#[tauri::command]
+pub fn build_agy_proxy_refresh_script() -> String {
+    let proxy_json = crate::mcp_proxy::entries::remote_agy().to_string();
+    let q = |s: &str| s.replace('\'', "'\\''");
+    [
+        AGY_REMOTE_PATH_LINE.to_string(),
+        "if command -v agy >/dev/null 2>&1 && [ -x \"$HOME/.gemini/config/plugins/maiterm/mcp-stdio.sh\" ]; then".to_string(),
+        format!("__agy_proxy='{}'", q(&proxy_json)),
+        "__agy_proxy=\"$__agy_proxy\" python3 -c '".to_string() + AGY_MCP_CONFIG_MERGE_PY + "'",
+        "fi".to_string(),
+    ]
+    .join("\n")
 }
 
 /// Run setup commands on a remote host via a separate background SSH connection.
@@ -2391,9 +2414,16 @@ mod tests {
         let (ok, stderr) = pipe_ok("bash", &["-n"], &on);
         assert!(ok, "bash -n rejected agy setup script:\n{}\n--- stderr ---\n{}", on, stderr);
         assert!(on.contains("if command -v agy >/dev/null 2>&1; then"));
+        assert!(on.contains("$HOME/.local/bin"), "augments non-interactive SSH PATH for agy");
+        assert!(on.contains("os.getpid()"), "remote temp file uses PID");
         assert!(on.contains("MAITERM_AGY_SHIM_EOF"));
         assert!(on.contains("MAITERM_AGY_HOOKS_EOF"));
         assert!(on.contains("MAITERM_AGY_BRIDGE_EOF"));
+
+        let refresh = build_agy_proxy_refresh_script();
+        let (ok_ref, stderr_ref) = pipe_ok("bash", &["-n"], &refresh);
+        assert!(ok_ref, "bash -n rejected agy proxy refresh script:\n{}", stderr_ref);
+        assert!(refresh.contains("$HOME/.local/bin"));
 
         let off = build_agy_setup_script(false);
         let (ok_off, stderr_off) = pipe_ok("bash", &["-n"], &off);

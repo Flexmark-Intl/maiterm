@@ -431,8 +431,18 @@ export async function refreshProxyEntries(): Promise<void> {
   const hosts = new Set<string>();
   for (const b of bridgeStates.values()) if (b.status === 'connected') hosts.add(b.hostKey);
   if (hosts.size === 0) return;
-  const scripts = await commands.getMaitermSkillScripts();
-  const script = [`__proxy='${escapeProxy(scripts.mcp_proxy)}'`, ...proxyMergeLines()].join('\n');
+  const claudeOn = preferencesStore.claudeCodeIde && preferencesStore.claudeCodeIdeSsh;
+  const geminiOn = preferencesStore.geminiIde && preferencesStore.geminiIdeSsh;
+  if (!claudeOn && !geminiOn) return;
+  const parts: string[] = [];
+  if (claudeOn) {
+    const scripts = await commands.getMaitermSkillScripts();
+    parts.push([`__proxy='${escapeProxy(scripts.mcp_proxy)}'`, ...proxyMergeLines()].join('\n'));
+  }
+  if (geminiOn) {
+    parts.push(await commands.buildAgyProxyRefreshScript());
+  }
+  const script = parts.join('\n');
   await Promise.all([...hosts].map(async (host) => {
     // The host key IS the ssh args (`extractHostKey`), so a bridge this window adopted from
     // another (a tab moved between windows) is reachable as well as one it set up itself.

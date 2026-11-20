@@ -77,8 +77,9 @@ Critical findings:
    continuation (`HookPhase::Other`, so Files baselines don't reset mid-turn).
 5. **`SessionStart` priming (`format=agy`)**: returning
    `{"injectSteps": [{"systemMessage": {"systemMessage": "..."}}]}` injected into turn 1 context.
-6. **Lazy startup**: At idle TUI boot (before the first user message), neither `SessionStart` nor
-   stdio MCP has fired yet.
+6. **Lazy hook startup vs. immediate MCP init**: At idle TUI boot (before the first user message),
+   `SessionStart` has not fired yet, while `--mcp-stdio` connects and sends `MCP initialize`
+   within ~2s carrying `x-maiterm-tab` (which maiTerm uses to seed an idle session row).
 
 ### P4. TUI workspace trust dialog & input box (captured on 100×30 PTY)
 

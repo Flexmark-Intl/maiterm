@@ -328,9 +328,22 @@ fn reap_dormant_sessions(app: &AppHandle, state: &Arc<AppState>, absent: &mut Ha
         let shell_pid: Option<u32> =
             pty_id.and_then(|pid| state.pty_registry.read().get(&pid).and_then(|h| h.child_pid));
 
-        // Gone when the PTY is dead, or the agent binary is absent from its tree.
+        // On an SSH tab, the agent process lives on the remote host while the local PTY child
+        // is `ssh`/`autossh`/`mosh-client` (and/or the tab is attached to a live SSH tunnel).
+        // Never reap a remote session just because `agy`/`codex` isn't a local descendant.
+        let ssh_live = state
+            .ssh_tunnels
+            .read()
+            .values()
+            .any(|t| t.tab_ids.contains(&tab_id))
+            || shell_pid.is_some_and(|pid| {
+                crate::pty::manager::agent_process_alive(pid, &["ssh", "autossh", "mosh-client"])
+            });
+
+        // Gone when the PTY is dead, or (for local tabs) the agent binary is absent from its tree.
         let gone = match shell_pid {
             None => true,
+            Some(_) if ssh_live => false,
             Some(pid) => !crate::pty::manager::agent_process_alive(pid, runtime.agent_process_names()),
         };
 
@@ -3819,6 +3832,20 @@ fn session_start_state(source: &str) -> crate::state::app_state::AgentSessionSta
     }
 }
 
+/// Session IDs seeded provisionally by `seed_agy_session_from_mcp_init` (before any real hook
+/// arrived for them). Tracked separately from `connection_id` so `drop_agy_mcp_placeholders`
+/// never removes a live session that merely received a `connection_id` from `initSession` or
+/// affinity recovery.
+static AGY_MCP_SEEDED: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Antigravity subagent `conversationId`s (`invoke_subagent` / nested `agy -p`) that inherited
+/// their parent tab's `$MAITERM_TAB_ID`. Hooks from these IDs are acknowledged cleanly without
+/// overwriting the parent tab's session, `geminiSessionId` auto-resume, or idle/active state.
+static AGY_SUBAGENT_SESSIONS: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(Default::default);
+
 /// Register an idle Antigravity (`agy`) session when its `--mcp-stdio` bridge sends `initialize`
 /// with a valid `x-maiterm-tab` header. Uses the tab's persisted `geminiSessionId` if present (the
 /// resumed-tab case, where `agy --conversation` fires no `SessionStart`), otherwise a `mcp-<tab>`
@@ -3829,6 +3856,12 @@ fn seed_agy_session_from_mcp_init(
     connection_id: &str,
     tab_id: &str,
 ) {
+    // Check for an existing live session BEFORE mutating persisted `tab.runtime`: a one-shot
+    // `agy -p` run inside a live Claude/Codex tab must not overwrite the host tab's runtime.
+    if state.agent_sessions.read().values().any(|s| s.tab_id == tab_id) {
+        return;
+    }
+
     // Look up tab metadata and persist `runtime = Gemini` if unset.
     let tab_info: Option<(Option<String>, Option<String>)> = {
         let mut app_data = state.app_data.write();
@@ -3873,13 +3906,17 @@ fn seed_agy_session_from_mcp_init(
         return; // tab does not belong to this maiTerm instance
     };
 
-    let session_id = persisted_sid.unwrap_or_else(|| format!("mcp-{tab_id}"));
-    {
+    let session_id = {
         let mut sessions = state.agent_sessions.write();
-        // If this tab already has a live session registered, leave it alone.
+        // Re-check under the write lock in case a session registered concurrently.
         if sessions.values().any(|s| s.tab_id == tab_id) {
             return;
         }
+        // If this tab inherited another live tab's persisted `geminiSessionId` (e.g. duplicateTab),
+        // never overwrite that sibling tab's live session row — fall back to a tab-scoped placeholder.
+        let session_id = persisted_sid
+            .filter(|sid| !sessions.contains_key(sid))
+            .unwrap_or_else(|| format!("mcp-{tab_id}"));
         sessions.insert(
             session_id.clone(),
             crate::state::app_state::AgentSessionInfo {
@@ -3901,7 +3938,13 @@ fn seed_agy_session_from_mcp_init(
                 connection_id: Some(connection_id.to_string()),
             },
         );
-    }
+        let mut seeded = AGY_MCP_SEEDED.lock();
+        if seeded.len() > 512 {
+            seeded.clear();
+        }
+        seeded.insert(session_id.clone());
+        session_id
+    };
 
     log::info!(
         "Agy MCP init: seeded idle session {} for tab {}",
@@ -3923,18 +3966,60 @@ fn seed_agy_session_from_mcp_init(
 }
 
 /// Remove any provisional Antigravity session entry seeded from `MCP initialize` for `tab_id`
-/// (`mcp-<tab>` placeholder or a `connection_id`-tagged row carrying an older persisted id) once
-/// a real hook registers `keep_session_id`.
+/// (`mcp-<tab>` placeholder or an entry still in `AGY_MCP_SEEDED`) once a real hook registers
+/// `keep_session_id`. Never drops a live non-provisional session.
 fn drop_agy_mcp_placeholders(
     sessions: &mut HashMap<String, crate::state::app_state::AgentSessionInfo>,
     tab_id: &str,
     keep_session_id: &str,
 ) {
+    let mut seeded = AGY_MCP_SEEDED.lock();
+    seeded.remove(keep_session_id);
     sessions.retain(|sid, s| {
-        !(s.tab_id == tab_id
+        let drop_it = s.tab_id == tab_id
             && sid != keep_session_id
-            && (sid.starts_with("mcp-") || s.connection_id.is_some()))
+            && (sid.starts_with("mcp-") || seeded.contains(sid));
+        if drop_it {
+            seeded.remove(sid);
+        }
+        !drop_it
     });
+}
+
+/// True when an incoming `AgentRuntime::Gemini` hook belongs to an ephemeral subagent (or nested
+/// `agy -p`) spawned during an already-active parent `agy` turn on `tab_id`. Remembers the
+/// subagent's `session_id` so its later hooks (including `Stop` after the parent goes idle) are
+/// also ignored without hijacking the parent tab's state or `geminiSessionId`.
+fn is_agy_subagent_hook(
+    sessions: &HashMap<String, crate::state::app_state::AgentSessionInfo>,
+    tab_id: &str,
+    session_id: &str,
+) -> bool {
+    use crate::state::app_state::AgentSessionState;
+    if session_id.is_empty() || tab_id.is_empty() {
+        return false;
+    }
+    let mut subagents = AGY_SUBAGENT_SESSIONS.lock();
+    if subagents.contains(session_id) {
+        return true;
+    }
+    if sessions.contains_key(session_id) {
+        return false;
+    }
+    let parent_mid_turn = sessions.iter().any(|(sid, s)| {
+        s.tab_id == tab_id
+            && sid != session_id
+            && !sid.starts_with("mcp-")
+            && matches!(s.state, AgentSessionState::Active | AgentSessionState::WaitingPermission)
+    });
+    if parent_mid_turn {
+        if subagents.len() > 512 {
+            subagents.clear();
+        }
+        subagents.insert(session_id.to_string());
+        return true;
+    }
+    false
 }
 
 /// Process one JSON-RPC message and return the response as a raw JSON string.
@@ -5135,7 +5220,7 @@ async fn record_agent_files(
         }
     }
     let existed = match (&phase, &extracted, host.is_none()) {
-        (Phase::Pre, extract::Extracted::Files(t), true) if tool == "Write" => match t.first().and_then(|t| crate::agent_files::entry_path(&t.path, cwd.as_deref(), None)) {
+        (Phase::Pre, extract::Extracted::Files(t), true) if matches!(tool.as_str(), "Write" | "write_file" | "write_to_file") => match t.first().and_then(|t| crate::agent_files::entry_path(&t.path, cwd.as_deref(), None)) {
             Some(p) => match seen.iter().find(|(s, _)| *s == p) {
                 Some((_, known)) => *known,
                 None => tokio::time::timeout(WRITE_EXISTS_BUDGET, tokio::task::spawn_blocking(move || std::fs::symlink_metadata(p).is_ok()))
@@ -5681,10 +5766,30 @@ async fn hooks_handler(
         None
     };
 
+    // Filter out Antigravity subagent hooks (`invoke_subagent` / nested `agy -p` inheriting
+    // `$MAITERM_TAB_ID`) before they touch `agent_sessions`, `geminiSessionId`, or Files state.
+    if runtime == crate::state::AgentRuntime::Gemini && !session_id.is_empty() {
+        if let Some(tab_id) = tab_id_from_param.as_deref() {
+            let is_sub = {
+                let sessions = srv.state.agent_sessions.read();
+                is_agy_subagent_hook(&sessions, tab_id, &session_id)
+            };
+            if is_sub {
+                log::debug!(
+                    "Agy hook: ignoring subagent '{}' session {} on busy parent tab {}",
+                    hook_event_name,
+                    &session_id[..session_id.len().min(8)],
+                    tab_id
+                );
+                return axum::Json(serde_json::json!({})).into_response();
+            }
+        }
+    }
+
     // Antigravity (`agy --conversation <id>`) does NOT fire SessionStart on resumed sessions
     // (verified on agy 1.5.13, docs/agy-integration-review.md). Every later hook still carries
     // `conversationId`, `transcriptPath`, `cwd`, `modelName`, and `?tab_id=`, so register an
-    // unseen session on its first event before processing the phase.
+    // unseen session (or rebind one moved to a new tab via reload/duplicate) before processing.
     if runtime == crate::state::AgentRuntime::Gemini
         && !session_id.is_empty()
         && hook_event_name != "SessionStart"
@@ -5692,19 +5797,30 @@ async fn hooks_handler(
         if let Some(tab_id) = tab_id_from_param.as_deref() {
             let cwd = event.get("cwd").and_then(|v| v.as_str()).map(String::from);
             let model = event.get("model").and_then(|v| v.as_str()).map(String::from);
-            let unseen = {
+            let (unseen, rebound_from) = {
                 use crate::state::app_state::{AgentSessionInfo, AgentSessionState};
                 let mut sessions = srv.state.agent_sessions.write();
+                AGY_MCP_SEEDED.lock().remove(&session_id);
                 if let Some(existing) = sessions.get_mut(&session_id) {
-                    // Already seeded (e.g. by MCP initialize with the persisted geminiSessionId):
-                    // backfill hook-only metadata without re-emitting a synthetic session-start.
+                    // Already registered (e.g. seeded by MCP init or moved from an old tab):
+                    // backfill metadata and rebind `tab_id` if the session moved (reload/duplicate).
+                    let moved = if existing.tab_id != tab_id {
+                        let prev = existing.tab_id.clone();
+                        existing.tab_id = tab_id.to_string();
+                        Some(prev)
+                    } else {
+                        None
+                    };
                     if existing.cwd.is_none() {
                         existing.cwd = cwd.clone();
                     }
                     if existing.model.is_none() {
                         existing.model = model;
                     }
-                    false
+                    if moved.is_some() {
+                        drop_agy_mcp_placeholders(&mut sessions, tab_id, &session_id);
+                    }
+                    (moved.is_some(), moved)
                 } else {
                     drop_agy_mcp_placeholders(&mut sessions, tab_id, &session_id);
                     sessions.insert(
@@ -5728,9 +5844,18 @@ async fn hooks_handler(
                             connection_id: None,
                         },
                     );
-                    true
+                    (true, None)
                 }
             };
+            if let Some(prev) = rebound_from {
+                log::info!(
+                    "Agy hook: rebound resumed session {} from tab {} → {} on {}",
+                    &session_id[..session_id.len().min(8)],
+                    prev,
+                    tab_id,
+                    hook_event_name
+                );
+            }
             if unseen {
                 let mut app_data = srv.state.app_data.write();
                 let mut changed = false;
@@ -6743,12 +6868,7 @@ async fn hooks_handler(
                 if primed.len() > 512 {
                     primed.clear();
                 }
-                if is_session_start {
-                    primed.insert(key);
-                    true
-                } else {
-                    primed.insert(key)
-                }
+                primed.insert(key)
             };
 
             if needs_full_prime {
@@ -7692,11 +7812,11 @@ mod tests {
         use crate::state::app_state::{AgentSessionInfo, AgentSessionState};
         use crate::state::AgentRuntime;
 
-        let mk = |tab: &str, conn: Option<&str>| AgentSessionInfo {
+        let mk = |tab: &str, state: AgentSessionState, conn: Option<&str>| AgentSessionInfo {
             runtime: AgentRuntime::Gemini,
             tab_id: tab.to_string(),
             cwd: None,
-            state: AgentSessionState::WaitingInput,
+            state,
             tool_name: None,
             tool_detail: None,
             pending_question: None,
@@ -7712,16 +7832,31 @@ mod tests {
         };
 
         let mut sessions = std::collections::HashMap::new();
-        sessions.insert("mcp-tab-1".to_string(), mk("tab-1", Some("mcp-conn-1")));
-        sessions.insert("old-persisted-1".to_string(), mk("tab-1", Some("mcp-conn-1")));
-        sessions.insert("real-conv-1".to_string(), mk("tab-1", Some("mcp-conn-1")));
-        sessions.insert("mcp-tab-2".to_string(), mk("tab-2", Some("mcp-conn-2")));
+        sessions.insert("mcp-tab-1".to_string(), mk("tab-1", AgentSessionState::WaitingInput, Some("mcp-conn-1")));
+        sessions.insert("seeded-persisted-1".to_string(), mk("tab-1", AgentSessionState::WaitingInput, Some("mcp-conn-1")));
+        sessions.insert("live-with-conn-1".to_string(), mk("tab-1", AgentSessionState::Active, Some("mcp-conn-1")));
+        sessions.insert("real-conv-1".to_string(), mk("tab-1", AgentSessionState::WaitingInput, Some("mcp-conn-1")));
+        sessions.insert("mcp-tab-2".to_string(), mk("tab-2", AgentSessionState::WaitingInput, Some("mcp-conn-2")));
+        super::AGY_MCP_SEEDED.lock().insert("seeded-persisted-1".to_string());
 
         super::drop_agy_mcp_placeholders(&mut sessions, "tab-1", "real-conv-1");
 
         assert!(!sessions.contains_key("mcp-tab-1"), "fresh placeholder should be dropped");
-        assert!(!sessions.contains_key("old-persisted-1"), "stale seeded session on same tab should be dropped");
+        assert!(!sessions.contains_key("seeded-persisted-1"), "provisional seeded session on same tab should be dropped");
+        assert!(sessions.contains_key("live-with-conn-1"), "live non-provisional session with connection_id must survive");
         assert!(sessions.contains_key("real-conv-1"), "matching real session must survive");
         assert!(sessions.contains_key("mcp-tab-2"), "other tabs must not be touched");
+
+        // Subagent hook arriving while parent is mid-turn is ignored and remembered even after parent goes idle.
+        assert!(super::is_agy_subagent_hook(&sessions, "tab-1", "subagent-conv-99"));
+        sessions.get_mut("live-with-conn-1").unwrap().state = AgentSessionState::WaitingInput;
+        assert!(super::is_agy_subagent_hook(&sessions, "tab-1", "subagent-conv-99"));
+        assert!(!super::is_agy_subagent_hook(&sessions, "tab-1", "new-top-level-conv"));
+
+        // Nested `agy -p` inside an active Claude tab is also treated as a subagent hook.
+        let mut claude_parent = mk("tab-claude", AgentSessionState::Active, None);
+        claude_parent.runtime = AgentRuntime::Claude;
+        sessions.insert("claude-parent-1".to_string(), claude_parent);
+        assert!(super::is_agy_subagent_hook(&sessions, "tab-claude", "nested-agy-conv-1"));
     }
 }
