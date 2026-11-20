@@ -13,11 +13,10 @@ import { getResumeCommand, sessionIdVar } from '$lib/agents/resume';
 import { getDescriptor } from '$lib/agents/descriptor';
 import type { AgentRuntime, AgentState, WorkspaceAgentState } from '$lib/agents/types';
 
-/** Per-runtime auto-resume preference (Claude default on; Codex opt-in; Gemini has
- *  no pref yet → off). Gates whether agent init auto-configures auto-resume. */
+/** Per-runtime auto-resume preference. Gates whether agent init auto-configures auto-resume. */
 function autoResumeEnabledFor(runtime: AgentRuntime): boolean {
   if (runtime === 'codex') return preferencesStore.codexAutoResume;
-  if (runtime === 'gemini') return false;
+  if (runtime === 'gemini') return preferencesStore.geminiAutoResume;
   return preferencesStore.claudeCodeAutoResume;
 }
 
@@ -98,7 +97,11 @@ function runtimeOf(payload: { runtime?: string }): AgentRuntime {
  *  runtime's tool summarizer for the detail portion. */
 function buildActionString(runtime: AgentRuntime, toolName: string, toolInput: Record<string, unknown> | null): string {
   const detail = getDescriptor(runtime).summarizeTool(toolName, toolInput);
-  const displayName = toolName.startsWith('mcp__') ? toolName.split('__').slice(2).join('__') : toolName;
+  const displayName = toolName.startsWith('mcp__')
+    ? toolName.split('__').slice(2).join('__')
+    : toolName.includes('/')
+      ? toolName.split('/').pop() || toolName
+      : toolName;
   return detail ? `${displayName}: ${detail}` : displayName;
 }
 
@@ -618,7 +621,7 @@ function createAgentStateStore() {
         // "needs you" signal (alongside permission prompts). When it fires on a tab you're not
         // looking at (e.g. a background mesh agent), surface a toast + deep-link so it isn't
         // missed. Agents must NOT also print the question or write a note (no double-messaging).
-        if (tool_name === 'AskUserQuestion' && !isTabVisible(tab_id)) {
+        if ((tool_name === 'AskUserQuestion' || tool_name === 'ask_question') && !isTabVisible(tab_id)) {
           dispatch(getDescriptor(runtime).displayName, 'Needs your input', 'info', { tabId: tab_id, kind: 'question' });
         }
       });

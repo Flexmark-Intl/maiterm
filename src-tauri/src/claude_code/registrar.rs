@@ -47,11 +47,14 @@ impl Registrar for ClaudeRegistrar {
 }
 
 /// All known registrars (used for exit cleanup — unregister regardless of current pref).
-/// Codex installs when prefs.codex_ide is on (default true).
-/// Exit cleanup currently unregisters both unconditionally; Codex shared-hook ownership
-/// remains an open issue in docs/codex-integration-review.md.
+/// Codex and Antigravity (`agy`) install when `prefs.codex_ide` / `prefs.gemini_ide` are on
+/// (default true).
 pub fn all_registrars() -> Vec<Box<dyn Registrar>> {
-    vec![Box::new(ClaudeRegistrar), Box::new(super::codex::CodexRegistrar)]
+    vec![
+        Box::new(ClaudeRegistrar),
+        Box::new(super::codex::CodexRegistrar),
+        Box::new(super::agy::AgyRegistrar),
+    ]
 }
 /// Registrars whose integration is currently enabled (used for install + reassert).
 pub fn enabled_registrars(prefs: &Preferences) -> Vec<Box<dyn Registrar>> {

@@ -177,9 +177,9 @@
 
   // ── Model and effort, set the way the phone sets them: `/model X` and `/effort X` typed
   //    through the composer's path, so an open prompt refuses them the same way. ──────────────
-  const claudeChat = $derived(meta?.runtime === 'claude');
+  const pickableRuntime = $derived(meta?.runtime === 'claude' || meta?.runtime === 'gemini');
   /** The pickers type into the tab, so a read-only column shows the values only. */
-  const pickable = $derived(claudeChat && !readOnly);
+  const pickable = $derived(pickableRuntime && !readOnly);
   /** An effort picked here, shown until the transcript reports one. Claude Code stops writing
    *  effort after a resume, so for a resumed session this is the only record. Per chat. */
   let effortPicked = $state<Record<string, string>>({});
@@ -230,7 +230,9 @@
       items: models.map((m) => ({
         label: m.name + (m.note ? ` · ${m.note}` : ''),
         // An ambiguous row matching says "on this model", never "on this row" (§ ModelOption).
-        shortcut: meta?.model && m.display === meta.model ? 'current' : undefined,
+        // When the value itself encodes an effort suffix (e.g. `gemini-4-neon-high`), narrow the
+        // `current` badge to the active effort variant when known.
+        shortcut: meta?.model && m.display === meta.model && (!m.ambiguous || !effortShown || m.value.endsWith(`-${effortShown}`)) ? 'current' : undefined,
         action: async () => {
           if (await typeCommand(chat, `/model ${m.value}`)) {
             // Not stamped on the header: a sent /model can be refused or put behind a dialog.

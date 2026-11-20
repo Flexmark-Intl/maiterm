@@ -77,7 +77,7 @@
     return r.remotes.origin ?? Object.values(r.remotes)[0] ?? null;
   }
 
-  const runtimeName: Record<string, string> = { claude: 'Claude', codex: 'Codex', gemini: 'Gemini' };
+  const runtimeName: Record<string, string> = { claude: 'Claude', codex: 'Codex', gemini: 'Antigravity' };
 
   async function handleSave() {
     if (!preview || saving) return;

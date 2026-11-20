@@ -179,6 +179,17 @@ pub fn run_browser_link_host_if_requested() -> bool {
     true
 }
 
+/// An agent CLI (Antigravity `agy`) launched this binary as a stdio-to-HTTP MCP bridge
+/// (`--mcp-stdio`, docs/agy-integration-review.md): run the bridge and return true before
+/// starting Tauri.
+pub fn run_mcp_stdio_if_requested() -> bool {
+    if !claude_code::mcp_stdio::requested() {
+        return false;
+    }
+    claude_code::mcp_stdio::run();
+    true
+}
+
 /// Why this launch couldn't take the single-instance lock, for setup() to log.
 static UNGUARDED_LAUNCH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// Account env removed at startup (`accounts::scrub_inherited_account_env`), for setup() to log.
@@ -1202,6 +1213,7 @@ pub fn run() {
             commands::ssh_tunnel::get_remote_bridge_env,
             commands::ssh_tunnel::get_maiterm_skill_scripts,
             commands::ssh_tunnel::build_codex_setup_script,
+            commands::ssh_tunnel::build_agy_setup_script,
             commands::ssh_tunnel::ssh_run_setup,
             commands::ssh_tunnel::probe_ssh_host,
             commands::workspace::create_diff_tab,

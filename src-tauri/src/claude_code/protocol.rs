@@ -1704,7 +1704,16 @@ fn overlord_rule_schema() -> Value {
     })
 }
 
-pub fn initialize_response(client_protocol_version: Option<&str>) -> Value {
+pub fn initialize_response(
+    client_protocol_version: Option<&str>,
+    runtime: crate::state::AgentRuntime,
+) -> Value {
+    // Antigravity (`agy`) shares one `"maiterm"` MCP entry across dev and prod via the
+    // per-PTY stdio bridge, so never tell it to look for `"maiterm-dev"`.
+    let server_name = match runtime {
+        crate::state::AgentRuntime::Gemini => "maiterm",
+        other => crate::state::agent_runtime::mcp_server_name(other),
+    };
     serde_json::json!({
         "protocolVersion": client_protocol_version.unwrap_or("2025-03-26"),
         "capabilities": { "tools": {} },
@@ -1720,7 +1729,7 @@ pub fn initialize_response(client_protocol_version: Option<&str>) -> Value {
              IMPORTANT: You MUST use tools from the '{}' MCP server ONLY. Do NOT use tools from any other maiterm MCP server. \
              IMPORTANT: Always call initSession when requested via /maiterm init, even if you believe it was already called. \
              Resume, fork, and compact events require re-initialization to pick up state changes.",
-            crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude)
+            server_name
         )
     })
 }

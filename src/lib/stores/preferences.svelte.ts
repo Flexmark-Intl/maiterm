@@ -100,6 +100,10 @@ function createPreferencesStore() {
   let codexHooks = $state(true);
   let codexAutoResume = $state(true);
   let codexHooksBypassTrust = $state(false);
+  let geminiIde = $state(true);
+  let geminiIdeSsh = $state(true);
+  let geminiHooks = $state(true);
+  let geminiAutoResume = $state(true);
   let mailinkEnabled = $state(false);
   let mailinkExposeAll = $state(true);
   let mailinkRelayUrl = $state('');
@@ -238,6 +242,10 @@ function createPreferencesStore() {
     get codexHooks() { return codexHooks; },
     get codexAutoResume() { return codexAutoResume; },
     get codexHooksBypassTrust() { return codexHooksBypassTrust; },
+    get geminiIde() { return geminiIde; },
+    get geminiIdeSsh() { return geminiIdeSsh; },
+    get geminiHooks() { return geminiHooks; },
+    get geminiAutoResume() { return geminiAutoResume; },
     get mailinkEnabled() { return mailinkEnabled; },
     get mailinkExposeAll() { return mailinkExposeAll; },
     get mailinkRelayUrl() { return mailinkRelayUrl; },
@@ -366,6 +374,10 @@ function createPreferencesStore() {
       codexHooks = prefs.codex_hooks ?? true;
       codexAutoResume = prefs.codex_auto_resume ?? true;
       codexHooksBypassTrust = prefs.codex_hooks_bypass_trust ?? false;
+      geminiIde = prefs.gemini_ide ?? true;
+      geminiIdeSsh = prefs.gemini_ide_ssh ?? true;
+      geminiHooks = prefs.gemini_hooks ?? true;
+      geminiAutoResume = prefs.gemini_auto_resume ?? true;
       mailinkEnabled = prefs.mailink_enabled ?? false;
       mailinkExposeAll = prefs.mailink_expose_all ?? true;
       mailinkRelayUrl = prefs.mailink_relay_url ?? '';
@@ -814,6 +826,26 @@ function createPreferencesStore() {
       await this.save();
       await commands.refreshAgentIntegrations();
     },
+    async setGeminiIde(value: boolean) {
+      geminiIde = value;
+      await this.save();
+      await commands.refreshAgentIntegrations();
+    },
+    async setGeminiIdeSsh(value: boolean) {
+      geminiIdeSsh = value;
+      await this.save();
+      await commands.refreshAgentIntegrations();
+    },
+    async setGeminiHooks(value: boolean) {
+      geminiHooks = value;
+      await this.save();
+      await commands.refreshAgentIntegrations();
+    },
+    async setGeminiAutoResume(value: boolean) {
+      geminiAutoResume = value;
+      await this.save();
+      await commands.refreshAgentIntegrations();
+    },
     async setComposerDefaultOpen(value: boolean) {
       composerDefaultOpen = value;
       await this.save();
@@ -1073,6 +1105,10 @@ function createPreferencesStore() {
       codexHooks = prefs.codex_hooks ?? true;
       codexAutoResume = prefs.codex_auto_resume ?? true;
       codexHooksBypassTrust = prefs.codex_hooks_bypass_trust ?? false;
+      geminiIde = prefs.gemini_ide ?? true;
+      geminiIdeSsh = prefs.gemini_ide_ssh ?? true;
+      geminiHooks = prefs.gemini_hooks ?? true;
+      geminiAutoResume = prefs.gemini_auto_resume ?? true;
       mailinkEnabled = prefs.mailink_enabled ?? false;
       mailinkExposeAll = prefs.mailink_expose_all ?? true;
       mailinkRelayUrl = prefs.mailink_relay_url ?? '';
@@ -1193,6 +1229,10 @@ function createPreferencesStore() {
         codex_hooks: codexHooks,
         codex_auto_resume: codexAutoResume,
         codex_hooks_bypass_trust: codexHooksBypassTrust,
+        gemini_ide: geminiIde,
+        gemini_ide_ssh: geminiIdeSsh,
+        gemini_hooks: geminiHooks,
+        gemini_auto_resume: geminiAutoResume,
         mailink_enabled: mailinkEnabled,
         mailink_expose_all: mailinkExposeAll,
         mailink_relay_url: mailinkRelayUrl.trim() || null,

@@ -2116,6 +2116,18 @@ pub struct Preferences {
     /// the trust prompt is a one-time interactive approval we deliberately keep).
     #[serde(default)]
     pub codex_hooks_bypass_trust: bool,
+    /// Enable Antigravity (`agy`) IDE/MCP integration (installs plugin in ~/.gemini/config/plugins/maiterm). Default on.
+    #[serde(default = "default_true")]
+    pub gemini_ide: bool,
+    /// Enable the Antigravity (`agy`) MCP bridge over SSH. Default on.
+    #[serde(default = "default_true")]
+    pub gemini_ide_ssh: bool,
+    /// Enable Antigravity (`agy`) lifecycle hooks in the maiTerm plugin. Default on.
+    #[serde(default = "default_true")]
+    pub gemini_hooks: bool,
+    /// Enable Antigravity (`agy`) hooks-based auto-resume (`agy --conversation`). Default on.
+    #[serde(default = "default_true")]
+    pub gemini_auto_resume: bool,
     /// Default open state for the composer dock on tabs that haven't been explicitly toggled.
     #[serde(default = "default_true")]
     pub composer_default_open: bool,
@@ -2448,6 +2460,10 @@ impl Default for Preferences {
             codex_hooks: true,
             codex_auto_resume: true,
             codex_hooks_bypass_trust: false,
+            gemini_ide: true,
+            gemini_ide_ssh: true,
+            gemini_hooks: true,
+            gemini_auto_resume: true,
             composer_default_open: true,
             windows_shell: default_windows_shell(),
             claude_setup_prompted: false,
@@ -3150,6 +3166,8 @@ mod pref_migration_tests {
         let empty: Preferences = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(empty.codex_ide && empty.codex_hooks && empty.codex_ide_ssh && empty.codex_auto_resume);
         assert!(!empty.codex_hooks_bypass_trust);
+        assert!(p.gemini_ide && p.gemini_hooks && p.gemini_ide_ssh && p.gemini_auto_resume);
+        assert!(empty.gemini_ide && empty.gemini_hooks && empty.gemini_ide_ssh && empty.gemini_auto_resume);
     }
 }
 

@@ -52,25 +52,45 @@ impl TrustDialog {
     }
 }
 
-/// Parse a viewport's text (`terminal::render::viewport_text`) for an OPEN trust dialog.
+/// Parse a viewport's text (`terminal::render::viewport_text`) for an OPEN workspace-trust
+/// dialog — Claude Code ("Quick safety check", `❯`, "Enter to confirm") or Antigravity CLI
+/// (`agy`: "Do you trust the contents of this project?", `>`, "enter Confirm").
 pub(crate) fn parse(screen: &str) -> Option<TrustDialog> {
     let lines: Vec<&str> = screen.lines().collect();
-    let last = lines.iter().rposition(|l| !l.trim().is_empty())?;
-    // Open means the footer is the last thing on screen. After an exit the shell prompt sits
-    // below it, and the words alone would then describe a dialog that is gone.
-    if !lines[last].contains("Enter to confirm") {
+    let last_non_blank = lines.iter().rposition(|l| !l.trim().is_empty())?;
+    // Open means the footer ends the screen. Claude puts "Enter to confirm" on the last
+    // non-blank line; Antigravity (`agy`) renders its 1-line mode status bar (`auto · …`) below
+    // `↑/↓ Navigate · enter Confirm`. After an exit, the shell prompt sits below instead.
+    let footer_idx = if lines[last_non_blank].contains("Enter to confirm")
+        || lines[last_non_blank].contains("enter Confirm")
+    {
+        last_non_blank
+    } else if last_non_blank > 0
+        && lines[last_non_blank - 1].contains("enter Confirm")
+        && is_agy_status_footer(lines[last_non_blank])
+    {
+        last_non_blank - 1
+    } else {
         return None;
-    }
-    let start = lines[..last].iter().rposition(|l| l.trim() == "Accessing workspace:")?;
-    let body = &lines[start + 1..last];
-    body.iter().position(|l| l.contains("Quick safety check"))?;
+    };
+    let start = lines[..footer_idx]
+        .iter()
+        .rposition(|l| l.trim() == "Accessing workspace:" || l.trim().ends_with("Accessing workspace:"))?;
+    let body = &lines[start + 1..footer_idx];
+    body.iter()
+        .position(|l| l.contains("Quick safety check") || l.contains("Do you trust the contents of this project?"))?;
 
     // The path is the block right after the header, one or more rows it wrapped onto, ended by
-    // a blank line. Wrapping breaks mid-word, so the rows are joined with nothing between them.
+    // a blank line or the prompt question itself (`agy` puts the question directly under the path).
     let path: String = body
         .iter()
         .skip_while(|l| l.trim().is_empty())
-        .take_while(|l| !l.trim().is_empty())
+        .take_while(|l| {
+            let t = l.trim();
+            !t.is_empty()
+                && !t.contains("Quick safety check")
+                && !t.contains("Do you trust the contents of this project?")
+        })
         .map(|l| l.trim())
         .collect();
     if path.is_empty() {
@@ -81,9 +101,12 @@ pub(crate) fn parse(screen: &str) -> Option<TrustDialog> {
     let mut highlighted = None;
     for line in body {
         let t = line.trim_start();
-        let (marked, rest) = match t.strip_prefix('❯') {
-            Some(r) => (true, r.trim_start()),
-            None => (false, t),
+        let (marked, rest) = if let Some(r) = t.strip_prefix('❯') {
+            (true, r.trim_start())
+        } else if let Some(r) = t.strip_prefix('>') {
+            (true, r.trim_start())
+        } else {
+            (false, t)
         };
         // Tolerate a numbered menu ("1. No, exit") should a release add one.
         let label = rest
@@ -102,6 +125,15 @@ pub(crate) fn parse(screen: &str) -> Option<TrustDialog> {
         return None;
     }
     Some(TrustDialog { path, options, highlighted: highlighted? })
+}
+
+/// Antigravity (`agy`) draws a 1-line status bar directly below its trust-dialog footer.
+fn is_agy_status_footer(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with("auto ·")
+        || t.starts_with("plan ·")
+        || t.starts_with("accept-edits ·")
+        || t.starts_with("? for shortcuts")
 }
 
 #[cfg(test)]
@@ -157,5 +189,30 @@ mod tests {
         assert_eq!(parse("SHELL$ ls\nsrc  docs\nSHELL$"), None);
         // No highlight means we can't tell where the arrows start from.
         assert_eq!(parse(" Accessing workspace:\n\n /a\n\n Quick safety check\n\n   No, exit\n\n Enter to confirm"), None);
+    }
+
+    #[test]
+    fn reads_agy_trust_dialog_and_rejects_after_exit() {
+        // Captured live on agy 1.5.13 (docs/agy-integration-review.md P4).
+        let screen = "\
+ ⣷  Signing in...Accessing workspace:
+/private/var/folders/yz/agy-probe
+Do you trust the contents of this project?
+Antigravity CLI requires permission to read, edit, and execute files here.
+> Yes, I trust this folder
+  No, exit
+  ↑/↓ Navigate · enter ConfirmGemini 3.8 Flash · low
+auto · 
+";
+        let d = parse(screen).expect("agy trust dialog is open");
+        assert_eq!(d.path, "/private/var/folders/yz/agy-probe");
+        assert_eq!(d.options, vec!["Yes, I trust this folder", "No, exit"]);
+        assert_eq!(d.highlighted, 0, "agy highlights Yes first");
+        assert_eq!(d.keys_for("Yes, I trust this folder"), Some(vec!["enter"]));
+        assert_eq!(d.keys_for("No, exit"), Some(vec!["down", "enter"]));
+
+        // After agy exits to a shell prompt, it must NOT read as open.
+        let after_exit = format!("{screen}\ndMac[~]# \n");
+        assert_eq!(parse(&after_exit), None);
     }
 }

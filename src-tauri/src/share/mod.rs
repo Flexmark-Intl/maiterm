@@ -534,15 +534,6 @@ pub struct LiveAgent {
     pub session_id: Option<String>,
 }
 
-/// The binary a runtime's command line starts with.
-fn runtime_binary(rt: AgentRuntime) -> &'static str {
-    match rt {
-        AgentRuntime::Claude => "claude",
-        AgentRuntime::Codex => "codex",
-        AgentRuntime::Gemini => "gemini",
-    }
-}
-
 fn session_var(rt: AgentRuntime) -> &'static str {
     crate::state::agent_runtime::descriptor(rt).session_id_var
 }
@@ -681,7 +672,7 @@ fn command_runtime(cmd: &str) -> Option<AgentRuntime> {
             Some(AgentRuntime::Claude)
         } else if word.contains("codex") {
             Some(AgentRuntime::Codex)
-        } else if word.contains("gemini-cli") {
+        } else if word.contains("gemini-cli") || word.contains("antigravity") {
             Some(AgentRuntime::Gemini)
         } else {
             None
@@ -689,9 +680,12 @@ fn command_runtime(cmd: &str) -> Option<AgentRuntime> {
     }
     let base = word.rsplit(['/', '\\']).next().unwrap_or(word);
     let base = base.strip_suffix(".exe").unwrap_or(base);
-    [AgentRuntime::Claude, AgentRuntime::Codex, AgentRuntime::Gemini]
-        .into_iter()
-        .find(|rt| runtime_binary(*rt) == base)
+    match base {
+        "claude" => Some(AgentRuntime::Claude),
+        "codex" => Some(AgentRuntime::Codex),
+        "agy" | "gemini" => Some(AgentRuntime::Gemini),
+        _ => None,
+    }
 }
 
 /// Where a terminal tab is, from the frontend's live context, then the persisted chains §2
@@ -1481,6 +1475,10 @@ mod tests {
             ("npx -y @anthropic-ai/claude-code", Some(AgentRuntime::Claude)),
             ("npx @openai/codex", Some(AgentRuntime::Codex)),
             ("C:\\tools\\codex.exe resume x", Some(AgentRuntime::Codex)),
+            ("agy", Some(AgentRuntime::Gemini)),
+            ("agy --conversation %geminiSessionId", Some(AgentRuntime::Gemini)),
+            ("/opt/homebrew/bin/agy --conversation x", Some(AgentRuntime::Gemini)),
+            ("gemini --resume x", Some(AgentRuntime::Gemini)),
             ("npm run dev", None),
             ("claude-monitor", None),
             ("npx vite", None),

@@ -1389,6 +1389,159 @@ pub fn build_codex_setup_script(remote_port: u16, auth: String, tab_id: String, 
     lines.join("\n")
 }
 
+/// python3 merge for `~/.gemini/config/mcp_config.json` on a remote host: sets `mcpServers.maiterm`
+/// (pointing at `$HOME/.gemini/config/plugins/maiterm/mcp-stdio.sh`) and add-only merges any
+/// enabled proxied MCP servers (`$__agy_proxy` JSON `{ "set": { name: { path, marker } } }`)
+/// without overwriting native user entries or malformed JSON. NO single quotes (wrapped in `''`).
+const AGY_MCP_CONFIG_MERGE_PY: &str = concat!(
+    "import json,os,sys\n",
+    "p=os.path.expanduser(\"~/.gemini/config/mcp_config.json\")\n",
+    "wrapper=os.path.expanduser(\"~/.gemini/config/plugins/maiterm/mcp-stdio.sh\")\n",
+    "os.makedirs(os.path.dirname(p),exist_ok=True)\n",
+    "cur={}\n",
+    "if os.path.exists(p):\n",
+    " try:\n",
+    "  raw=open(p).read()\n",
+    "  cur=json.loads(raw) if raw.strip() else {}\n",
+    " except Exception:\n",
+    "  sys.stderr.write(\"maiterm: refusing to rewrite unparseable ~/.gemini/config/mcp_config.json\\n\")\n",
+    "  sys.exit(0)\n",
+    "if not isinstance(cur,dict):\n",
+    " sys.stderr.write(\"maiterm: refusing to rewrite ~/.gemini/config/mcp_config.json, top level is not an object\\n\")\n",
+    " sys.exit(0)\n",
+    "servers=cur.get(\"mcpServers\")\n",
+    "if servers is None:\n",
+    " servers={}\n",
+    " cur[\"mcpServers\"]=servers\n",
+    "if not isinstance(servers,dict):\n",
+    " sys.exit(0)\n",
+    "changed=False\n",
+    "want={\"command\":\"bash\",\"args\":[wrapper]}\n",
+    "if servers.get(\"maiterm\")!=want:\n",
+    " servers[\"maiterm\"]=want\n",
+    " changed=True\n",
+    "proxy_raw=os.environ.get(\"__agy_proxy\",\"\")\n",
+    "if proxy_raw:\n",
+    " try:\n",
+    "  pset=json.loads(proxy_raw).get(\"set\",{})\n",
+    " except Exception:\n",
+    "  pset={}\n",
+    " if isinstance(pset,dict):\n",
+    "  for name,spec in pset.items():\n",
+    "   if not isinstance(spec,dict):\n",
+    "    continue\n",
+    "   path_arg=spec.get(\"path\",\"\")\n",
+    "   marker=spec.get(\"marker\",\"\")\n",
+    "   if not path_arg or not marker:\n",
+    "    continue\n",
+    "   entry={\"command\":\"bash\",\"args\":[wrapper,\"--path\",path_arg],\"env\":{\"MAITERM_PROXY\":marker}}\n",
+    "   ex=servers.get(name)\n",
+    "   if ex is None:\n",
+    "    servers[name]=entry\n",
+    "    changed=True\n",
+    "   elif isinstance(ex,dict) and isinstance(ex.get(\"env\"),dict) and ex[\"env\"].get(\"MAITERM_PROXY\")==marker and ex!=entry:\n",
+    "    servers[name]=entry\n",
+    "    changed=True\n",
+    "if changed:\n",
+    " tmp=p+\".maiterm-tmp\"\n",
+    " open(tmp,\"w\").write(json.dumps(cur,indent=2)+\"\\n\")\n",
+    " os.replace(tmp,p)\n",
+);
+
+/// python3 merge for `~/.gemini/antigravity-cli/settings.json` on a remote host: ensures
+/// `"mcp(maiterm/*)"` is in `permissions.allow`, preserving all other settings and refusing
+/// malformed JSON. NO single quotes (shell wraps in `''`).
+const AGY_SETTINGS_ALLOW_MERGE_PY: &str = concat!(
+    "import json,os,sys\n",
+    "p=os.path.expanduser(\"~/.gemini/antigravity-cli/settings.json\")\n",
+    "rule=\"mcp(maiterm/*)\"\n",
+    "os.makedirs(os.path.dirname(p),exist_ok=True)\n",
+    "cur={}\n",
+    "if os.path.exists(p):\n",
+    " try:\n",
+    "  raw=open(p).read()\n",
+    "  cur=json.loads(raw) if raw.strip() else {}\n",
+    " except Exception:\n",
+    "  sys.stderr.write(\"maiterm: refusing to rewrite unparseable ~/.gemini/antigravity-cli/settings.json\\n\")\n",
+    "  sys.exit(0)\n",
+    "if not isinstance(cur,dict):\n",
+    " sys.exit(0)\n",
+    "perms=cur.get(\"permissions\")\n",
+    "if perms is None:\n",
+    " perms={}\n",
+    " cur[\"permissions\"]=perms\n",
+    "if not isinstance(perms,dict):\n",
+    " sys.exit(0)\n",
+    "allow=perms.get(\"allow\")\n",
+    "if allow is None:\n",
+    " allow=[]\n",
+    " perms[\"allow\"]=allow\n",
+    "if not isinstance(allow,list):\n",
+    " sys.exit(0)\n",
+    "if rule not in allow:\n",
+    " allow.append(rule)\n",
+    " tmp=p+\".maiterm-tmp\"\n",
+    " open(tmp,\"w\").write(json.dumps(cur,indent=2)+\"\\n\")\n",
+    " os.replace(tmp,p)\n",
+);
+
+/// Build the shell script that installs maiTerm's Antigravity (`agy`) integration on a REMOTE
+/// host over the SSH reverse tunnel, reusing the same Rust renderers (`render_agy_remote_artifacts`)
+/// so local and remote never drift. Instance-independent: no port or token is baked into disk
+/// files — `mcp-stdio.sh` + `mcp-stdio.py` read `$MAITERM_PORT`, `$MAITERM_AUTH`, and
+/// `$MAITERM_TAB_ID` from the shell environment (with `~/.aiterm` fallback). No-ops cleanly on
+/// hosts without `agy` (uses `if/fi`, never `exit`, so it is safe in interactive `sudo`/`su`
+/// shells too).
+#[tauri::command]
+pub fn build_agy_setup_script(hooks: bool) -> String {
+    let art = crate::claude_code::agy::render_agy_remote_artifacts();
+    let proxy_json = crate::mcp_proxy::entries::remote_agy().to_string();
+    let q = |s: &str| s.replace('\'', "'\\''");
+
+    let mut lines: Vec<String> = Vec::new();
+    lines.push("if command -v agy >/dev/null 2>&1; then".to_string());
+    lines.push("__agy_plugin=\"$HOME/.gemini/config/plugins/maiterm\"".to_string());
+    lines.push("mkdir -p \"$__agy_plugin/rules\" \"$__agy_plugin/skills/maiterm\"".to_string());
+    lines.push("cat > \"$__agy_plugin/plugin.json\" <<'MAITERM_AGY_PLUGIN_EOF'".to_string());
+    lines.push(art.plugin_json.trim_end().to_string());
+    lines.push("MAITERM_AGY_PLUGIN_EOF".to_string());
+    lines.push("cat > \"$__agy_plugin/rules/AGENTS.md\" <<'MAITERM_AGY_AGENTS_EOF'".to_string());
+    lines.push(art.agents_md.trim_end().to_string());
+    lines.push("MAITERM_AGY_AGENTS_EOF".to_string());
+    lines.push("cat > \"$__agy_plugin/skills/maiterm/SKILL.md\" <<'MAITERM_AGY_SKILL_EOF'".to_string());
+    lines.push(art.skill_md.trim_end().to_string());
+    lines.push("MAITERM_AGY_SKILL_EOF".to_string());
+    lines.push("cat > \"$__agy_plugin/mcp-stdio.py\" <<'MAITERM_AGY_BRIDGE_EOF'".to_string());
+    lines.push(art.mcp_stdio_py.trim_end().to_string());
+    lines.push("MAITERM_AGY_BRIDGE_EOF".to_string());
+    lines.push("chmod 755 \"$__agy_plugin/mcp-stdio.py\"".to_string());
+    lines.push("cat > \"$__agy_plugin/mcp-stdio.sh\" <<'MAITERM_AGY_WRAPPER_EOF'".to_string());
+    lines.push(art.mcp_stdio_sh.trim_end().to_string());
+    lines.push("MAITERM_AGY_WRAPPER_EOF".to_string());
+    lines.push("chmod 755 \"$__agy_plugin/mcp-stdio.sh\"".to_string());
+    lines.push("rm -f \"$__agy_plugin/mcp_config.json\"".to_string());
+    if hooks {
+        lines.push("mkdir -p \"$__agy_plugin/hooks\"".to_string());
+        lines.push("cat > \"$__agy_plugin/hooks/agy-hook.sh\" <<'MAITERM_AGY_SHIM_EOF'".to_string());
+        lines.push(art.hook_shim.trim_end().to_string());
+        lines.push("MAITERM_AGY_SHIM_EOF".to_string());
+        lines.push("chmod 755 \"$__agy_plugin/hooks/agy-hook.sh\"".to_string());
+        lines.push("cat > \"$__agy_plugin/hooks.json\" <<'MAITERM_AGY_HOOKS_EOF'".to_string());
+        lines.push(art.hooks_json.trim_end().to_string());
+        lines.push("MAITERM_AGY_HOOKS_EOF".to_string());
+    } else {
+        lines.push("rm -f \"$__agy_plugin/hooks.json\" \"$__agy_plugin/hooks/agy-hook.sh\"".to_string());
+    }
+    lines.push(format!("__agy_proxy='{}'", q(&proxy_json)));
+    lines.push(
+        "__agy_proxy=\"$__agy_proxy\" python3 -c '".to_string() + AGY_MCP_CONFIG_MERGE_PY + "'",
+    );
+    lines.push("python3 -c '".to_string() + AGY_SETTINGS_ALLOW_MERGE_PY + "'");
+    lines.push("fi".to_string());
+
+    lines.join("\n")
+}
+
 /// Run setup commands on a remote host via a separate background SSH connection.
 /// This avoids injecting commands into the user's interactive PTY.
 /// Spawns `ssh {ssh_args} 'setup_script'` and waits for completion.
@@ -2225,8 +2378,38 @@ mod tests {
             ("CODEX_TOML_MERGE_PY", CODEX_TOML_MERGE_PY),
             ("CODEX_HOOKS_MERGE_PY", CODEX_HOOKS_MERGE_PY),
             ("CODEX_HOOKS_STRIP_PY", CODEX_HOOKS_STRIP_PY),
+            ("AGY_MCP_CONFIG_MERGE_PY", AGY_MCP_CONFIG_MERGE_PY),
+            ("AGY_SETTINGS_ALLOW_MERGE_PY", AGY_SETTINGS_ALLOW_MERGE_PY),
         ] {
             assert!(!src.contains('\''), "{name} contains a single quote");
+        }
+    }
+
+    #[test]
+    fn agy_setup_script_is_valid_bash_and_python_compiles() {
+        let on = build_agy_setup_script(true);
+        let (ok, stderr) = pipe_ok("bash", &["-n"], &on);
+        assert!(ok, "bash -n rejected agy setup script:\n{}\n--- stderr ---\n{}", on, stderr);
+        assert!(on.contains("if command -v agy >/dev/null 2>&1; then"));
+        assert!(on.contains("MAITERM_AGY_SHIM_EOF"));
+        assert!(on.contains("MAITERM_AGY_HOOKS_EOF"));
+        assert!(on.contains("MAITERM_AGY_BRIDGE_EOF"));
+
+        let off = build_agy_setup_script(false);
+        let (ok_off, stderr_off) = pipe_ok("bash", &["-n"], &off);
+        assert!(ok_off, "bash -n rejected agy hooks-off script:\n{}", stderr_off);
+        assert!(!off.contains("MAITERM_AGY_SHIM_EOF"));
+        assert!(!off.contains("MAITERM_AGY_HOOKS_EOF"));
+        assert!(off.contains("rm -f \"$__agy_plugin/hooks.json\""));
+
+        let check = "import sys; compile(sys.stdin.read(), \"<embedded>\", \"exec\")";
+        for (name, src) in [
+            ("AGY_MCP_CONFIG_MERGE_PY", AGY_MCP_CONFIG_MERGE_PY),
+            ("AGY_SETTINGS_ALLOW_MERGE_PY", AGY_SETTINGS_ALLOW_MERGE_PY),
+            ("REMOTE_MCP_STDIO_PY", crate::claude_code::agy::REMOTE_MCP_STDIO_PY),
+        ] {
+            let (ok_py, e) = pipe_ok("python3", &["-c", check], src);
+            assert!(ok_py, "{name} does not compile:\n{e}");
         }
     }
 

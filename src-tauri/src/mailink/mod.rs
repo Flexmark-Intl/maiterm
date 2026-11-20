@@ -574,9 +574,25 @@ async fn models_list(
     Ok(Json(json!(models_for_tab(&s.app, &tab))))
 }
 
-/// What THIS tab can be switched to: a managed local tab reads its own account root, and an
-/// unknown or remote tab gets builtins only. Shared by `GET /models?tab=` and the Loom's picker.
+/// What THIS tab can be switched to: Antigravity (`agy`) tabs query `agy models`, while Claude
+/// tabs read their own account root (or builtins for unknown/remote tabs). Shared by
+/// `GET /models?tab=` and the Loom's picker.
 pub(crate) fn models_for_tab(app: &AppState, tab: &str) -> Vec<models::ModelOption> {
+    let tab_runtime = resolved_session_for_tab(app, tab)
+        .map(|(rt, _)| rt)
+        .or_else(|| {
+            let data = app.app_data.read();
+            data.windows
+                .iter()
+                .flat_map(|w| &w.workspaces)
+                .flat_map(|ws| &ws.panes)
+                .flat_map(|p| &p.tabs)
+                .find(|t| t.id == tab)
+                .and_then(|t| t.runtime)
+        });
+    if tab_runtime == Some(AgentRuntime::Gemini) {
+        return models::available_agy();
+    }
     let source = if accounts::tab_runs_remote(app, tab) {
         models::Cache::None
     } else {
@@ -1857,10 +1873,13 @@ pub(crate) fn tab_prompt_view(app: &AppState, tab_id: &str) -> Option<Value> {
             v["path"] = json!(d.path);
             v["options"] = json!(d.options);
         }
-        v["note"] = json!("Claude is asking whether to trust this folder before it starts. \
-            Trusting a folder lets the agent read, edit and run everything in it: the human's \
-            decision. answerTabPrompt refuses it, and the human already sees it on their board: \
-            leave it, and do not ask them about it yourself.");
+        let brand = if runtime == AgentRuntime::Gemini { "Antigravity" } else { "Claude" };
+        v["note"] = json!(format!(
+            "{brand} is asking whether to trust this folder before it starts. \
+             Trusting a folder lets the agent read, edit and run everything in it: the human's \
+             decision. answerTabPrompt refuses it, and the human already sees it on their board: \
+             leave it, and do not ask them about it yourself."
+        ));
     } else if kind == "question" {
         if let Some(t) = pending_question_for_tab(app, tab_id) {
             if let Some(q) = t.get("questions") {
@@ -1880,6 +1899,12 @@ pub(crate) fn tab_prompt_view(app: &AppState, tab_id: &str) -> Option<Value> {
         }
         if let Some(d) = detail {
             v["detail"] = json!(d);
+        } else if runtime != AgentRuntime::Codex {
+            if let Some(dlg) = permission_dialog_for_tab(app, tab_id) {
+                if !dlg.text.is_empty() {
+                    v["detail"] = json!(dlg.text);
+                }
+            }
         }
     }
     // A Hive worker's prompt: who answers it, and when the human is told (docs/hive.md §4.7).
@@ -4645,11 +4670,18 @@ fn trust_dialog_for_tab(app: &AppState, tab_id: &str) -> Option<trust::TrustDial
     trust::parse(&crate::terminal::render::screen_text(&handle.term))
 }
 
-/// Claude's tool-permission dialog, when it is open on this tab's screen, with the rows it
+/// Claude/Antigravity tool-permission dialog, when it is open on this tab's screen, with the rows it
 /// offers (`mailink/permission.rs`). Read from the live screen for the same reason as the trust
 /// dialog: a human scrolled up must not hide it.
 fn permission_dialog_for_tab(app: &AppState, tab_id: &str) -> Option<permission::PermissionDialog> {
     permission::parse(&live_screen_text(app, tab_id)?)
+}
+
+/// True when a full tool-permission dialog is currently parsed off `tab_id`'s live screen.
+/// Used by `claude_code/server.rs`'s `watch_agy_permission` to surface `WaitingPermission` for
+/// Antigravity (`agy`), which has no `PermissionRequest` hook.
+pub(crate) fn permission_dialog_open_for_tab(app: &AppState, tab_id: &str) -> bool {
+    permission_dialog_for_tab(app, tab_id).is_some()
 }
 
 /// What the agent's input box on this tab holds, read off the live screen with dimmed
@@ -4704,10 +4736,11 @@ fn open_prompt(app: &AppState, tab_id: &str) -> Option<(&'static str, String, Ag
         Some(_) => cur,
         // Inventing a prompt the hooks haven't reported takes more than a footer: the rows must
         // read as a permission dialog's, so nothing else on screen is ever answered as one.
-        None if runtime_for_tab(app, tab_id) == Some(AgentRuntime::Claude)
+        None if matches!(runtime_for_tab(app, tab_id), Some(AgentRuntime::Claude | AgentRuntime::Gemini))
             && permission_dialog_for_tab(app, tab_id).is_some() =>
         {
-            Some(("permission", permission_prompt_id(app, tab_id), AgentRuntime::Claude))
+            let rt = runtime_for_tab(app, tab_id).unwrap_or(AgentRuntime::Claude);
+            Some(("permission", permission_prompt_id(app, tab_id), rt))
         }
         None => None,
     }
@@ -4820,11 +4853,14 @@ fn trust_prompt_id(tab_id: &str, path: &str) -> String {
 fn current_prompt(app: &AppState, tab_id: &str) -> Option<(&'static str, String, AgentRuntime)> {
     let states = session_states(app);
     let Some(s) = states.get(tab_id) else {
-        if runtime_for_tab(app, tab_id) != Some(AgentRuntime::Claude) {
+        let Some(rt) = runtime_for_tab(app, tab_id) else {
+            return None;
+        };
+        if !matches!(rt, AgentRuntime::Claude | AgentRuntime::Gemini) {
             return None;
         }
         return trust_dialog_for_tab(app, tab_id)
-            .map(|d| ("trust", trust_prompt_id(tab_id, &d.path), AgentRuntime::Claude));
+            .map(|d| ("trust", trust_prompt_id(tab_id, &d.path), rt));
     };
     // AskUserQuestion first: it coincides with a permission_prompt state (see build_chat_detail),
     // but the open ask is the structured question — the stale-guard must agree with what was shown.
@@ -5259,8 +5295,8 @@ fn tab_view(
         },
         None => {
             // The trust dialog comes before any session exists, so only this arm can be sitting
-            // at it. Claude only: it is Claude's dialog, and the read costs a viewport render.
-            let trust = (tab_runtime == AgentRuntime::Claude)
+            // at it (Claude and Antigravity `agy` both show one).
+            let trust = matches!(tab_runtime, AgentRuntime::Claude | AgentRuntime::Gemini)
                 .then(|| trust_dialog_for_tab(app, tab_id))
                 .flatten();
             TabView {
@@ -5926,7 +5962,7 @@ const ASSUMED_1M_MODELS: [&str; 5] = ["opus-4-8", "opus-5", "fable-5", "sonnet-5
 /// whatever its id says. That keeps an unrecognized future 1M model merely wrong-until-200k
 /// rather than permanently pegged at 100%, without needing a code change per model.
 fn context_limit_for(model_id: &str, observed_tokens: u64) -> u64 {
-    if model_id.contains("[1m]") || model_id.contains("-1m") {
+    if model_id.contains("[1m]") || model_id.contains("-1m") || model_id.starts_with("gemini-") {
         return 1_000_000;
     }
     if ASSUMED_1M_MODELS.iter().any(|m| model_id.contains(m)) {
@@ -5939,19 +5975,48 @@ fn context_limit_for(model_id: &str, observed_tokens: u64) -> u64 {
 }
 
 /// Normalize a model id to a friendly display string, per runtime. Claude ids go through
-/// `display_model` ("claude-opus-4-8[1m]" → "Opus 4.8"); Codex ids just get the family
-/// capitalized ("gpt-5.5" → "GPT-5.5", "gpt-5-codex" → "GPT-5-codex"); anything else passes
-/// through as-is.
+/// `display_model` ("claude-opus-4-8[1m]" → "Opus 4.8"); Codex ids capitalize `GPT`;
+/// Antigravity (`agy`) ids strip the trailing effort suffix (`-low`/`-medium`/`-high`/`-xhigh`/`-max`)
+/// and title-case ("gemini-4-neon-high" → "Gemini 4 Neon", "gemini-3.8-flash-low" → "Gemini 3.8 Flash").
 fn display_model_for(rt: AgentRuntime, model_id: &str) -> String {
     match rt {
         AgentRuntime::Claude => display_model(model_id),
-        AgentRuntime::Codex | AgentRuntime::Gemini => {
-            match model_id.strip_prefix("gpt") {
-                Some(rest) => format!("GPT{rest}"),
-                None => model_id.to_string(),
-            }
-        }
+        AgentRuntime::Codex => match model_id.strip_prefix("gpt") {
+            Some(rest) => format!("GPT{rest}"),
+            None => model_id.to_string(),
+        },
+        AgentRuntime::Gemini => display_agy_model(model_id),
     }
+}
+
+fn display_agy_model(model_id: &str) -> String {
+    let trimmed = model_id.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    // Strip trailing effort tier (`-low`, `-medium`, `-high`, `-xhigh`, `-max`), which is
+    // already surfaced separately in `meta.effort`.
+    let base = ["xhigh", "medium", "high", "low", "max"]
+        .iter()
+        .find_map(|tier| trimmed.strip_suffix(&format!("-{tier}")))
+        .unwrap_or(trimmed);
+    if base.starts_with("claude-") {
+        return display_model(base);
+    }
+    if let Some(rest) = base.strip_prefix("gpt-") {
+        return format!("GPT-{}", rest.to_uppercase());
+    }
+    base.split('-')
+        .filter(|p| !p.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(c) if c.is_ascii_alphabetic() => c.to_uppercase().collect::<String>() + chars.as_str(),
+                _ => part.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Normalize a Claude model id to a friendly display string: "claude-opus-4-8[1m]" → "Opus 4.8".

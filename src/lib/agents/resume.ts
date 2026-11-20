@@ -100,7 +100,7 @@ export function getResumeCommand(runtime: AgentRuntime, opts?: ResumeCommandOpti
       return opts?.bypassHookTrust
         ? 'codex resume --dangerously-bypass-hook-trust %codexSessionId'
         : 'codex resume %codexSessionId';
-    case 'gemini': return 'gemini --resume %geminiSessionId';
+    case 'gemini': return 'agy --conversation %geminiSessionId';
     default: return 'claude --resume %claudeSessionId';
   }
 }

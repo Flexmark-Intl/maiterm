@@ -27,13 +27,13 @@ use crate::state::AgentRuntime;
 
 // ─── runtime dispatchers ────────────────────────────────────────────────────────────────
 
-/// The last `limit` maiLink messages for a session, per the tab's runtime. `None` when the
-/// runtime has no transcript source (Gemini) or the file can't be located/read.
+/// The last `limit` maiLink messages for a session, per the tab's runtime. `None` when
+/// the transcript file can't be located/read.
 pub fn turns_for(rt: AgentRuntime, session_id: &str, limit: usize, tools: ToolRender) -> Option<Vec<Value>> {
     match rt {
         AgentRuntime::Claude => turns_for_session(session_id, limit, tools),
         AgentRuntime::Codex => codex_turns_for_session(session_id, limit, tools),
-        AgentRuntime::Gemini => None,
+        AgentRuntime::Gemini => agy_turns_for_session(session_id, limit, tools),
     }
 }
 
@@ -42,7 +42,7 @@ pub fn meta_for(rt: AgentRuntime, session_id: &str) -> Option<SessionMeta> {
     match rt {
         AgentRuntime::Claude => session_meta(session_id),
         AgentRuntime::Codex => codex_session_meta(session_id),
-        AgentRuntime::Gemini => None,
+        AgentRuntime::Gemini => agy_session_meta(session_id),
     }
 }
 
@@ -52,7 +52,7 @@ pub fn mtime_for(rt: AgentRuntime, session_id: &str) -> Option<u64> {
     let path = match rt {
         AgentRuntime::Claude => locate_jsonl(session_id)?,
         AgentRuntime::Codex => locate_codex_jsonl(session_id)?,
-        AgentRuntime::Gemini => return None,
+        AgentRuntime::Gemini => locate_agy_jsonl(session_id)?,
     };
     let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
     modified
@@ -67,7 +67,7 @@ pub fn last_turn_ts_for(rt: AgentRuntime, session_id: &str) -> Option<u64> {
     match rt {
         AgentRuntime::Claude => session_last_turn_ts(session_id),
         AgentRuntime::Codex => codex_session_last_turn_ts(session_id),
-        AgentRuntime::Gemini => None,
+        AgentRuntime::Gemini => agy_session_last_turn_ts(session_id),
     }
 }
 
@@ -430,6 +430,8 @@ pub(crate) fn session_is_local(runtime: &str, session_id: &str) -> bool {
         "claude" => locate_jsonl(session_id)
             .is_some_and(|p| super::mirror::shadow_dir().is_none_or(|shadow| !p.starts_with(shadow))),
         "codex" => locate_codex_jsonl(session_id).is_some(),
+        "gemini" => locate_agy_jsonl(session_id)
+            .is_some_and(|p| super::mirror::shadow_dir().is_none_or(|shadow| !p.starts_with(shadow))),
         _ => false,
     }
 }
@@ -1159,11 +1161,12 @@ pub fn overlord_facts_for(rt: AgentRuntime, session_id: &str) -> Option<Overlord
     let path = match rt {
         AgentRuntime::Claude => locate_jsonl(session_id)?,
         AgentRuntime::Codex => locate_codex_jsonl(session_id)?,
-        AgentRuntime::Gemini => return None,
+        AgentRuntime::Gemini => locate_agy_jsonl(session_id)?,
     };
     let parse = match rt {
         AgentRuntime::Claude => claude_tail_facts as fn(&str) -> TailFacts,
-        _ => codex_tail_facts as fn(&str) -> TailFacts,
+        AgentRuntime::Codex => codex_tail_facts as fn(&str) -> TailFacts,
+        AgentRuntime::Gemini => agy_tail_facts as fn(&str) -> TailFacts,
     };
     let facts = tail_facts(&path, parse);
     Some(OverlordTailFacts {
@@ -1825,6 +1828,312 @@ fn codex_real_turn_ts(v: &Value) -> Option<i64> {
     }
 }
 
+// ─── Antigravity CLI (`agy`, AgentRuntime::Gemini) transcripts ──────────────────────────
+//
+// `agy` writes each conversation's JSONL transcript at:
+//   ~/.gemini/antigravity-cli/brain/<conversation_id>/.system_generated/logs/transcript_full.jsonl
+// (with a truncated sibling `transcript.jsonl`). Direct O(1) lookup by conversation_id, plus
+// the shared SSH shadow-dir fallback (`<shadow_dir>/<session_id>.jsonl`) for remote tabs.
+//
+// Verified on `agy 1.5.13` (docs/agy-integration-review.md):
+//   * `USER_INPUT` (`source == "USER_EXPLICIT"`): human prompt wrapped in `<USER_REQUEST>…</USER_REQUEST>`
+//   * `PLANNER_RESPONSE` (`source == "MODEL"`): `model`, `input_tokens`, `cache_read_tokens`,
+//     `output_tokens`, `thinking` (skipped), optional `content` (assistant markdown), optional
+//     `tool_calls: [{ name, args }]` (note: arg values are often JSON-encoded strings like `"\"/path\""`).
+//   * `GENERIC`: tool outputs (skipped in chat render; scanned for git commit confirmation).
+
+fn locate_agy_jsonl(session_id: &str) -> Option<PathBuf> {
+    // Guard against path traversal in untrusted session ids.
+    if session_id.is_empty() || session_id.contains('/') || session_id.contains('\\') || session_id.contains("..") {
+        return None;
+    }
+    if let Some(home) = dirs::home_dir() {
+        let logs = home
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("brain")
+            .join(session_id)
+            .join(".system_generated")
+            .join("logs");
+        let full = logs.join("transcript_full.jsonl");
+        if full.is_file() {
+            return Some(full);
+        }
+        let compact = logs.join("transcript.jsonl");
+        if compact.is_file() {
+            return Some(compact);
+        }
+    }
+    if let Some(shadow) = super::mirror::shadow_dir() {
+        let candidate = shadow.join(format!("{session_id}.jsonl"));
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Extract the human's actual prompt out of an `agy` `USER_INPUT` envelope:
+/// `<USER_REQUEST>\n...\n</USER_REQUEST>\n<ADDITIONAL_METADATA>...</ADDITIONAL_METADATA>`.
+fn extract_agy_user_request(raw: &str) -> &str {
+    const OPEN: &str = "<USER_REQUEST>";
+    const CLOSE: &str = "</USER_REQUEST>";
+    if let Some(start) = raw.find(OPEN) {
+        let after = &raw[start + OPEN.len()..];
+        if let Some(end) = after.find(CLOSE) {
+            return after[..end].trim();
+        }
+    }
+    raw.trim()
+}
+
+/// `agy` transcript `tool_calls[].args` frequently stores string values as JSON-encoded literals
+/// (e.g. `"\"/repo/src/lib.rs\""` or `"{\"a\":1}"`). Unquote them so `compact_tool_arg` and
+/// `peer_send_turn` see clean strings/objects.
+fn unquote_agy_args(args: &Value) -> Value {
+    let Some(obj) = args.as_object() else {
+        return args.clone();
+    };
+    let mut out = serde_json::Map::with_capacity(obj.len());
+    for (k, v) in obj {
+        let clean = match v.as_str() {
+            Some(s) => serde_json::from_str::<Value>(s).unwrap_or_else(|_| v.clone()),
+            None => v.clone(),
+        };
+        out.insert(k.clone(), clean);
+    }
+    Value::Object(out)
+}
+
+/// Extract the trailing effort level from an `agy` model id (e.g. `"gemini-4-neon-high"` → `"high"`).
+fn agy_effort_from_model(model: &str) -> Option<String> {
+    let m = model.trim().to_ascii_lowercase();
+    for tier in ["xhigh", "medium", "high", "low", "max"] {
+        if m.ends_with(&format!("-{tier}")) {
+            return Some(tier.to_string());
+        }
+    }
+    None
+}
+
+fn agy_turns_for_session(session_id: &str, limit: usize, tools: ToolRender) -> Option<Vec<Value>> {
+    let path = locate_agy_jsonl(session_id)?;
+    let (buf, base) = read_tail_bytes(&path, TRANSCRIPT_TAIL_BYTES)?;
+    let mut off = base;
+    let mut msgs: Vec<Value> = Vec::new();
+    for (idx, line) in buf.split_inclusive(|&b| b == b'\n').enumerate() {
+        let line_start = off;
+        off += line.len() as u64;
+        if idx == 0 && base > 0 {
+            continue;
+        }
+        let trimmed = line.strip_suffix(b"\n").unwrap_or(line);
+        if let Ok(v) = serde_json::from_slice::<Value>(trimmed) {
+            push_agy_line_messages(line_start, &v, tools, &mut msgs);
+        }
+    }
+    Some(keep_last_turns(msgs, limit))
+}
+
+fn push_agy_line_messages(line_no: u64, v: &Value, tools: ToolRender, out: &mut Vec<Value>) {
+    let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    let ts = v
+        .get("created_at")
+        .and_then(|t| t.as_str())
+        .map(rfc3339_to_ms)
+        .unwrap_or(0);
+
+    match ty {
+        "USER_INPUT" => {
+            if v.get("source").and_then(|s| s.as_str()) != Some("USER_EXPLICIT") {
+                return;
+            }
+            let raw = v.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            let text = extract_agy_user_request(raw);
+            if text.is_empty() {
+                return;
+            }
+            if let Some(env) = parse_peer_envelope(text) {
+                out.push(peer_msg(
+                    format!("ag{line_no}"),
+                    "in",
+                    env.name,
+                    env.topic,
+                    env.body,
+                    ts,
+                ));
+                return;
+            }
+            if is_system_noise(text) {
+                return;
+            }
+            out.push(msg(format!("ag{line_no}"), "user", text, ts));
+        }
+        "PLANNER_RESPONSE" => {
+            if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
+                if !content.trim().is_empty() {
+                    out.push(msg(format!("ag{line_no}:text"), "agent", content, ts));
+                }
+            }
+            if tools == ToolRender::Marker {
+                if let Some(calls) = v.get("tool_calls").and_then(|c| c.as_array()) {
+                    for (ci, call) in calls.iter().enumerate() {
+                        let raw_name = call.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
+                        let raw_args = call.get("args").map(unquote_agy_args);
+                        // Unwrap `call_mcp_tool` into the actual MCP tool name + arguments.
+                        let (name, args) = if raw_name == "call_mcp_tool" {
+                            let tool_name = raw_args
+                                .as_ref()
+                                .and_then(|a| a.get("ToolName"))
+                                .and_then(|s| s.as_str())
+                                .unwrap_or(raw_name);
+                            let inner_args = raw_args
+                                .as_ref()
+                                .and_then(|a| a.get("Arguments"))
+                                .cloned();
+                            (tool_name.to_string(), inner_args)
+                        } else {
+                            let bare = raw_name.rsplit('/').next().unwrap_or(raw_name);
+                            (bare.to_string(), raw_args)
+                        };
+                        let id = format!("ag{line_no}:t{ci}");
+                        if let Some(peer) = peer_send_turn(&name, args.as_ref(), id.clone(), ts) {
+                            out.push(peer);
+                            continue;
+                        }
+                        let text = match args.as_ref().and_then(compact_tool_arg) {
+                            Some(a) => format!("{name}({a})"),
+                            None => name,
+                        };
+                        out.push(msg(id, "tool", &text, ts));
+                    }
+                }
+            }
+        }
+        _ => {} // GENERIC (tool outputs), SYSTEM_MESSAGE, etc.
+    }
+}
+
+fn agy_session_meta(session_id: &str) -> Option<SessionMeta> {
+    let path = locate_agy_jsonl(session_id)?;
+    tail_facts(&path, agy_tail_facts).meta
+}
+
+fn agy_session_last_turn_ts(session_id: &str) -> Option<u64> {
+    let path = locate_agy_jsonl(session_id)?;
+    tail_facts(&path, agy_tail_facts).last_turn_ts
+}
+
+fn agy_tail_facts(tail: &str) -> TailFacts {
+    TailFacts {
+        last_turn_ts: agy_last_turn_from_tail(tail),
+        meta: agy_meta_from_tail(tail),
+        last_commit_ts: agy_last_commit_from_tail(tail),
+        ..TailFacts::default()
+    }
+}
+
+fn agy_meta_from_tail(tail: &str) -> Option<SessionMeta> {
+    for line in tail.lines().rev() {
+        if !line.contains("\"PLANNER_RESPONSE\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if v.get("type").and_then(|t| t.as_str()) != Some("PLANNER_RESPONSE") {
+            continue;
+        }
+        let input = v.get("input_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+        let cache = v.get("cache_read_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+        let used = input.saturating_add(cache);
+        if used < MIN_PLAUSIBLE_CONTEXT_TOKENS {
+            continue;
+        }
+        let model_id = v.get("model").and_then(|m| m.as_str()).filter(|s| !s.is_empty()).map(String::from);
+        let effort = model_id.as_deref().and_then(agy_effort_from_model);
+        let context_window = model_id
+            .as_deref()
+            .filter(|m| m.starts_with("gemini-"))
+            .map(|_| 1_000_000);
+        return Some(SessionMeta {
+            model_id,
+            context_tokens: used,
+            context_window,
+            effort,
+        });
+    }
+    None
+}
+
+fn agy_last_turn_from_tail(tail: &str) -> Option<u64> {
+    for line in tail.lines().rev() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let ts = v
+            .get("created_at")
+            .and_then(|t| t.as_str())
+            .map(rfc3339_to_ms)
+            .filter(|&t| t > 0);
+        let Some(ts) = ts else { continue };
+        match ty {
+            "PLANNER_RESPONSE" => {
+                let has_text = v.get("content").and_then(|c| c.as_str()).is_some_and(|s| !s.trim().is_empty());
+                let has_tools = v.get("tool_calls").and_then(|c| c.as_array()).is_some_and(|a| !a.is_empty());
+                if has_text || has_tools {
+                    return Some(ts as u64);
+                }
+            }
+            "USER_INPUT" if v.get("source").and_then(|s| s.as_str()) == Some("USER_EXPLICIT") => {
+                let text = extract_agy_user_request(v.get("content").and_then(|c| c.as_str()).unwrap_or(""));
+                if !text.is_empty() && !is_system_noise(text) {
+                    return Some(ts as u64);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Detect the newest confirmed `git commit` in an `agy` transcript tail: a `run_command` tool
+/// call invoking `git commit` followed by a `GENERIC` output naming the new commit sha.
+fn agy_last_commit_from_tail(tail: &str) -> Option<u64> {
+    let mut pending_commit_ts: Option<u64> = None;
+    let mut last_landed: Option<u64> = None;
+    for line in tail.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let ts = v
+            .get("created_at")
+            .and_then(|t| t.as_str())
+            .map(rfc3339_to_ms)
+            .filter(|&t| t > 0)
+            .map(|t| t as u64);
+        if ty == "PLANNER_RESPONSE" {
+            let calls_commit = v
+                .get("tool_calls")
+                .and_then(|c| c.as_array())
+                .is_some_and(|calls| {
+                    calls.iter().any(|c| {
+                        c.get("name").and_then(|n| n.as_str()) == Some("run_command")
+                            && c.get("args")
+                                .map(unquote_agy_args)
+                                .and_then(|a| a.get("CommandLine").and_then(|s| s.as_str()).map(String::from))
+                                .is_some_and(|cmd| cmd.contains("git") && cmd.contains("commit"))
+                    })
+                });
+            if calls_commit {
+                pending_commit_ts = ts;
+            }
+        } else if ty == "GENERIC" && pending_commit_ts.is_some() {
+            if v.get("content").and_then(|c| c.as_str()).is_some_and(names_a_new_commit) {
+                last_landed = ts.or(pending_commit_ts);
+                pending_commit_ts = None;
+            }
+        }
+    }
+    last_landed
+}
+
 /// Turn one transcript line into zero or more maiLink messages, appended to `out`.
 fn push_line_messages(v: &Value, tools: ToolRender, out: &mut Vec<Value>) {
     let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -2194,7 +2503,20 @@ pub(crate) fn compact_tool_arg(input: &Value) -> Option<String> {
     // `recipient` is last of the primary keys: it only wins for agent-messaging tools, and makes
     // a permission card / non-Marker chip read `sendToBridgedAgent(maiLink App)` instead of a
     // bare tool name. (The Marker path replaces that chip outright — see peer_send_turn.)
-    let arg = ["command", "cmd", "file_path", "path", "pattern", "query", "url", "recipient"]
+    let arg = [
+        "toolSummary",
+        "CommandLine",
+        "Path",
+        "Role",
+        "command",
+        "cmd",
+        "file_path",
+        "path",
+        "pattern",
+        "query",
+        "url",
+        "recipient",
+    ]
         .iter()
         .find_map(|key| match input.get(key) {
             Some(Value::String(s)) => Some(s.clone()),
@@ -3719,5 +4041,91 @@ mod tests {
                 "{name} must not be treated as a peer message"
             );
         }
+    }
+
+    #[test]
+    fn agy_transcript_distills_user_agent_tools_peer_and_telemetry() {
+        let user_line = json!({
+            "step_index": 0,
+            "source": "USER_EXPLICIT",
+            "type": "USER_INPUT",
+            "created_at": "2026-11-20T16:36:07Z",
+            "content": "<USER_REQUEST>\nFix the login bug\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nnow\n</ADDITIONAL_METADATA>"
+        });
+        let sys_line = json!({
+            "step_index": 1,
+            "source": "SYSTEM",
+            "type": "SYSTEM_MESSAGE",
+            "created_at": "2026-11-20T16:36:08Z",
+            "content": "Reminder: work efficiently."
+        });
+        let tool_line = json!({
+            "step_index": 2,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "created_at": "2026-11-20T16:36:10Z",
+            "model": "gemini-4-neon-high",
+            "input_tokens": 4402,
+            "cache_read_tokens": 50060,
+            "output_tokens": 471,
+            "thinking": "private chain of thought",
+            "tool_calls": [
+                { "name": "read_file", "args": { "Path": "\"/repo/src/auth.rs\"" } },
+                { "name": "run_command", "args": { "CommandLine": "\"git commit -m fix\"", "toolSummary": "\"Commit login fix\"" } },
+                { "name": "call_mcp_tool", "args": { "ServerName": "\"maiterm\"", "ToolName": "\"sendToBridgedAgent\"", "Arguments": "{\"recipient\":\"QA\",\"topic\":\"login\",\"message\":\"Ready to verify.\"}" } }
+            ]
+        });
+        let commit_out = json!({
+            "step_index": 3,
+            "source": "MODEL",
+            "type": "GENERIC",
+            "created_at": "2026-11-20T16:36:12Z",
+            "content": "[main 1a2b3c4] fix\n 1 file changed"
+        });
+        let reply_line = json!({
+            "step_index": 4,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "created_at": "2026-11-20T16:36:15Z",
+            "model": "gemini-4-neon-high",
+            "input_tokens": 5000,
+            "cache_read_tokens": 55000,
+            "output_tokens": 200,
+            "content": "Fixed the login bug and committed it."
+        });
+
+        let mut msgs = Vec::new();
+        for (i, v) in [&user_line, &sys_line, &tool_line, &commit_out, &reply_line].iter().enumerate() {
+            push_agy_line_messages(i as u64 * 100, v, ToolRender::Marker, &mut msgs);
+        }
+
+        // SYSTEM_MESSAGE and GENERIC skipped; user + 2 tools + 1 outgoing peer + 1 agent text = 5.
+        assert_eq!(msgs.len(), 5, "got: {msgs:#?}");
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[0]["text"], "Fix the login bug");
+        assert_eq!(msgs[1]["role"], "tool");
+        assert_eq!(msgs[1]["text"], "read_file(/repo/src/auth.rs)");
+        assert_eq!(msgs[2]["role"], "tool");
+        assert_eq!(msgs[2]["text"], "run_command(Commit login fix)");
+        assert_eq!(msgs[3]["peer"]["direction"], "out");
+        assert_eq!(msgs[3]["peer"]["name"], "QA");
+        assert_eq!(msgs[3]["text"], "Ready to verify.");
+        assert_eq!(msgs[4]["role"], "agent");
+        assert_eq!(msgs[4]["text"], "Fixed the login bug and committed it.");
+
+        // Tail facts: context = input + cache_read = 60_000, 1M window, effort "high", commit detected.
+        let tail = [&user_line, &sys_line, &tool_line, &commit_out, &reply_line]
+            .iter()
+            .map(|v| serde_json::to_string(v).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let facts = agy_tail_facts(&tail);
+        let meta = facts.meta.expect("meta extracted");
+        assert_eq!(meta.model_id.as_deref(), Some("gemini-4-neon-high"));
+        assert_eq!(meta.context_tokens, 60_000);
+        assert_eq!(meta.context_window, Some(1_000_000));
+        assert_eq!(meta.effort.as_deref(), Some("high"));
+        assert_eq!(facts.last_turn_ts, Some(rfc3339_to_ms("2026-11-20T16:36:15Z") as u64));
+        assert_eq!(facts.last_commit_ts, Some(rfc3339_to_ms("2026-11-20T16:36:12Z") as u64));
     }
 }

@@ -1511,6 +1511,9 @@ pub fn view(s: &ProxyServer) -> ServerView {
         if c.codex.contains(&s.id) {
             v.push("Codex".to_string());
         }
+        if c.gemini.contains(&s.id) {
+            v.push("Antigravity".to_string());
+        }
         v
     };
     ServerView {

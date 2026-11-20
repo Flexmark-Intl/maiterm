@@ -2365,6 +2365,95 @@
           </div>
         {/if}
 
+        <h3 class="section-heading">Antigravity (agy)</h3>
+
+        <div class="setting" style="align-items: flex-start;">
+          <div>
+            <label for="gemini-ide">Enable Antigravity IDE integration</label>
+            <p class="setting-hint">
+              Registers maiTerm's MCP server in <code>~/.gemini/config/mcp_config.json</code>,
+              allows <code>mcp(maiterm/*)</code> in <code>~/.gemini/antigravity-cli/settings.json</code>,
+              and installs the maiTerm plugin at <code>~/.gemini/config/plugins/maiterm/</code>.
+              Dev and production builds share one registration cleanly via per-tab environment variables.
+            </p>
+          </div>
+          <button
+            id="gemini-ide"
+            class="toggle"
+            class:active={preferencesStore.geminiIde}
+            onclick={() => preferencesStore.setGeminiIde(!preferencesStore.geminiIde)}
+            aria-pressed={preferencesStore.geminiIde}
+            aria-label="Toggle Antigravity IDE integration"
+          >
+            <span class="toggle-knob"></span>
+          </button>
+        </div>
+
+        {#if preferencesStore.geminiIde}
+          <div class="setting" style="align-items: flex-start;">
+            <div>
+              <label for="gemini-ide-ssh">Bridge SSH sessions for Antigravity</label>
+              <p class="setting-hint">
+                Installs the maiTerm plugin, Python stdio bridge, and <code>mcp_config.json</code>
+                on remote SSH hosts (no-ops on hosts without <code>agy</code>) so remote Antigravity
+                sessions reach this maiTerm over the SSH reverse tunnel.
+              </p>
+            </div>
+            <button
+              id="gemini-ide-ssh"
+              class="toggle"
+              class:active={preferencesStore.geminiIdeSsh}
+              onclick={() => preferencesStore.setGeminiIdeSsh(!preferencesStore.geminiIdeSsh)}
+              aria-pressed={preferencesStore.geminiIdeSsh}
+              aria-label="Toggle Antigravity SSH bridge"
+            >
+              <span class="toggle-knob"></span>
+            </button>
+          </div>
+
+          <div class="setting" style="align-items: flex-start;">
+            <div>
+              <label for="gemini-hooks">Antigravity lifecycle hooks</label>
+              <p class="setting-hint">
+                Registers lifecycle hooks in the maiTerm plugin so <code>agy</code> reports session
+                state to maiTerm (active/idle tab indicators, tool activity, and session priming).
+              </p>
+            </div>
+            <button
+              id="gemini-hooks"
+              class="toggle"
+              class:active={preferencesStore.geminiHooks}
+              onclick={() => preferencesStore.setGeminiHooks(!preferencesStore.geminiHooks)}
+              aria-pressed={preferencesStore.geminiHooks}
+              aria-label="Toggle Antigravity lifecycle hooks"
+            >
+              <span class="toggle-knob"></span>
+            </button>
+          </div>
+
+          {#if preferencesStore.geminiHooks}
+            <div class="setting" style="align-items: flex-start;">
+              <div>
+                <label for="gemini-auto-resume">Antigravity auto-resume</label>
+                <p class="setting-hint">
+                  Automatically captures conversation IDs and configures
+                  <code>agy --conversation</code> auto-resume when Antigravity runs in a tab.
+                </p>
+              </div>
+              <button
+                id="gemini-auto-resume"
+                class="toggle"
+                class:active={preferencesStore.geminiAutoResume}
+                onclick={() => preferencesStore.setGeminiAutoResume(!preferencesStore.geminiAutoResume)}
+                aria-pressed={preferencesStore.geminiAutoResume}
+                aria-label="Toggle Antigravity auto-resume"
+              >
+                <span class="toggle-knob"></span>
+              </button>
+            </div>
+          {/if}
+        {/if}
+
         <h3 class="section-heading" style="margin-top: 20px;">Mesh Workspace</h3>
         <p class="section-desc">
           Loop control for Mesh Workspaces, where every agent talks to every other over

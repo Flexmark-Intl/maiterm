@@ -1969,6 +1969,10 @@ export interface Preferences {
   codex_hooks: boolean;
   codex_auto_resume: boolean;
   codex_hooks_bypass_trust: boolean;
+  gemini_ide: boolean;
+  gemini_ide_ssh: boolean;
+  gemini_hooks: boolean;
+  gemini_auto_resume: boolean;
   composer_default_open: boolean;
   windows_shell: string;
   claude_setup_prompted?: boolean;

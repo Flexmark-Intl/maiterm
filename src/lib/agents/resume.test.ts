@@ -86,6 +86,7 @@ describe('getResumeCommand', () => {
   it('leaves the plain templates alone by default', () => {
     expect(getResumeCommand('codex')).toBe('codex resume %codexSessionId');
     expect(getResumeCommand('claude')).toBe('claude --resume %claudeSessionId');
+    expect(getResumeCommand('gemini')).toBe('agy --conversation %geminiSessionId');
   });
 
   it('adds the Codex hook-trust bypass only when asked, and only for Codex', () => {
@@ -109,6 +110,7 @@ describe('isResumeTemplate', () => {
     expect(isResumeTemplate('codex', 'codex resume %codexSessionId')).toBe(true);
     expect(isResumeTemplate('codex', 'codex resume --dangerously-bypass-hook-trust %codexSessionId')).toBe(true);
     expect(isResumeTemplate('claude', 'claude --resume %claudeSessionId')).toBe(true);
+    expect(isResumeTemplate('gemini', 'agy --conversation %geminiSessionId')).toBe(true);
   });
 
   it('leaves a command the user actually edited alone', () => {

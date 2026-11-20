@@ -96,7 +96,7 @@
   });
 
   function isGeneric(role: string): boolean {
-    return /^(zsh|bash|sh|fish|terminal|node|claude|codex|gemini|shell|untitled|tab\s*\d+)\b/i.test(role);
+    return /^(zsh|bash|sh|fish|terminal|node|claude|codex|gemini|agy|antigravity|shell|untitled|tab\s*\d+)\b/i.test(role);
   }
 
   interface Row {

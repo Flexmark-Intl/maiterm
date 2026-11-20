@@ -26,12 +26,18 @@ pub enum InputBox {
     Unknown,
 }
 
-const PROMPT: char = '\u{276F}'; // ❯
+const CLAUDE_PROMPT: char = '\u{276F}'; // ❯
+const AGY_PROMPT: char = '>';
 
-/// Text Claude Code puts in its empty input box at full brightness. Captured on 2.1.303: once a
-/// message typed mid-turn is queued, the box reads "Press up to edit queued messages" until the
-/// turn takes it — read as a draft, it held every later message until the turn ended.
-const PLACEHOLDERS: &[&str] = &["Press up to edit queued messages"];
+/// Text an agent puts in its empty input box at full brightness.
+/// - Claude Code 2.1.303: "Press up to edit queued messages" while a mid-turn message is queued.
+/// - Antigravity CLI (`agy` 1.5.13): mode hint shown in an empty box before typing.
+const PLACEHOLDERS: &[&str] = &[
+    "Press up to edit queued messages",
+    "Auto mode: edits & safe commands auto-approved (shift+tab to cycle)",
+    "Accept edits: file edits auto-approved (shift+tab to cycle)",
+    "Plan mode: read-only planning (shift+tab to cycle)",
+];
 
 /// A box rule: `─` from COLUMN 0. Never trimmed — Claude indents every line of a draft by two
 /// columns, so a `──` line the human typed or pasted sits at column 2 and must not pass for the
@@ -41,10 +47,21 @@ fn is_rule(line: &str) -> bool {
     t.starts_with('─') && t.chars().count() >= 10 && t.chars().all(|c| c == '─')
 }
 
-/// The box's own prompt line: `❯` at COLUMN 0, for the same reason. A `❯` inside a draft is
-/// indented; the dialogs' `❯` cursors are indented too.
+/// The box's own prompt line: `❯` (Claude) or `>` (Antigravity `agy`) at COLUMN 0, for the same
+/// reason. A prompt char inside a draft is indented; dialog cursors do not sit directly under a
+/// rule and above a closing rule.
 fn is_box_prompt(line: &str) -> bool {
-    line.starts_with(PROMPT)
+    line.starts_with(CLAUDE_PROMPT) || line.starts_with(AGY_PROMPT)
+}
+
+fn strip_box_prompt(line: &str) -> &str {
+    if let Some(rest) = line.strip_prefix(CLAUDE_PROMPT) {
+        rest
+    } else if let Some(rest) = line.strip_prefix(AGY_PROMPT) {
+        rest
+    } else {
+        line
+    }
 }
 
 /// The box's lines, the prompt marker stripped from the first: `None` when the screen isn't the
@@ -55,7 +72,7 @@ fn box_lines(screen: &str) -> Option<Vec<&str>> {
     // The box runs from the prompt line to the next rule. No closing rule means the screen
     // isn't the layout this knows (or is mid-redraw): don't claim either way.
     let end = (start + 1..lines.len()).find(|&i| is_rule(lines[i]))?;
-    let mut out = vec![lines[start].trim_start_matches(PROMPT)];
+    let mut out = vec![strip_box_prompt(lines[start])];
     out.extend_from_slice(&lines[start + 1..end]);
     Some(out)
 }
@@ -221,5 +238,40 @@ mod tests {
         // The caller blanks DIM cells, so a dimmed suggestion arrives as trailing spaces.
         let s = screen(&[RULE, "❯                                  ", RULE]);
         assert_eq!(parse(&s), InputBox::Empty);
+    }
+
+    #[test]
+    fn agy_input_box_empty_draft_placeholder_and_dialogs() {
+        // Captured on agy 1.5.13 (docs/agy-integration-review.md P4).
+        let empty = screen(&[
+            " ▄▀▀▄        Antigravity CLI 1.5.13",
+            RULE,
+            ">",
+            RULE,
+            "? for shortcuts  auto · Gemini 3.8 Flash · low",
+        ]);
+        assert_eq!(parse(&empty), InputBox::Empty);
+
+        let placeholder = screen(&[
+            RULE,
+            "> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)",
+            RULE,
+            "? for shortcuts",
+        ]);
+        assert_eq!(parse(&placeholder), InputBox::Empty);
+
+        let draft = screen(&[RULE, "> do a test maiterm decision card", RULE, "? for shortcuts"]);
+        assert_eq!(parse(&draft), InputBox::HasText);
+
+        // agy workspace-trust dialog has `>` cursor, no enclosing rules -> Unknown.
+        let trust = screen(&[
+            "Accessing workspace:",
+            "/tmp/repo",
+            "Do you trust the contents of this project?",
+            "> Yes, I trust this folder",
+            "  No, exit",
+            "  ↑/↓ Navigate · enter Confirm",
+        ]);
+        assert_eq!(parse(&trust), InputBox::Unknown);
     }
 }

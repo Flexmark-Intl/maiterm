@@ -1,7 +1,9 @@
+pub mod agy;
 pub mod claude_mod;
 pub mod codex;
 pub mod gate;
 pub mod lockfile;
+pub mod mcp_stdio;
 pub mod mod_asks;
 pub mod mod_inbox;
 pub mod protocol;

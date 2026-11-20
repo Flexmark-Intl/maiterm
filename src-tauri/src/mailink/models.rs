@@ -271,6 +271,145 @@ pub fn available_from(cache: Cache, legacy: bool) -> Vec<ModelOption> {
     merge_tiers(account, if legacy { &LEGACY_BUILTIN } else { &BUILTIN })
 }
 
+/// Curated fallback for Antigravity (`agy`) when the `agy` CLI cannot be queried (e.g. an
+/// SSH-only workstation without `agy` installed locally).
+const AGY_BUILTIN: [(&str, &str, &str); 5] = [
+    ("gemini-4-neon-high", "Gemini 4 Neon (High)", "1M context"),
+    ("gemini-4-neon-medium", "Gemini 4 Neon (Medium)", "1M context"),
+    ("gemini-4-carbon-high", "Gemini 4 Carbon (High)", "1M context"),
+    ("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)", "1M context"),
+    ("claude-opus-5-5-high", "Claude Opus 5.5 (High)", ""),
+];
+
+fn agy_family_of(value: &str) -> String {
+    let lower = value.to_lowercase();
+    if let Some(rest) = lower.strip_prefix("gemini-") {
+        let parts: Vec<&str> = rest.split('-').filter(|p| !p.is_empty()).collect();
+        // e.g. `gemini-4-neon-high` -> `neon`; `gemini-3.8-flash-high` -> `flash`;
+        // `gemini-pro-orchestrator-neon` -> `orchestrator`.
+        for p in &parts {
+            if !p.chars().all(|c| c.is_ascii_digit() || c == '.')
+                && !matches!(*p, "pro" | "low" | "medium" | "high" | "xhigh" | "max")
+            {
+                return (*p).to_string();
+            }
+        }
+        return "gemini".to_string();
+    }
+    family_of(value)
+}
+
+fn agy_option(value: String, name: String, note: String, source: Source) -> ModelOption {
+    let display = super::display_model_for(crate::state::AgentRuntime::Gemini, &value);
+    let family = agy_family_of(&value);
+    ModelOption { value, name, note, source, display, family, ambiguous: false }
+}
+
+/// Parse `agy models` stdout (`<id>   <Display Name>`, stripping `\r`-prefixed spinner frames).
+/// Pure so it is directly unit-testable.
+pub fn parse_agy_models(output: &str) -> Vec<ModelOption> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for raw_line in output.lines() {
+        // Spinner frames overwrite the start of the first line via `\r`; keep only the final frame.
+        let line = raw_line.rsplit('\r').next().unwrap_or(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Format: `<model-id>\t<Display Name>` when piped (non-TTY), or
+        // `<model-id><2+ spaces><Display Name>` on a TTY.
+        let Some((id_raw, label_raw)) = line.split_once('\t').or_else(|| line.split_once("  ")) else {
+            continue;
+        };
+        let value = clean(id_raw);
+        if value.is_empty()
+            || value != id_raw.trim()
+            || !value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            continue;
+        }
+        let name = clean(label_raw);
+        if name.is_empty() || !seen.insert(value.clone()) {
+            continue;
+        }
+        let note = if value.starts_with("gemini-") {
+            "1M context".to_string()
+        } else {
+            String::new()
+        };
+        out.push(agy_option(value, name, note, Source::Account));
+    }
+    mark_ambiguous(&mut out);
+    out
+}
+
+fn agy_builtin_list() -> Vec<ModelOption> {
+    let mut out: Vec<ModelOption> = AGY_BUILTIN
+        .iter()
+        .map(|&(v, n, note)| agy_option(v.to_string(), n.to_string(), note.to_string(), Source::Builtin))
+        .collect();
+    mark_ambiguous(&mut out);
+    out
+}
+
+/// Models available to an Antigravity (`agy`) tab. Queries `agy models` and caches the result
+/// for 5 minutes so repeated picker opens are instant; falls back to [`AGY_BUILTIN`] if `agy`
+/// is unavailable.
+pub fn available_agy() -> Vec<ModelOption> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    static CACHE: std::sync::LazyLock<Mutex<Option<(Instant, Vec<ModelOption>)>>> =
+        std::sync::LazyLock::new(|| Mutex::new(None));
+    const TTL: Duration = Duration::from_secs(300);
+
+    if let Ok(guard) = CACHE.lock() {
+        if let Some((at, list)) = guard.as_ref() {
+            if at.elapsed() < TTL && !list.is_empty() {
+                return list.clone();
+            }
+        }
+    }
+
+    let mut path_parts: Vec<String> = Vec::new();
+    if let Ok(p) = std::env::var("PATH") {
+        if !p.is_empty() {
+            path_parts.push(p);
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        path_parts.push(home.join(".local").join("bin").to_string_lossy().into_owned());
+    }
+    #[cfg(unix)]
+    {
+        path_parts.push("/opt/homebrew/bin".to_string());
+        path_parts.push("/usr/local/bin".to_string());
+    }
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let search_path = path_parts.join(sep);
+
+    let queried = std::process::Command::new("agy")
+        .arg("models")
+        .env("PATH", search_path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| parse_agy_models(&String::from_utf8_lossy(&o.stdout)))
+        .filter(|list| !list.is_empty());
+
+    if let Some(list) = queried {
+        if let Ok(mut guard) = CACHE.lock() {
+            *guard = Some((Instant::now(), list.clone()));
+        }
+        return list;
+    }
+
+    agy_builtin_list()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,5 +637,40 @@ mod tests {
         assert_eq!(out[0].name, "Fable");
         assert!(out[0].note.starts_with("Fable 5.1 \u{b7} Most capable"));
         assert_eq!(out[0].source, Source::Account);
+    }
+
+    #[test]
+    fn agy_models_output_strips_spinner_and_parses_ids_and_labels() {
+        let sample = concat!(
+            "\r⠋ Fetching available models...\r⠙ Fetching available models...\rgemini-4-neon-high             Gemini 4 Neon (High)\n",
+            "gemini-4-neon-medium           Gemini 4 Neon (Medium)\n",
+            "gemini-pro-orchestrator-neon   Orchestrator (Neon)\n",
+            "claude-opus-5-5-high           Claude Opus 5.5 (High)\n",
+            "gpt-oss-120b-medium            GPT-OSS 120B (Medium)\n",
+        );
+        let rows = parse_agy_models(sample);
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0].value, "gemini-4-neon-high");
+        assert_eq!(rows[0].name, "Gemini 4 Neon (High)");
+        assert_eq!(rows[0].display, "Gemini 4 Neon");
+        assert_eq!(rows[0].family, "neon");
+        assert_eq!(rows[0].note, "1M context");
+        assert!(rows[0].ambiguous, "Neon High and Neon Medium share display 'Gemini 4 Neon'");
+        assert!(rows[1].ambiguous);
+        assert_eq!(rows[2].value, "gemini-pro-orchestrator-neon");
+        assert_eq!(rows[2].family, "orchestrator");
+        assert_eq!(rows[3].value, "claude-opus-5-5-high");
+        assert_eq!(rows[3].family, "opus");
+        assert_eq!(rows[3].note, "");
+        assert!(!rows[3].ambiguous);
+
+        // Non-TTY piped `agy models` separates id and display label with a single tab (`\t`).
+        let piped = "gemini-4-neon-high\tGemini 4 Neon (High)\ngemini-4-neon-xhigh\tGemini 4 Neon (XHigh)\n";
+        let piped_rows = parse_agy_models(piped);
+        assert_eq!(piped_rows.len(), 2);
+        assert_eq!(piped_rows[0].value, "gemini-4-neon-high");
+        assert_eq!(piped_rows[0].name, "Gemini 4 Neon (High)");
+        assert_eq!(piped_rows[1].value, "gemini-4-neon-xhigh");
+        assert_eq!(piped_rows[1].name, "Gemini 4 Neon (XHigh)");
     }
 }

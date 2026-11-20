@@ -5,5 +5,8 @@ fn main() {
     if aiterm_lib::run_browser_link_host_if_requested() {
         return;
     }
+    if aiterm_lib::run_mcp_stdio_if_requested() {
+        return;
+    }
     aiterm_lib::run()
 }

@@ -148,7 +148,8 @@ const PLAN_FOOTER_MAX_LINES: usize = 6;
 
 /// Where the dialog's footer starts, when one ends the screen. A tool dialog's footer is the
 /// last non-blank line. The plan dialog's wraps with its path, so it may start a few lines up,
-/// provided nothing between it and the end is blank or a row.
+/// provided nothing between it and the end is blank or a row. Antigravity (`agy`) renders
+/// `↑/↓ Navigate · tab Amend` directly above its 1-line `esc to cancel ... auto · ...` status bar.
 fn footer(lines: &[&str]) -> Option<(usize, DialogShape)> {
     let last = lines.iter().rposition(|l| !l.trim().is_empty())?;
     // "Esc to cancel" is Claude's generic dialog footer. The AskUserQuestion selector
@@ -158,6 +159,18 @@ fn footer(lines: &[&str]) -> Option<(usize, DialogShape)> {
     // an ask's "No" would press Esc into the agent's question.
     if lines[last].contains("Esc to cancel") && !lines[last].contains("Enter to") {
         return Some((last, DialogShape::Tool));
+    }
+    // Antigravity (`agy`) tool-permission dialog: `↑/↓ Navigate · tab Amend` sits either as the
+    // last non-blank line or one line above its 1-line status bar (`esc to cancel ... auto · ...`).
+    if lines[last].contains("tab Amend") {
+        return Some((last, DialogShape::Tool));
+    }
+    if last > 0 && (lines[last].contains("esc to cancel") || lines[last].contains(" · ")) {
+        if let Some(prev) = lines[..last].iter().rposition(|l| !l.trim().is_empty()) {
+            if lines[prev].contains("tab Amend") {
+                return Some((prev, DialogShape::Tool));
+            }
+        }
     }
     for i in (last.saturating_sub(PLAN_FOOTER_MAX_LINES - 1)..=last).rev() {
         let l = lines[i];
@@ -209,14 +222,18 @@ pub(crate) fn fallback_key(choice: &str) -> Option<&'static str> {
     }
 }
 
-/// A numbered row: at most three columns of indent, an optional `❯` highlight, then `N. label`.
+/// A numbered row: at most three columns of indent, an optional `❯` (Claude) or `>` (Antigravity)
+/// highlight, then `N. label`.
 fn row(line: &str) -> Option<(usize, &str)> {
     let indent = line.len() - line.trim_start_matches(' ').len();
     if indent > 3 {
         return None;
     }
     let t = line.trim_start();
-    let t = t.strip_prefix('❯').map_or(t, str::trim_start);
+    let t = t
+        .strip_prefix('❯')
+        .or_else(|| t.strip_prefix('>'))
+        .map_or(t, str::trim_start);
     let (n, label) = t.split_once(". ")?;
     if n.is_empty() || !n.chars().all(|c| c.is_ascii_digit()) {
         return None;
@@ -285,14 +302,31 @@ pub(crate) fn parse(screen: &str) -> Option<PermissionDialog> {
     // (both change with the width) and the `❯` highlight (arrows at the desk move it) are
     // dropped, so a resize or a moved highlight keeps the id.
     let rule_above = |end: usize| lines[..end].iter().rposition(|l| l.starts_with('─'));
+    let is_agy = lines.get(foot).is_some_and(|l| l.contains("tab Amend"));
     let mut top = rule_above(first_row).unwrap_or(0);
-    if kind == DialogShape::Plan {
+    if is_agy {
+        // Antigravity draws no `─` rule directly above its permission prompt; cap the header
+        // window to the block immediately above row 1 so animated spinner lines from earlier
+        // output above an old rule never destabilize the prompt digest.
+        let floor = first_row.saturating_sub(10);
+        if top < floor {
+            top = floor;
+        }
+        // Stop below any braille spinner line (`⠋`..`⣿`) or status circle (`○`/`●`) above the prompt.
+        if let Some(rel) = lines[top..first_row].iter().rposition(|l| {
+            l.trim_start().chars().next().is_some_and(|c| {
+                ('\u{2800}'..='\u{28ff}').contains(&c) || matches!(c, '○' | '●' | '└')
+            })
+        }) {
+            top = top + rel + 1;
+        }
+    } else if kind == DialogShape::Plan {
         top = rule_above(top).unwrap_or(0);
     }
     let drawn: String = lines[top..foot]
         .concat()
         .chars()
-        .filter(|c| !c.is_whitespace() && !matches!(c, '─' | '╌' | '❯'))
+        .filter(|c| !c.is_whitespace() && !matches!(c, '─' | '╌' | '❯' | '>'))
         .collect();
     let drawn = without_countdown(drawn);
     let digest = super::sha256_hex(drawn.as_bytes())[..12].to_string();
@@ -529,5 +563,68 @@ mod tests {
         assert_eq!(fallback_key("No"), Some("\x1b"));
         assert_eq!(fallback_key("Yes, don't ask again"), None);
         assert_eq!(fallback_key("3"), None);
+    }
+
+    #[test]
+    fn reads_agy_six_option_tool_permission_dialog_and_ignores_normal_working_screen() {
+        // Real layout captured live from `agy 1.5.13` on a 100×35 PTY.
+        let agy_mcp = concat!(
+            "○ Calling 1 MCP tool (tauri-mcp/ipc_execute_command) (ctrl+o to expand)\n",
+            "● Calling MCP tool...\n",
+            "\n",
+            "MCP\n",
+            "tauri-mcp/ipc_execute_command\n",
+            "\n",
+            "Allow calling this tool?\n",
+            "> 1. Yes, allow tool call\n",
+            "  2. Yes, and always allow tool 'tauri-mcp/ipc_execute_command' in this conversation\n",
+            "  3. Yes, and always allow tool 'tauri-mcp/ipc_execute_command' (Persist to settings.json)\n",
+            "  4. No, deny tool call\n",
+            "  5. No, and always deny tool 'tauri-mcp/ipc_execute_command' in this conversation\n",
+            "  6. No, and always deny tool 'tauri-mcp/ipc_execute_command' (Persist to settings.json)\n",
+            "\n",
+            "  ↑/↓ Navigate · tab Amend\n",
+            "esc to cancel                                                            auto · Gemini 4 Neon · high\n",
+        );
+
+        assert!(dialog_open(agy_mcp));
+        assert!(footer_open(agy_mcp));
+        assert!(any_dialog_open(agy_mcp));
+
+        let d = parse(agy_mcp).expect("agy 6-option permission dialog parsed");
+        assert_eq!(d.shape, DialogShape::Tool);
+        assert_eq!(d.options.len(), 6);
+        assert_eq!(d.options[0], "Yes, allow tool call");
+        assert_eq!(d.options[1], "Yes, and always allow tool 'tauri-mcp/ipc_execute_command' in this conversation");
+        assert_eq!(d.options[3], "No, deny tool call");
+        assert_eq!(d.options[5], "No, and always deny tool 'tauri-mcp/ipc_execute_command' (Persist to settings.json)");
+        assert!(d.text.contains("tauri-mcp/ipc_execute_command"), "{}", d.text);
+        assert!(d.text.contains("Allow calling this tool?"), "{}", d.text);
+        assert!(!d.text.contains("Calling MCP tool"), "spinner line excluded from header: {}", d.text);
+
+        // Moving the `>` cursor to another row keeps the digest stable.
+        let moved = agy_mcp
+            .replace("> 1. Yes, allow tool call", "  1. Yes, allow tool call")
+            .replace("  4. No, deny tool call", "> 4. No, deny tool call");
+        assert_eq!(parse(&moved).unwrap().digest, d.digest);
+
+        // Key mapping: exact label, bare digit, and Esc all resolve cleanly.
+        assert_eq!(permission_key_for(Some(&d), true, "Yes, allow tool call").unwrap().bytes(), "1");
+        assert_eq!(permission_key_for(Some(&d), true, "No, deny tool call").unwrap().bytes(), "4");
+        assert_eq!(permission_key_for(Some(&d), true, "6").unwrap().bytes(), "6");
+        assert_eq!(permission_key_for(Some(&d), true, "Esc"), Ok(PermissionKey::Esc));
+        assert!(permission_key_for(Some(&d), true, "Yes").is_err(), "non-verbatim label refused");
+
+        // Normal working agy screen (with `esc to cancel   auto · ...`) is NOT a permission dialog.
+        let working = concat!(
+            "⣟  Generating...\n",
+            "────────────────────────────────────────────────────────────────────────────────────────────────────\n",
+            ">\n",
+            "────────────────────────────────────────────────────────────────────────────────────────────────────\n",
+            "esc to cancel                                                            auto · Gemini 4 Neon · high\n",
+        );
+        assert!(!dialog_open(working));
+        assert!(!any_dialog_open(working));
+        assert_eq!(parse(working), None);
     }
 }

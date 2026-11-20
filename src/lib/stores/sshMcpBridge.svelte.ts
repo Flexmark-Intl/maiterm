@@ -814,11 +814,12 @@ export function enableBridge(tabId: string, sshArgs: string, ptyId?: string, fre
 
 async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string, freshSsh = false, bakedPort?: number): Promise<boolean> {
   // Independent per-runtime gates: the tunnel + env injection are runtime-agnostic and
-  // run for either; the remote setup writes Claude artifacts only when claudeOn and
-  // Codex artifacts only when codexOn (so a Claude-only or Codex-only host both work).
+  // run for any; the remote setup writes Claude, Codex, and Antigravity artifacts only when
+  // their respective switches are on.
   const claudeOn = preferencesStore.claudeCodeIde && preferencesStore.claudeCodeIdeSsh;
   const codexOn = preferencesStore.codexIde && preferencesStore.codexIdeSsh;
-  if (!claudeOn && !codexOn) {
+  const geminiOn = preferencesStore.geminiIde && preferencesStore.geminiIdeSsh;
+  if (!claudeOn && !codexOn && !geminiOn) {
     return false;
   }
   // An isolated test instance never bridges: its setup would rewrite the host's Codex config and
@@ -1020,6 +1021,12 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
         tunnelInfo.remote_port, authToken, tabId, preferencesStore.codexHooks);
       setupPromises.push(commands.sshRunSetup(sshArgs, codexScript));
     }
+    if (geminiOn) {
+      // No-ops on a remote without the `agy` CLI. Instance-independent: reads $MAITERM_PORT,
+      // $MAITERM_AUTH, and $MAITERM_TAB_ID from the shell env (with ~/.aiterm fallback).
+      const agyScript = await commands.buildAgySetupScript(preferencesStore.geminiHooks);
+      setupPromises.push(commands.sshRunSetup(sshArgs, agyScript));
+    }
 
     // Deshittification rides along on every connect, in both directions: rules on
     // here are applied there, rules off here are removed there. It is deliberately
@@ -1180,10 +1187,11 @@ export async function buildUserSetupScript(tabId: string): Promise<string | null
 
   const claudeOn = preferencesStore.claudeCodeIde && preferencesStore.claudeCodeIdeSsh;
   const codexOn = preferencesStore.codexIde && preferencesStore.codexIdeSsh;
+  const geminiOn = preferencesStore.geminiIde && preferencesStore.geminiIdeSsh;
 
   // Concatenate the enabled runtimes' setup scripts (run in the user's shell after
-  // sudo/su). The Codex block is guarded by `if command -v codex` (not `exit`), so it
-  // is a safe no-op in the interactive shell when codex isn't installed for this user.
+  // sudo/su). The Codex and Antigravity blocks are guarded by `if command -v ...` (not `exit`),
+  // so they are safe no-ops in the interactive shell when the CLI isn't installed for this user.
   const parts: string[] = [];
   if (claudeOn) {
     const skillScripts = await commands.getMaitermSkillScripts();
@@ -1193,6 +1201,9 @@ export async function buildUserSetupScript(tabId: string): Promise<string | null
   if (codexOn) {
     parts.push(await commands.buildCodexSetupScript(
       bridge.remotePort, authToken, tabId, preferencesStore.codexHooks));
+  }
+  if (geminiOn) {
+    parts.push(await commands.buildAgySetupScript(preferencesStore.geminiHooks));
   }
   // Runtime-independent, and safe in an interactive shell: it ends in `:`, not
   // `exit`, and every branch is guarded.

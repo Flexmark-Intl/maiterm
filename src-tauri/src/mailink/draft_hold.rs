@@ -204,9 +204,14 @@ pub(crate) fn outcomes_for_tab(tab_id: &str) -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 
-/// The human has text in this tab's agent input box (Claude only — the one box that parses).
+/// Runtimes whose TUI input box `input_box::parse` recognizes (Claude `❯` and Antigravity `>`).
+fn has_readable_input_box(rt: Option<AgentRuntime>) -> bool {
+    matches!(rt, Some(AgentRuntime::Claude | AgentRuntime::Gemini))
+}
+
+/// The human has text in this tab's agent input box.
 pub(crate) fn draft_in_box(app: &AppState, tab_id: &str) -> bool {
-    super::runtime_for_tab(app, tab_id) == Some(AgentRuntime::Claude)
+    has_readable_input_box(super::runtime_for_tab(app, tab_id))
         && matches!(super::agent_input_box(app, tab_id), super::input_box::InputBox::HasText)
 }
 
@@ -237,7 +242,7 @@ pub(crate) fn ready(box_state: super::input_box::InputBox, last_output_ms: u64, 
 /// 2026-11-15). Only for that moment: a running agent's box is ready whenever it reads empty.
 /// Another runtime, or no terminal, returns at once. True once ready, false on the time limit.
 pub(crate) async fn await_ready(app: &AppState, tab_id: &str, within: std::time::Duration) -> bool {
-    if super::runtime_for_tab(app, tab_id) != Some(AgentRuntime::Claude) {
+    if !has_readable_input_box(super::runtime_for_tab(app, tab_id)) {
         return true;
     }
     let start = std::time::Instant::now();
@@ -285,7 +290,7 @@ fn typing_hold(app: &AppState, tab_id: &str) -> Option<&'static str> {
     if human_typing(app, tab_id) {
         return Some("typing");
     }
-    if super::runtime_for_tab(app, tab_id) == Some(AgentRuntime::Claude) {
+    if has_readable_input_box(super::runtime_for_tab(app, tab_id)) {
         return match super::agent_input_box(app, tab_id) {
             super::input_box::InputBox::Empty => None,
             super::input_box::InputBox::HasText => Some("draft"),

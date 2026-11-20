@@ -10,6 +10,10 @@
 //!   way maiTerm's own entry is.
 //! - **Codex:** `[mcp_servers.<name>]` in `~/.codex/config.toml` (account roots symlink it), when
 //!   the Codex integration is on.
+//! - **Antigravity (`agy`):** `mcpServers` in `~/.gemini/config/mcp_config.json`, stdio entries
+//!   invoking `mcp-stdio.sh --path /mcp/x/<name>` (so per-tab `$MAITERM_PORT`/`$MAITERM_AUTH`/
+//!   `$MAITERM_TAB_ID` are inherited and workspace scoping works), marked via `env.MAITERM_PROXY`,
+//!   when the Antigravity integration is on.
 //!
 //! Written at startup before any tab spawns, re-asserted by the 30 s drift loop, rewritten when a
 //! server is added, removed or switched, and removed at exit with maiTerm's own entry: the port
@@ -205,6 +209,76 @@ fn apply_codex(doc: &mut toml_edit::DocumentMut, wanted: &[(String, String, toml
     out
 }
 
+/// The env-var name that marks an Antigravity (`agy`) stdio proxy entry as maiTerm's, valued
+/// `<data slug>/<server id>` (same ownership semantics as `MARKER` in HTTP headers).
+pub const AGY_MARKER_ENV: &str = "MAITERM_PROXY";
+
+fn agy_entry_with_wrapper(wrapper: &Path, id: &str) -> Value {
+    let path_arg = format!("/mcp/x/{}", entry_name(id));
+    if cfg!(windows) {
+        let exe = std::env::current_exe()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        json!({
+            "command": exe,
+            "args": ["--mcp-stdio", "--path", path_arg],
+            "env": {
+                AGY_MARKER_ENV: marker_value(id),
+            }
+        })
+    } else {
+        json!({
+            "command": "bash",
+            "args": [wrapper.to_string_lossy(), "--path", path_arg],
+            "env": {
+                AGY_MARKER_ENV: marker_value(id),
+            }
+        })
+    }
+}
+
+fn agy_marker(entry: &Value) -> Option<&str> {
+    entry
+        .get("env")
+        .and_then(|e| e.get(AGY_MARKER_ENV))
+        .and_then(Value::as_str)
+        .or_else(|| claude_marker(entry))
+}
+
+fn agy_ours(entry: &Value) -> Option<&str> {
+    ours_id(agy_marker(entry)?)
+}
+
+fn apply_agy(root: &mut Value, wanted: &[(String, Value)]) -> Applied {
+    let mut out = Applied::default();
+    let Some(obj) = root.as_object_mut() else { return out };
+    let servers = obj.entry("mcpServers").or_insert_with(|| json!({}));
+    let Some(servers) = servers.as_object_mut() else { return out };
+    let stale: Vec<String> = servers
+        .iter()
+        .filter(|(name, e)| agy_ours(e).is_some() && !wanted.iter().any(|(n, _)| n == *name))
+        .map(|(name, _)| name.clone())
+        .collect();
+    for name in stale {
+        servers.remove(&name);
+        out.changed = true;
+    }
+    for (name, entry) in wanted {
+        match servers.get(name) {
+            Some(existing) if agy_ours(existing).is_none() => {
+                out.collisions.push(agy_ours(entry).unwrap_or_default().to_string());
+            }
+            Some(existing) if existing == entry => {}
+            _ => {
+                servers.insert(name.clone(), entry.clone());
+                out.changed = true;
+            }
+        }
+    }
+    out
+}
+
 /// The servers whose entries should exist now.
 fn wanted_servers() -> Vec<ProxyServer> {
     super::all().into_iter().filter(|s| s.enabled).collect()
@@ -273,6 +347,39 @@ pub fn sync(port: u16, auth: &str, prefs: &Preferences) -> Collisions {
             }
         }
     }
+
+    if let (Some(path), Some(wrapper)) = (
+        crate::claude_code::agy::mcp_config_path(),
+        crate::claude_code::agy::mcp_stdio_wrapper_path(),
+    ) {
+        let wanted: Vec<(String, Value)> = if prefs.gemini_ide {
+            servers
+                .iter()
+                .map(|s| (entry_name(&s.id), agy_entry_with_wrapper(&wrapper, &s.id)))
+                .collect()
+        } else {
+            vec![]
+        };
+        let gemini_root_exists = dirs::home_dir().is_some_and(|h| h.join(".gemini").exists());
+        if path.exists() || (!wanted.is_empty() && gemini_root_exists) {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match edit_json(&path, |root| apply_agy(root, &wanted)) {
+                Ok(a) => {
+                    if a.changed {
+                        log::info!(
+                            "[mcp-proxy] wrote {} entr{} into ~/.gemini/config/mcp_config.json",
+                            wanted.len(),
+                            if wanted.len() == 1 { "y" } else { "ies" }
+                        );
+                    }
+                    found.gemini = a.collisions;
+                }
+                Err(e) => log::warn!("[mcp-proxy] ~/.gemini/config/mcp_config.json: {e}"),
+            }
+        }
+    }
     *super::COLLISIONS.lock() = found.clone();
     found
 }
@@ -310,6 +417,28 @@ pub fn remote() -> Value {
     json!({ "set": set })
 }
 
+/// Remote Antigravity (`agy`) proxy entries for SSH setup scripts: each entry maps the server's
+/// entry name to `{ "path": "/mcp/x/<name>", "marker": "<slug>/<id>" }`. The remote script expands
+/// `$HOME/.gemini/config/plugins/maiterm/mcp-stdio.sh` so multiple users/maiTerms on a shared host
+/// never bake ports or tokens to disk, and add-only merge preserves teammates' and native entries.
+pub fn remote_agy() -> Value {
+    super::ensure_loaded();
+    let servers = super::all();
+    let set: serde_json::Map<String, Value> = servers
+        .iter()
+        .filter(|s| s.enabled)
+        .map(|s| {
+            let name = entry_name(&s.id);
+            let entry = json!({
+                "path": format!("/mcp/x/{name}"),
+                "marker": marker_value(&s.id),
+            });
+            (name, entry)
+        })
+        .collect();
+    json!({ "set": set })
+}
+
 /// Names of the human's own (unmarked) entries in Claude's and Codex's configs here: a proxied
 /// server under one of them would not be written there (a collision), so an agent's proposal
 /// must pick another name.
@@ -326,6 +455,13 @@ pub fn native_names() -> Vec<String> {
         if let Ok(doc) = crate::claude_code::codex::read_document(&home.join(".codex").join("config.toml")) {
             if let Some(servers) = doc.get("mcp_servers").and_then(|s| s.as_table_like()) {
                 out.extend(servers.iter().filter(|(_, e)| !codex_marker(e).is_some_and(|m| ours_id(&m).is_some())).map(|(n, _)| n.to_string()));
+            }
+        }
+    }
+    if let Some(path) = crate::claude_code::agy::mcp_config_path() {
+        if let Some(root) = std::fs::read_to_string(&path).ok().and_then(|r| serde_json::from_str::<Value>(&r).ok()) {
+            if let Some(m) = root.get("mcpServers").and_then(Value::as_object) {
+                out.extend(m.iter().filter(|(_, e)| agy_ours(e).is_none()).map(|(n, _)| n.clone()));
             }
         }
     }
@@ -387,6 +523,11 @@ pub fn remove_all() {
             }
         }
     }
+    if let Some(path) = crate::claude_code::agy::mcp_config_path() {
+        if path.exists() {
+            let _ = edit_json(&path, |root| apply_agy(root, &[]));
+        }
+    }
 }
 
 /// Collisions by runtime: server ids whose name a native entry holds.
@@ -394,6 +535,7 @@ pub fn remove_all() {
 pub struct Collisions {
     pub claude: Vec<String>,
     pub codex: Vec<String>,
+    pub gemini: Vec<String>,
 }
 
 /// Read, change and write back a JSON config. A file that exists and does not parse is never
@@ -463,6 +605,26 @@ pub fn native_duplicates(url: &str) -> Vec<String> {
         let path = home.join(".codex").join("config.toml");
         if let Ok(doc) = crate::claude_code::codex::read_document(&path) {
             out.extend(codex_duplicates(&doc, url));
+        }
+    }
+    if let Some(path) = crate::claude_code::agy::mcp_config_path() {
+        if let Some(root) = std::fs::read_to_string(&path).ok().and_then(|r| serde_json::from_str::<Value>(&r).ok()) {
+            out.extend(agy_duplicates(&root, url));
+        }
+    }
+    out
+}
+
+fn agy_duplicates(root: &Value, url: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (name, e) in root.get("mcpServers").and_then(Value::as_object).into_iter().flatten() {
+        if agy_marker(e).is_none()
+            && e.get("url")
+                .or_else(|| e.get("serverUrl"))
+                .and_then(Value::as_str)
+                .is_some_and(|u| same_url(u, url))
+        {
+            out.push(format!("Antigravity: {name}"));
         }
     }
     out
@@ -567,6 +729,36 @@ pub fn adopt_native(id: &str, url: &str) -> Result<Vec<String>, String> {
             removed.extend(gone);
         }
     }
+    if let Some(path) = crate::claude_code::agy::mcp_config_path() {
+        if path.exists() {
+            let mut gone = Vec::new();
+            edit_json(&path, |root| {
+                gone.clear();
+                let mut a = Applied::default();
+                if let Some(m) = root.get_mut("mcpServers").and_then(Value::as_object_mut) {
+                    let doomed: Vec<String> = m
+                        .iter()
+                        .filter(|(n, e)| {
+                            agy_marker(e).is_none()
+                                && (**n == name
+                                    || e.get("url")
+                                        .or_else(|| e.get("serverUrl"))
+                                        .and_then(Value::as_str)
+                                        .is_some_and(|u| same_url(u, url)))
+                        })
+                        .map(|(n, _)| n.clone())
+                        .collect();
+                    for n in doomed {
+                        m.remove(&n);
+                        gone.push(format!("Antigravity: {n}"));
+                        a.changed = true;
+                    }
+                }
+                a
+            })?;
+            removed.extend(gone);
+        }
+    }
     if !removed.is_empty() {
         log::info!("[mcp-proxy] {id}: moved to maiTerm, removed native {}", removed.join(", "));
     }
@@ -577,7 +769,8 @@ pub fn adopt_native(id: &str, url: &str) -> Result<Vec<String>, String> {
 // Used only by the tests that start the fake, which are unix only.
 #[cfg(all(test, unix))]
 pub(crate) fn rendered_for_test(port: u16, auth: &str, id: &str) -> String {
-    format!("{}\n{}", claude_entry(port, auth, id), codex_table(port, auth, id))
+    let agy = agy_entry_with_wrapper(Path::new("/tmp/mcp-stdio.sh"), id);
+    format!("{}\n{}\n{}", claude_entry(port, auth, id), codex_table(port, auth, id), agy)
 }
 
 #[cfg(test)]
@@ -701,5 +894,42 @@ mod tests {
         });
         let d = claude_duplicates(&root, "https://mcp.linear.app/mcp", Some(Path::new("/Users/x")));
         assert_eq!(d, vec!["Claude: lin", "Claude (project ~/code/a): linear"]);
+    }
+
+    #[test]
+    fn agy_native_entries_and_other_flavor_are_never_touched() {
+        let wrapper = Path::new("/Users/x/.gemini/config/plugins/maiterm/mcp-stdio.sh");
+        let ours_lin = (entry_name("linear"), agy_entry_with_wrapper(wrapper, "linear"));
+        let ours_not = (entry_name("notion"), agy_entry_with_wrapper(wrapper, "notion"));
+        let other_flavor = json!({
+            "command": "bash",
+            "args": ["/Users/x/.gemini/config/plugins/maiterm/mcp-stdio.sh", "--path", "/mcp/x/other"],
+            "env": { AGY_MARKER_ENV: "com.example.other/other" }
+        });
+        let mut root = json!({
+            "mcpServers": {
+                "maiterm": { "command": "bash", "args": ["/Users/x/.gemini/config/plugins/maiterm/mcp-stdio.sh"] },
+                "tauri-mcp": { "command": "npx", "args": ["-y", "@hypothesi/tauri-mcp-server@0.8.3"] },
+                entry_name("linear"): { "url": "https://mcp.linear.app/mcp" },
+                "other": other_flavor.clone(),
+            }
+        });
+        let a = apply_agy(&mut root, &[ours_lin.clone(), ours_not.clone()]);
+        assert_eq!(a.collisions, vec!["linear"]);
+        assert!(a.changed);
+        assert_eq!(root["mcpServers"][entry_name("linear")]["url"], "https://mcp.linear.app/mcp");
+        assert!(root["mcpServers"]["maiterm"].is_object());
+        assert!(root["mcpServers"]["tauri-mcp"].is_object());
+        assert_eq!(root["mcpServers"]["other"], other_flavor);
+        assert_eq!(agy_ours(&root["mcpServers"][entry_name("notion")]), Some("notion"));
+        assert!(!apply_agy(&mut root, &[ours_lin, ours_not]).changed);
+        let cleared = apply_agy(&mut root, &[]);
+        assert!(cleared.changed);
+        assert!(root["mcpServers"].get(entry_name("notion")).is_none());
+        assert_eq!(root["mcpServers"]["other"], other_flavor);
+        assert_eq!(
+            agy_duplicates(&root, "https://mcp.linear.app/mcp/"),
+            vec![format!("Antigravity: {}", entry_name("linear"))]
+        );
     }
 }

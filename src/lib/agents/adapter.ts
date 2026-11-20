@@ -80,11 +80,17 @@ const codexAdapter: AgentAdapter = {
   },
 };
 
-// Gemini borrows Codex's prompt-state model but NOT its fork: spreading the whole adapter
-// would have handed it Codex's `codex fork` command the moment that was enabled.
+// Antigravity (`agy`, wire key `'gemini'`): guards `ask_question` the same way Claude guards
+// `AskUserQuestion`, and has no CLI fork subcommand yet.
 const geminiAdapter: AgentAdapter = {
   ...codexAdapter,
   runtime: 'gemini',
+  isAwaitingHumanInput(state) {
+    if (!state) return false;
+    if (state.state === 'permission') return true;
+    if (state.state === 'active' && state.toolName === 'ask_question') return true;
+    return false;
+  },
   supportsFork: supportsFork('gemini'),
   buildForkCommand(sessionId) {
     return buildForkCommand('gemini', sessionId);

@@ -362,6 +362,14 @@ pub fn spawn_pty(
     } else if crate::instance::is_isolated() {
         cmd.env_remove("MAITERM_AUTH");
     }
+    // Path to THIS maiTerm binary so the shared Antigravity (`agy`) stdio MCP wrapper
+    // (`mcp-stdio.sh`) execs the owning build flavor (dev vs prod) without baking a path
+    // per launch (docs/agy-integration-review.md).
+    if crate::instance::is_isolated() {
+        cmd.env_remove("MAITERM_BIN");
+    } else if let Ok(exe) = std::env::current_exe() {
+        cmd.env("MAITERM_BIN", exe);
+    }
 
     // Managed accounts (docs/login.md §5). This is what makes "launch under the active
     // account" true: the runtime's config-dir variable points at that account's root, and
@@ -1411,7 +1419,7 @@ pub fn kill_pty_foreground_job(
 /// Which agent CLIs to look for in a tab's process tree. Union of every runtime's
 /// `agent_process_names` (see `state/agent_runtime.rs`) — kept as a small literal so
 /// the readiness probe needn't know a tab's runtime up front.
-const AGENT_PROCESS_NAMES: &[&str] = &["claude", "codex", "gemini"];
+const AGENT_PROCESS_NAMES: &[&str] = &["claude", "codex", "agy", "gemini"];
 
 /// The shell pid backing a PTY, if it's still registered. The root for descendant walks
 /// (agent liveness, background-shell discovery). Takes `&AppState` so callers holding a plain

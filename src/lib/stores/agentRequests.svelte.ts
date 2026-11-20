@@ -612,15 +612,22 @@ async function addMcpServer(a: { tabId?: string; url?: string; name?: string; re
   const runtimes = [
     ...(p.claudeCodeIde ? ['Claude'] : []),
     ...(p.codexIde ? ['Codex'] : []),
+    ...(p.geminiIde ? ['Antigravity'] : []),
   ];
-  const remote = p.claudeCodeIde && p.claudeCodeIdeSsh;
+  const remoteRuntimes = [
+    ...(p.claudeCodeIde && p.claudeCodeIdeSsh ? ['Claude'] : []),
+    ...(p.geminiIde && p.geminiIdeSsh ? ['Antigravity'] : []),
+  ];
+  const formatList = (items: string[]) =>
+    items.length <= 1 ? (items[0] ?? '') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+  const remote = remoteRuntimes.length > 0;
   const who = runtimes.length
-    ? `${runtimes.join(' and ')} here${remote ? ', and Claude on the ssh hosts you have bridged,' : ''}`
+    ? `${formatList(runtimes)} here${remote ? `, and ${formatList(remoteRuntimes)} on the ssh hosts you have bridged,` : ''}`
     : '';
   const effects = [
     who
       ? `${who} ${runtimes.length > 1 || remote ? 'get' : 'gets'} its tools as an MCP server named “${shown}”, in every workspace. Its tools load into every agent session started after this; one already running doesn't see it until it restarts.`
-      : `No agent gets its tools until you turn on the Claude Code or Codex integration in Preferences; then they appear as an MCP server named “${shown}”, in every workspace.`,
+      : `No agent gets its tools until you turn on the Claude Code, Codex or Antigravity integration in Preferences; then they appear as an MCP server named “${shown}”, in every workspace.`,
     signIn,
     ...(probe.duplicates.length ? [`You also have it installed directly (${probe.duplicates.join('; ')}): agents would get every tool twice until you remove one (“Move to maiTerm” in Preferences).`] : []),
   ];

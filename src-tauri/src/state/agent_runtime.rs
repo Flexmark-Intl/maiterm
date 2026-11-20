@@ -45,7 +45,9 @@ impl AgentRuntime {
     pub fn detect(client_info_name: Option<&str>) -> Self {
         match client_info_name.map(|n| n.to_ascii_lowercase()) {
             Some(n) if n.contains("codex") => Self::Codex,
-            Some(n) if n.contains("gemini") => Self::Gemini,
+            Some(n) if n.contains("antigravity") || n.contains("agy") || n.contains("gemini") => {
+                Self::Gemini
+            }
             _ => Self::Claude,
         }
     }
@@ -71,6 +73,8 @@ pub enum HookConfigKind {
     ClaudeSettingsJson,
     /// `~/.codex/hooks.json` + shim (Codex).
     CodexHooksJson,
+    /// `~/.gemini/config/plugins/maiterm/hooks.json` + shim (Antigravity CLI / `agy`).
+    AgyPlugin,
 }
 
 /// What signals that an agent session has gone dormant.
@@ -147,20 +151,22 @@ pub static CODEX_DESC: RuntimeDescriptor = RuntimeDescriptor {
     tool_stale_timeout_ms: 15_000,
 };
 
-/// Gemini runtime identity and dormancy; no on-disk registrar is installed yet.
+/// Antigravity CLI (`agy`) runtime identity, registered via `~/.gemini/config/plugins/maiterm/`.
+/// Keeps the stable `"gemini"` wire/internal key for maiLink protocol compatibility
+/// (docs/agy-integration-review.md).
 #[allow(dead_code)]
 pub static GEMINI_DESC: RuntimeDescriptor = RuntimeDescriptor {
     runtime: AgentRuntime::Gemini,
-    display_name: "Gemini",
+    display_name: "Antigravity",
     mcp_server_base: "maiterm",
-    client_info_name: "gemini",
+    client_info_name: "antigravity-client",
     session_id_var: "geminiSessionId",
     auth_header: "Authorization",
     supports_fork: false,
     needs_mcp_reassert: false,
-    hook_config: HookConfigKind::CodexHooksJson,
+    hook_config: HookConfigKind::AgyPlugin,
     dormancy: DormancySource::PtyExitOrPrompt,
-    agent_process_names: &["gemini"],
+    agent_process_names: &["agy", "gemini"],
     tool_stale_timeout_ms: 15_000,
 };
 
@@ -213,4 +219,14 @@ pub const AGENT_ENV_MARKERS: &[&str] = &[
     "CODEX_SANDBOX",
     "CODEX_SANDBOX_NETWORK_DISABLED",
     "GEMINI_CLI",
+    "ANTIGRAVITY_AGENT",
+    "ANTIGRAVITY_AGENTAPI_EXE",
+    "ANTIGRAVITY_APP_DATA_DIR",
+    "ANTIGRAVITY_CONVERSATION_ID",
+    "ANTIGRAVITY_CSRF_TOKEN",
+    "ANTIGRAVITY_LS_ADDRESS",
+    "ANTIGRAVITY_LS_VERSION",
+    "ANTIGRAVITY_PROJECT_ID",
+    "ANTIGRAVITY_SOURCE_METADATA",
+    "ANTIGRAVITY_TRAJECTORY_ID",
 ];

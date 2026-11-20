@@ -109,8 +109,9 @@ export function toolVerb(text: string): string {
   const name = text.split('(')[0].trim().toLowerCase();
   if (name.includes('bridge')) return 'bridge';
   if (name.startsWith('mcp__')) return name.split('__')[1] || 'tools';
-  if (['edit', 'write', 'multiedit', 'notebookedit'].includes(name)) return 'editing files';
-  if (['read', 'grep', 'glob', 'toolsearch'].includes(name) || name.includes('search')) return 'reading files';
+  if (name.includes('/')) return name.split('/')[0] || 'tools';
+  if (['edit', 'write', 'multiedit', 'notebookedit', 'edit_file', 'write_file', 'write_to_file', 'replace_file_content', 'multi_replace_file_content'].includes(name)) return 'editing files';
+  if (['read', 'grep', 'glob', 'toolsearch', 'read_file', 'view_file', 'find_by_name', 'list_dir'].includes(name) || name.includes('search')) return 'reading files';
   if (name === 'bash' || name.includes('shell') || name.includes('exec') || name.includes('run')) return 'bash';
   if (name.includes('fetch') || name.includes('web')) return 'web';
   return 'tools';

@@ -30,9 +30,9 @@ pub enum Extracted {
 }
 
 /// The shell tools of each runtime. Claude's `Bash` and `PowerShell`; Codex's are spelled as
-/// its function names (`shell`, `local_shell`, `exec_command`).
+/// its function names (`shell`, `local_shell`, `exec_command`); Antigravity's is `run_command`.
 pub fn is_shell(tool: &str) -> bool {
-    matches!(tool, "Bash" | "PowerShell" | "shell" | "local_shell" | "exec_command")
+    matches!(tool, "Bash" | "PowerShell" | "shell" | "local_shell" | "exec_command" | "run_command")
 }
 
 /// The ops that change a file, as opposed to looking at one.
@@ -62,6 +62,17 @@ pub fn extract(tool: &str, input: &Value) -> Extracted {
         // A search names a folder only when it was given one; without, it searched the session's
         // folder, which would mark the whole root and say nothing.
         "Grep" | "Glob" => one(str_field("path"), "search"),
+        // Antigravity (`agy`) built-in file tools use PascalCase keys (`Path`, `TargetFile`, etc.).
+        "read_file" | "view_file" => one(str_field("Path").or_else(|| str_field("AbsolutePath")), "read"),
+        "edit_file" | "replace_file_content" | "multi_replace_file_content" => {
+            one(str_field("Path").or_else(|| str_field("TargetFile")), "edit")
+        }
+        "write_file" | "write_to_file" => {
+            one(str_field("Path").or_else(|| str_field("TargetFile")), "write")
+        }
+        "grep_search" | "find_by_name" => {
+            one(str_field("SearchPath").or_else(|| str_field("SearchDirectory")), "search")
+        }
         t if is_shell(t) => Extracted::Shell,
         _ => Extracted::Nothing,
     }
@@ -183,6 +194,26 @@ mod tests {
         assert_eq!(
             got,
             vec![("a.txt".into(), "create"), ("old.txt".into(), "delete"), ("src/x.ts".into(), "delete"), ("src/y.ts".into(), "create")]
+        );
+    }
+
+    #[test]
+    fn agy_file_and_shell_tools_are_extracted() {
+        assert_eq!(
+            files(extract("read_file", &json!({ "Path": "/repo/src/lib.rs", "StartLine": 1 }))),
+            vec![("/repo/src/lib.rs".into(), "read")]
+        );
+        assert_eq!(
+            files(extract("edit_file", &json!({ "Path": "/repo/src/lib.rs", "Target": "a", "Replacement": "b" }))),
+            vec![("/repo/src/lib.rs".into(), "edit")]
+        );
+        assert_eq!(
+            files(extract("write_file", &json!({ "Path": "/repo/new.rs", "Content": "fn main() {}" }))),
+            vec![("/repo/new.rs".into(), "write")]
+        );
+        assert_eq!(
+            extract("run_command", &json!({ "CommandLine": "cargo test", "WaitMsBeforeAsync": 5000 })),
+            Extracted::Shell
         );
     }
 }

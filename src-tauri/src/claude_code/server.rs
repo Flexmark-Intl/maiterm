@@ -157,6 +157,142 @@ fn watch_unattributed_prompt(app: Arc<AppState>, handle: AppHandle, session_id: 
     });
 }
 
+/// Sessions with an active [`watch_agy_permission`] watcher (at most one per session).
+static AGY_PERM_WATCHES: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Watch an in-turn Antigravity (`agy`) tab for a tool-permission prompt on screen.
+///
+/// Antigravity 1.5.13 has no `PermissionRequest` or `Notification` hook — when a tool call
+/// pauses for human approval (`Allow calling this tool?` / `> 1. …` / `↑/↓ Navigate · tab Amend`),
+/// the session otherwise stays `Active` with `getTabPrompt` blind. This watcher polls the tab's
+/// live screen every 350 ms ONLY while the session is mid-turn (`Active` or `WaitingPermission`),
+/// flipping state to `WaitingPermission` (and emitting `permission_prompt`) the moment the dialog
+/// appears, returning to `Active` once answered (2 consecutive clear reads), and exiting as soon
+/// as the turn ends (`Stopped`/`WaitingInput`) or the session is removed — zero polling when idle.
+fn watch_agy_permission(app: Arc<AppState>, handle: AppHandle, session_id: String, tab_id: String) {
+    if session_id.is_empty() || tab_id.is_empty() {
+        return;
+    }
+    if !AGY_PERM_WATCHES.lock().insert(session_id.clone()) {
+        return;
+    }
+    tokio::spawn(async move {
+        use crate::state::app_state::AgentSessionState;
+        let mut clear_reads: u8 = 0;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+            let cur_state = app
+                .agent_sessions
+                .read()
+                .get(&session_id)
+                .filter(|s| s.tab_id == tab_id && s.runtime == crate::state::AgentRuntime::Gemini)
+                .map(|s| s.state);
+            let Some(state) = cur_state else {
+                break;
+            };
+            if !matches!(state, AgentSessionState::Active | AgentSessionState::WaitingPermission) {
+                break;
+            }
+            let open = crate::mailink::permission_dialog_open_for_tab(&app, &tab_id);
+            if open {
+                clear_reads = 0;
+                if state == AgentSessionState::Active {
+                    let tool_name = {
+                        let mut sessions = app.agent_sessions.write();
+                        match sessions.get_mut(&session_id) {
+                            Some(s) if s.state == AgentSessionState::Active => {
+                                s.state = AgentSessionState::WaitingPermission;
+                                s.claude_gate.prompt_opened();
+                                Some(s.tool_name.clone().unwrap_or_default())
+                            }
+                            _ => None,
+                        }
+                    };
+                    if let Some(tool) = tool_name {
+                        log::info!(
+                            "Agy permission dialog detected on screen → tab {} waiting_permission (tool='{}')",
+                            &tab_id[..tab_id.len().min(8)],
+                            tool
+                        );
+                        emit_dual(
+                            &handle,
+                            "agent-hook-notification",
+                            "claude-hook-notification",
+                            serde_json::json!({
+                                "runtime": crate::state::AgentRuntime::Gemini.as_key(),
+                                "session_id": session_id,
+                                "tab_id": tab_id,
+                                "notification_type": "permission_prompt",
+                                "tool_name": tool,
+                                "title": null,
+                                "body": null,
+                            }),
+                        );
+                    }
+                }
+            } else if state == AgentSessionState::WaitingPermission {
+                clear_reads = clear_reads.saturating_add(1);
+                if clear_reads >= 2 {
+                    let tool_name = {
+                        let mut sessions = app.agent_sessions.write();
+                        match sessions.get_mut(&session_id) {
+                            Some(s) if s.state == AgentSessionState::WaitingPermission => {
+                                s.state = AgentSessionState::Active;
+                                s.claude_gate.prompt_closed();
+                                Some(s.tool_name.clone().unwrap_or_default())
+                            }
+                            _ => None,
+                        }
+                    };
+                    if let Some(tool) = tool_name {
+                        log::info!(
+                            "Agy permission dialog closed on screen → tab {} back to active",
+                            &tab_id[..tab_id.len().min(8)]
+                        );
+                        emit_dual(
+                            &handle,
+                            "agent-hook-pre-tool-use",
+                            "claude-hook-pre-tool-use",
+                            serde_json::json!({
+                                "runtime": crate::state::AgentRuntime::Gemini.as_key(),
+                                "session_id": session_id,
+                                "tab_id": tab_id,
+                                "tool_name": tool,
+                                "tool_input": null,
+                                "approvals_open": 0,
+                                "gate_held": false,
+                            }),
+                        );
+                    }
+                    clear_reads = 0;
+                }
+            }
+        }
+        AGY_PERM_WATCHES.lock().remove(&session_id);
+    });
+}
+
+/// Compact 1-line JSON fallback for tool arguments when `compact_tool_arg` doesn't recognize
+/// a specialized MCP schema (e.g. `tauri-mcp/driver_session({ action: "start" })`).
+fn compact_json_arg_fallback(input: &Value) -> Option<String> {
+    let obj = input.as_object()?;
+    if obj.is_empty() {
+        return None;
+    }
+    let raw = serde_json::to_string(input).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.len() <= 160 {
+        Some(trimmed.to_string())
+    } else {
+        let mut end = 159;
+        while !trimmed.is_char_boundary(end) {
+            end -= 1;
+        }
+        Some(format!("{}…", &trimmed[..end]))
+    }
+}
+
 /// One dormancy-reaper poll. For every NON-Claude agent session, check whether the
 /// agent process is still alive in its tab's PTY descendant tree. After
 /// `DORMANCY_ABSENT_POLLS` consecutive "gone" observations, remove the session and
@@ -987,6 +1123,10 @@ fn preference_meta() -> Vec<(&'static str, PrefMeta)> {
         ("codex_hooks", PrefMeta { description: "Enable Codex lifecycle hooks", ptype: "boolean", category: "Integration", read_only: false }),
         ("codex_auto_resume", PrefMeta { description: "Enable Codex hooks-based auto-resume", ptype: "boolean", category: "Integration", read_only: false }),
         ("codex_hooks_bypass_trust", PrefMeta { description: "Skip the one-time Codex hook-trust prompt (advanced)", ptype: "boolean", category: "Integration", read_only: false }),
+        ("gemini_ide", PrefMeta { description: "Enable Antigravity (agy) IDE integration (plugin in ~/.gemini/config/plugins/maiterm)", ptype: "boolean", category: "Integration", read_only: false }),
+        ("gemini_ide_ssh", PrefMeta { description: "Enable Antigravity (agy) MCP bridge over SSH", ptype: "boolean", category: "Integration", read_only: false }),
+        ("gemini_hooks", PrefMeta { description: "Enable Antigravity (agy) lifecycle hooks", ptype: "boolean", category: "Integration", read_only: false }),
+        ("gemini_auto_resume", PrefMeta { description: "Enable Antigravity (agy) hooks-based auto-resume", ptype: "boolean", category: "Integration", read_only: false }),
         // comms_bot_token is deliberately ABSENT: preference_meta() is the getPreferences/
         // setPreference surface, and the bot token must never be readable by agents.
         ("comms_provider", PrefMeta { description: "Comms integration provider (mattermost)", ptype: "string", category: "Integration", read_only: false }),
@@ -3679,6 +3819,124 @@ fn session_start_state(source: &str) -> crate::state::app_state::AgentSessionSta
     }
 }
 
+/// Register an idle Antigravity (`agy`) session when its `--mcp-stdio` bridge sends `initialize`
+/// with a valid `x-maiterm-tab` header. Uses the tab's persisted `geminiSessionId` if present (the
+/// resumed-tab case, where `agy --conversation` fires no `SessionStart`), otherwise a `mcp-<tab>`
+/// placeholder that the first hook replaces with the real `conversationId`.
+fn seed_agy_session_from_mcp_init(
+    app_handle: &AppHandle,
+    state: &Arc<AppState>,
+    connection_id: &str,
+    tab_id: &str,
+) {
+    // Look up tab metadata and persist `runtime = Gemini` if unset.
+    let tab_info: Option<(Option<String>, Option<String>)> = {
+        let mut app_data = state.app_data.write();
+        let mut found = None;
+        let mut changed = false;
+        'find: for win in &mut app_data.windows {
+            for ws in &mut win.workspaces {
+                for pane in &mut ws.panes {
+                    for t in &mut pane.tabs {
+                        if t.id == tab_id {
+                            if t.runtime != Some(crate::state::AgentRuntime::Gemini) {
+                                t.runtime = Some(crate::state::AgentRuntime::Gemini);
+                                changed = true;
+                            }
+                            let sid = t
+                                .trigger_variables
+                                .get("geminiSessionId")
+                                .filter(|s| !s.is_empty())
+                                .cloned();
+                            let cwd = t
+                                .restore_cwd
+                                .clone()
+                                .or_else(|| t.auto_resume_cwd.clone())
+                                .filter(|s| !s.is_empty());
+                            found = Some((sid, cwd));
+                            break 'find;
+                        }
+                    }
+                }
+            }
+        }
+        if changed {
+            let data = app_data.clone();
+            drop(app_data);
+            if let Err(e) = crate::state::save_state(&data) {
+                log::warn!("Failed to persist tab runtime for {}: {}", tab_id, e);
+            }
+        }
+        found
+    };
+    let Some((persisted_sid, cwd)) = tab_info else {
+        return; // tab does not belong to this maiTerm instance
+    };
+
+    let session_id = persisted_sid.unwrap_or_else(|| format!("mcp-{tab_id}"));
+    {
+        let mut sessions = state.agent_sessions.write();
+        // If this tab already has a live session registered, leave it alone.
+        if sessions.values().any(|s| s.tab_id == tab_id) {
+            return;
+        }
+        sessions.insert(
+            session_id.clone(),
+            crate::state::app_state::AgentSessionInfo {
+                runtime: crate::state::AgentRuntime::Gemini,
+                tab_id: tab_id.to_string(),
+                cwd: cwd.clone(),
+                state: crate::state::app_state::AgentSessionState::WaitingInput,
+                tool_name: None,
+                tool_detail: None,
+                pending_question: None,
+                pending_question_at: None,
+                transcript_path: None,
+                pending_approvals: Vec::new(),
+                approval_seq: 0,
+                recent_tool_calls: Vec::new(),
+                claude_gate: Default::default(),
+                model: None,
+                finished_a_turn: false,
+                connection_id: Some(connection_id.to_string()),
+            },
+        );
+    }
+
+    log::info!(
+        "Agy MCP init: seeded idle session {} for tab {}",
+        &session_id[..session_id.len().min(12)],
+        tab_id
+    );
+    emit_dual(
+        app_handle,
+        "agent-hook-session-start",
+        "claude-hook-session-start",
+        serde_json::json!({
+            "runtime": crate::state::AgentRuntime::Gemini.as_key(),
+            "session_id": session_id,
+            "tab_id": tab_id,
+            "cwd": cwd,
+            "source": "mcp_init",
+        }),
+    );
+}
+
+/// Remove any provisional Antigravity session entry seeded from `MCP initialize` for `tab_id`
+/// (`mcp-<tab>` placeholder or a `connection_id`-tagged row carrying an older persisted id) once
+/// a real hook registers `keep_session_id`.
+fn drop_agy_mcp_placeholders(
+    sessions: &mut HashMap<String, crate::state::app_state::AgentSessionInfo>,
+    tab_id: &str,
+    keep_session_id: &str,
+) {
+    sessions.retain(|sid, s| {
+        !(s.tab_id == tab_id
+            && sid != keep_session_id
+            && (sid.starts_with("mcp-") || s.connection_id.is_some()))
+    });
+}
+
 /// Process one JSON-RPC message and return the response as a raw JSON string.
 /// Returns `None` for notifications (no id) that don't require a response.
 /// `connection_id` identifies the transport connection (SSE session, WS, or streamable-http)
@@ -3718,7 +3976,17 @@ async fn process_message(
             // Remember this connection's runtime so affinity recovery can gate on it
             // (a Codex connection must never recover onto a Claude tab, and vice-versa).
             connection_runtimes.write().insert(connection_id.to_string(), runtime);
-            let resp = JsonRpcResponse::success(id, initialize_response(client_proto));
+            // Antigravity (`agy`) does not fire `SessionStart` on `--conversation` resume (nor
+            // before the first turn of a fresh session), yet it DOES connect to MCP immediately
+            // on boot via `--mcp-stdio` carrying `x-maiterm-tab`. Seed the tab's idle session
+            // row right here so Loom Focus, tab dots, Overlord, and maiLink see the live agent
+            // as soon as it starts rather than waiting for the user's first prompt.
+            if runtime == crate::state::AgentRuntime::Gemini {
+                if let Some(tab_id) = declared_tab {
+                    seed_agy_session_from_mcp_init(app_handle, state, connection_id, tab_id);
+                }
+            }
+            let resp = JsonRpcResponse::success(id, initialize_response(client_proto, runtime));
             Some(serde_json::to_string(&resp).unwrap())
         }
         "notifications/initialized" => None,
@@ -4471,16 +4739,111 @@ enum HookPhase {
 /// names handled here include shared events and Codex's PermissionRequest/PostCompact.
 /// Interrupt remains unhandled (docs/codex-integration-review.md C5). Unrecognized names
 /// fall through to `Other` (logged, no state change) — matching the prior behavior.
+/// Interactive elicitation tools that wait for human multiple-choice input:
+/// Claude's `AskUserQuestion` and Antigravity's `ask_question`.
+fn is_question_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "AskUserQuestion" | "ask_question")
+}
+
+/// Normalize Antigravity (`agy`) camelCase protojson hook payloads into the canonical
+/// snake_case keys expected by `hooks_handler` and `agent_files` (docs/agy-integration-review.md).
+/// Original camelCase fields (`terminationReason`, `invocationNum`, `fullyIdle`, etc.) are kept.
+/// No-op for Claude/Codex snake_case payloads.
+fn normalize_agy_hook_payload(mut event: Value) -> Value {
+    let Some(obj) = event.as_object_mut() else {
+        return event;
+    };
+    if !obj.contains_key("hookEventName") && !obj.contains_key("conversationId") {
+        return event;
+    }
+    let copy_str = |obj: &mut serde_json::Map<String, Value>, from: &str, to: &str| {
+        if !obj.contains_key(to) {
+            if let Some(v) = obj.get(from).cloned() {
+                obj.insert(to.to_string(), v);
+            }
+        }
+    };
+    copy_str(obj, "hookEventName", "hook_event_name");
+    copy_str(obj, "conversationId", "session_id");
+    copy_str(obj, "transcriptPath", "transcript_path");
+    copy_str(obj, "modelName", "model");
+    if let Some(tc) = obj.get("toolCall").and_then(|v| v.as_object()).cloned() {
+        let raw_name = tc.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let raw_args = tc.get("args").cloned();
+        // Antigravity invokes lazy-loaded MCP tools via `call_mcp_tool({ ServerName, ToolName, Arguments })`.
+        // Unwrap it into `<server>/<tool>` + inner arguments so live status pills and Files/action summaries
+        // show the real tool name (e.g. `maiterm/getActiveTab`) instead of `call_mcp_tool`.
+        let (eff_name, eff_input) = if raw_name == "call_mcp_tool" {
+            let args_obj = raw_args.as_ref().and_then(|v| v.as_object());
+            let server = args_obj
+                .and_then(|m| m.get("ServerName").or_else(|| m.get("server_name")))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+            let tool = args_obj
+                .and_then(|m| m.get("ToolName").or_else(|| m.get("tool_name")))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+            if let (Some(srv), Some(t)) = (server, tool) {
+                let inner = args_obj
+                    .and_then(|m| m.get("Arguments").or_else(|| m.get("arguments")))
+                    .cloned()
+                    .map(|v| match v {
+                        Value::String(s) => serde_json::from_str::<Value>(&s).unwrap_or(Value::String(s)),
+                        other => other,
+                    });
+                (Some(Value::String(format!("{srv}/{t}"))), inner.or(raw_args))
+            } else {
+                (tc.get("name").cloned(), raw_args)
+            }
+        } else {
+            (tc.get("name").cloned(), raw_args)
+        };
+        if !obj.contains_key("tool_name") {
+            if let Some(v) = eff_name {
+                obj.insert("tool_name".to_string(), v);
+            }
+        }
+        if !obj.contains_key("tool_input") {
+            if let Some(v) = eff_input {
+                obj.insert("tool_input".to_string(), v);
+            }
+        }
+        if !obj.contains_key("tool_use_id") {
+            if let Some(v) = tc.get("id").cloned() {
+                obj.insert("tool_use_id".to_string(), v);
+            }
+        }
+    }
+    event
+}
+
 fn normalize_hook_event(runtime: crate::state::AgentRuntime, name: &str, event: &Value) -> HookPhase {
     match name {
         "SessionStart" => HookPhase::SessionStart,
         "SessionEnd" => HookPhase::SessionEnd,
+        // Antigravity (`agy`) reports a human Esc cancellation as Stop with
+        // `terminationReason: "USER_CANCELED"`. Treat as Interrupt so no unread dot is set.
+        "Stop"
+            if runtime == crate::state::AgentRuntime::Gemini
+                && event.get("terminationReason").and_then(|v| v.as_str()) == Some("USER_CANCELED") =>
+        {
+            HookPhase::Interrupt
+        }
         "Stop" => HookPhase::Stop,
         // Claude's Stop for a turn an API error ended (a login that expired, an overloaded API, a
         // usage limit): sent instead of Stop, never with it. The turn is over all the same, and a
         // tab left Active on it showed "Working…" for good (the Hive's first live test).
         "StopFailure" => HookPhase::Stop,
         "UserPromptSubmit" => HookPhase::Prompt,
+        // Antigravity (`agy`) has no UserPromptSubmit; `PreInvocation` fires before each model
+        // call with `invocationNum == 0` at the start of a user turn and `> 0` after tool loops.
+        // Only `invocationNum == 0` begins a turn so Files baselines don't reset mid-turn.
+        "PreInvocation"
+            if event.get("invocationNum").and_then(|v| v.as_u64()).unwrap_or(0) == 0 =>
+        {
+            HookPhase::Prompt
+        }
+        "PreInvocation" | "PostInvocation" => HookPhase::Other,
         "PreToolUse" => HookPhase::ToolPre,
         "PostToolUse" => HookPhase::ToolPost,
         // A call that failed has ended exactly as one that succeeded has. Without this, a failed
@@ -5104,8 +5467,8 @@ async fn hooks_handler(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let event: Value = match serde_json::from_str(&body) {
-        Ok(v) => v,
+    let event: Value = match serde_json::from_str::<Value>(&body) {
+        Ok(v) => normalize_agy_hook_payload(v),
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
 
@@ -5318,6 +5681,104 @@ async fn hooks_handler(
         None
     };
 
+    // Antigravity (`agy --conversation <id>`) does NOT fire SessionStart on resumed sessions
+    // (verified on agy 1.5.13, docs/agy-integration-review.md). Every later hook still carries
+    // `conversationId`, `transcriptPath`, `cwd`, `modelName`, and `?tab_id=`, so register an
+    // unseen session on its first event before processing the phase.
+    if runtime == crate::state::AgentRuntime::Gemini
+        && !session_id.is_empty()
+        && hook_event_name != "SessionStart"
+    {
+        if let Some(tab_id) = tab_id_from_param.as_deref() {
+            let cwd = event.get("cwd").and_then(|v| v.as_str()).map(String::from);
+            let model = event.get("model").and_then(|v| v.as_str()).map(String::from);
+            let unseen = {
+                use crate::state::app_state::{AgentSessionInfo, AgentSessionState};
+                let mut sessions = srv.state.agent_sessions.write();
+                if let Some(existing) = sessions.get_mut(&session_id) {
+                    // Already seeded (e.g. by MCP initialize with the persisted geminiSessionId):
+                    // backfill hook-only metadata without re-emitting a synthetic session-start.
+                    if existing.cwd.is_none() {
+                        existing.cwd = cwd.clone();
+                    }
+                    if existing.model.is_none() {
+                        existing.model = model;
+                    }
+                    false
+                } else {
+                    drop_agy_mcp_placeholders(&mut sessions, tab_id, &session_id);
+                    sessions.insert(
+                        session_id.clone(),
+                        AgentSessionInfo {
+                            runtime,
+                            tab_id: tab_id.to_string(),
+                            cwd: cwd.clone(),
+                            state: AgentSessionState::Active,
+                            tool_name: None,
+                            tool_detail: None,
+                            pending_question: None,
+                            pending_question_at: None,
+                            transcript_path: transcript_path.clone(),
+                            pending_approvals: Vec::new(),
+                            approval_seq: 0,
+                            recent_tool_calls: Vec::new(),
+                            claude_gate: Default::default(),
+                            model,
+                            finished_a_turn: false,
+                            connection_id: None,
+                        },
+                    );
+                    true
+                }
+            };
+            if unseen {
+                let mut app_data = srv.state.app_data.write();
+                let mut changed = false;
+                'find_tab: for win in &mut app_data.windows {
+                    for ws in &mut win.workspaces {
+                        for pane in &mut ws.panes {
+                            for t in &mut pane.tabs {
+                                if t.id == tab_id {
+                                    if t.runtime != Some(runtime) {
+                                        t.runtime = Some(runtime);
+                                        changed = true;
+                                    }
+                                    break 'find_tab;
+                                }
+                            }
+                        }
+                    }
+                }
+                if changed {
+                    let data = app_data.clone();
+                    drop(app_data);
+                    if let Err(e) = crate::state::save_state(&data) {
+                        log::warn!("Failed to persist tab runtime for {}: {}", tab_id, e);
+                    }
+                }
+                log::info!(
+                    "Agy hook: auto-registered resumed session {} for tab {} on {}",
+                    &session_id[..session_id.len().min(8)],
+                    tab_id,
+                    hook_event_name
+                );
+                emit_dual(&srv.app_handle, "agent-hook-session-start", "claude-hook-session-start", serde_json::json!({
+                    "runtime": runtime_key,
+                    "session_id": session_id,
+                    "tab_id": tab_id,
+                    "cwd": event.get("cwd"),
+                    "source": "resume",
+                }));
+                emit_dual(&srv.app_handle, "agent-init-session", "claude-init-session", serde_json::json!({
+                    "runtime": runtime_key,
+                    "tab_id": tab_id,
+                    "session_id": session_id,
+                    "source": "hook",
+                }));
+            }
+        }
+    }
+
     // Files (docs/file-tree.md §9.1): what each agent reads and changes. Read off the RAW event
     // name, before the normalization below folds PostToolUseFailure into PostToolUse: the ledger
     // keeps a failed call visible.
@@ -5337,6 +5798,9 @@ async fn hooks_handler(
             if !session_id.is_empty() && !tab_id.is_empty() {
                 use crate::state::app_state::{AgentSessionInfo, AgentSessionState};
                 let mut sessions = srv.state.agent_sessions.write();
+                if runtime == crate::state::AgentRuntime::Gemini {
+                    drop_agy_mcp_placeholders(&mut sessions, &tab_id, &session_id);
+                }
                 // Same rebind fingerprint initSession logs, and it matters MORE here: this
                 // path needs no agent turn, so a shell whose $MAITERM_TAB_ID names a sibling
                 // tab (tmux inheriting a pane's env) repoints that tab's session — and its
@@ -5709,9 +6173,11 @@ async fn hooks_handler(
                 }
             }
 
-            // A StopFailure's kind (`authentication_failed`, `overloaded`, …): the turn ended, and
-            // the tab says it failed rather than showing a result.
-            let failed = (hook_event_name == "StopFailure")
+            // A StopFailure's kind (`authentication_failed`, `overloaded`, …), or Antigravity's
+            // `Stop` with `terminationReason: "ERROR"`: the turn ended and failed.
+            let agy_error = runtime == crate::state::AgentRuntime::Gemini
+                && event.get("terminationReason").and_then(|v| v.as_str()) == Some("ERROR");
+            let failed = (hook_event_name == "StopFailure" || agy_error)
                 .then(|| event.get("error").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or("unknown").to_string());
             match &failed {
                 Some(kind) => log::info!("Claude hook: StopFailure ({kind}) for session {} (tab {:?})", &session_id[..session_id.len().min(8)], tab_id),
@@ -5819,6 +6285,12 @@ async fn hooks_handler(
                     // calls are over too; a background subagent's may still be running.
                     session.claude_gate.prompt_closed();
                     session.claude_gate.agent_ended("");
+                }
+            }
+
+            if runtime == crate::state::AgentRuntime::Gemini {
+                if let Some(ref tid) = tab_id {
+                    watch_agy_permission(srv.state.clone(), srv.app_handle.clone(), session_id.clone(), tid.clone());
                 }
             }
 
@@ -6029,16 +6501,19 @@ async fn hooks_handler(
                     if !gate_held {
                         session.tool_name = if tool_name.is_empty() { None } else { Some(tool_name.clone()) };
                         // Compact primary-arg label (e.g. the Bash command) so a permission prompt
-                        // for this tool can show WHAT is being approved (maiLink card).
+                        // for this tool can show WHAT is being approved (maiLink card / getTabPrompt).
                         session.tool_detail = event
                             .get("tool_input")
-                            .and_then(crate::mailink::transcript::compact_tool_arg);
+                            .and_then(|v| {
+                                crate::mailink::transcript::compact_tool_arg(v)
+                                    .or_else(|| (runtime == crate::state::AgentRuntime::Gemini).then(|| compact_json_arg_fallback(v)).flatten())
+                            });
                     }
                     // Capture the structured AskUserQuestion prompt (its tool_input.questions feed
                     // the maiLink PendingPrompt). Any other call starting used to mean no open
                     // question, but a subagent's calls go on while the parent's ask is open, so
                     // the question stays while the AskUserQuestion call is still in flight.
-                    if tool_name == "AskUserQuestion" {
+                    if is_question_tool(&tool_name) {
                         session.pending_question = event.get("tool_input").cloned();
                         session.pending_question_at = Some(
                             std::time::SystemTime::now()
@@ -6046,11 +6521,19 @@ async fn hooks_handler(
                                 .map(|d| d.as_millis() as i64)
                                 .unwrap_or(0),
                         );
-                    } else if !session.claude_gate.has_in_flight("AskUserQuestion") {
+                    } else if !session.claude_gate.has_in_flight("AskUserQuestion")
+                        && !session.claude_gate.has_in_flight("ask_question")
+                    {
                         session.pending_question = None;
                         session.pending_question_at = None;
                     }
                     approvals_open = session.pending_approvals.len();
+                }
+            }
+
+            if runtime == crate::state::AgentRuntime::Gemini {
+                if let Some(ref tid) = tab_id {
+                    watch_agy_permission(srv.state.clone(), srv.app_handle.clone(), session_id.clone(), tid.clone());
                 }
             }
 
@@ -6109,11 +6592,12 @@ async fn hooks_handler(
                     // was approved and has now run.
                     let released = session.claude_gate.call_ended(tool_use_id.unwrap_or(""))
                         == crate::claude_code::gate::GateChange::Released;
-                    if released
+                    if (released || runtime == crate::state::AgentRuntime::Gemini)
                         && session.pending_approvals.is_empty()
                         && matches!(session.state, AgentSessionState::WaitingPermission)
                     {
                         session.state = AgentSessionState::Active;
+                        session.claude_gate.prompt_closed();
                     }
                     gate_held = session.claude_gate.held()
                         && matches!(session.state, AgentSessionState::WaitingPermission);
@@ -6121,8 +6605,8 @@ async fn hooks_handler(
                         session.tool_name = None;
                         session.tool_detail = None;
                     }
-                    // AskUserQuestion completing means the human answered → no open question.
-                    if tool_name == "AskUserQuestion" {
+                    // AskUserQuestion / ask_question completing means the human answered → no open question.
+                    if is_question_tool(&tool_name) {
                         session.pending_question = None;
                         session.pending_question_at = None;
                         // The WaitingPermission coinciding with an open ask (Claude fires a
@@ -6206,7 +6690,9 @@ async fn hooks_handler(
     // SSH transcript mirror: refresh the session's transcript_path (SessionStart above inserts
     // it; every later hook re-carries it, covering resume-minted paths) and treat this hook as
     // the "something appended" signal. schedule_fetch() no-ops for non-SSH tabs.
-    if runtime == crate::state::AgentRuntime::Claude && !session_id.is_empty() {
+    if matches!(runtime, crate::state::AgentRuntime::Claude | crate::state::AgentRuntime::Gemini)
+        && !session_id.is_empty()
+    {
         if let Some(tp) = &transcript_path {
             let tab_id = {
                 let mut sessions = srv.state.agent_sessions.write();
@@ -6233,6 +6719,77 @@ async fn hooks_handler(
         }
     }
     if let Some(tab) = prime_tab.as_deref() {
+        // Antigravity (`agy`) reads injected context from `injectSteps[].systemMessage.systemMessage`
+        // on BOTH `SessionStart` (fresh sessions) and `PreInvocation` (`invocationNum == 0`, which
+        // covers resumed `agy --conversation` sessions where `SessionStart` never fires, plus
+        // per-turn Browser Link tab updates). Track primed `(tab, session_id)` pairs so full
+        // standing priming is injected once per session per maiTerm run.
+        if params.get("format").map(String::as_str) == Some("agy") {
+            static PRIMED_AGY: std::sync::LazyLock<
+                parking_lot::Mutex<std::collections::HashSet<String>>,
+            > = std::sync::LazyLock::new(Default::default);
+
+            let key = format!("{tab}:{session_id}");
+            let is_session_start = hook_event_name == "SessionStart";
+            let is_turn_start = hook_event_name == "PreInvocation"
+                && event.get("invocationNum").and_then(|v| v.as_u64()).unwrap_or(0) == 0;
+
+            if !is_session_start && !is_turn_start {
+                return axum::Json(serde_json::json!({})).into_response();
+            }
+
+            let needs_full_prime = {
+                let mut primed = PRIMED_AGY.lock();
+                if primed.len() > 512 {
+                    primed.clear();
+                }
+                if is_session_start {
+                    primed.insert(key);
+                    true
+                } else {
+                    primed.insert(key)
+                }
+            };
+
+            if needs_full_prime {
+                crate::browser_link::session_started(tab);
+                let text = session_priming_text(&srv.state, tab);
+                let mut full_text = format!(
+                    "Your maiTerm tab ID is {tab}. Your session ID is {session_id}. maiTerm already \
+                     knows your tab on every tool call; do not call initSession at startup — only if a \
+                     tool call answers that it does not know your tab, call the maiterm initSession tool \
+                     with this tabId and sessionId to re-bind.{text}"
+                );
+                if is_turn_start {
+                    if let Some(browser_ctx) = crate::browser_link::prompt_context(&srv.state, tab) {
+                        full_text.push_str("\n\n");
+                        full_text.push_str(&browser_ctx);
+                    }
+                }
+                return axum::Json(serde_json::json!({
+                    "injectSteps": [{
+                        "systemMessage": {
+                            "systemMessage": full_text,
+                        }
+                    }]
+                }))
+                .into_response();
+            }
+
+            // Already primed: only inject Browser Link context if linked tabs changed since last turn.
+            if let Some(browser_ctx) = crate::browser_link::prompt_context(&srv.state, tab) {
+                return axum::Json(serde_json::json!({
+                    "injectSteps": [{
+                        "systemMessage": {
+                            "systemMessage": browser_ctx,
+                        }
+                    }]
+                }))
+                .into_response();
+            }
+            return axum::Json(serde_json::json!({})).into_response();
+        }
+
         // A new context: it is told its linked tabs again with its next message.
         crate::browser_link::session_started(tab);
         let text = session_priming_text(&srv.state, tab);
@@ -7067,5 +7624,104 @@ mod tests {
         let active: Vec<String> = vec![];
         let bound: HashSet<&str> = HashSet::new();
         assert_eq!(recover_affinity(&active, &bound), None);
+    }
+
+    #[test]
+    fn agy_hook_payload_normalizes_camel_case_and_phases() {
+        use crate::state::AgentRuntime;
+
+        assert_eq!(AgentRuntime::detect(Some("antigravity-client")), AgentRuntime::Gemini);
+        assert_eq!(AgentRuntime::detect(Some("agy")), AgentRuntime::Gemini);
+        assert_eq!(AgentRuntime::detect(Some("gemini-cli")), AgentRuntime::Gemini);
+
+        let raw_tool = serde_json::json!({
+            "hookEventName": "PreToolUse",
+            "conversationId": "conv-123",
+            "transcriptPath": "/tmp/transcript_full.jsonl",
+            "modelName": "gemini-4-neon-high",
+            "cwd": "/repo",
+            "toolCall": {
+                "id": "call_1",
+                "name": "run_command",
+                "args": { "CommandLine": "cargo test" }
+            }
+        });
+        let norm = super::normalize_agy_hook_payload(raw_tool);
+        assert_eq!(norm["hook_event_name"], "PreToolUse");
+        assert_eq!(norm["session_id"], "conv-123");
+        assert_eq!(norm["transcript_path"], "/tmp/transcript_full.jsonl");
+        assert_eq!(norm["model"], "gemini-4-neon-high");
+        assert_eq!(norm["tool_name"], "run_command");
+        assert_eq!(norm["tool_use_id"], "call_1");
+        assert_eq!(norm["tool_input"]["CommandLine"], "cargo test");
+
+        // Lazy MCP tool wrapper unwraps into `<server>/<tool>` with inner Arguments.
+        let raw_mcp = serde_json::json!({
+            "hookEventName": "PreToolUse",
+            "conversationId": "conv-123",
+            "toolCall": {
+                "id": "call_mcp_1",
+                "name": "call_mcp_tool",
+                "args": {
+                    "ServerName": "maiterm",
+                    "ToolName": "createTasks",
+                    "Arguments": { "workstream": "Test" }
+                }
+            }
+        });
+        let norm_mcp = super::normalize_agy_hook_payload(raw_mcp);
+        assert_eq!(norm_mcp["tool_name"], "maiterm/createTasks");
+        assert_eq!(norm_mcp["tool_input"]["workstream"], "Test");
+        assert_eq!(norm_mcp["tool_use_id"], "call_mcp_1");
+
+        // PreInvocation starts a turn only on invocationNum == 0.
+        let pre0 = serde_json::json!({ "hookEventName": "PreInvocation", "invocationNum": 0 });
+        let pre1 = serde_json::json!({ "hookEventName": "PreInvocation", "invocationNum": 1 });
+        assert!(matches!(super::normalize_hook_event(AgentRuntime::Gemini, "PreInvocation", &pre0), super::HookPhase::Prompt));
+        assert!(matches!(super::normalize_hook_event(AgentRuntime::Gemini, "PreInvocation", &pre1), super::HookPhase::Other));
+
+        // Stop with USER_CANCELED maps to Interrupt; normal Stop stays Stop.
+        let stop_cancel = serde_json::json!({ "terminationReason": "USER_CANCELED" });
+        let stop_ok = serde_json::json!({ "terminationReason": "NO_TOOL_CALL" });
+        assert!(matches!(super::normalize_hook_event(AgentRuntime::Gemini, "Stop", &stop_cancel), super::HookPhase::Interrupt));
+        assert!(matches!(super::normalize_hook_event(AgentRuntime::Gemini, "Stop", &stop_ok), super::HookPhase::Stop));
+    }
+
+    #[test]
+    fn agy_mcp_init_placeholder_is_dropped_when_real_session_registers() {
+        use crate::state::app_state::{AgentSessionInfo, AgentSessionState};
+        use crate::state::AgentRuntime;
+
+        let mk = |tab: &str, conn: Option<&str>| AgentSessionInfo {
+            runtime: AgentRuntime::Gemini,
+            tab_id: tab.to_string(),
+            cwd: None,
+            state: AgentSessionState::WaitingInput,
+            tool_name: None,
+            tool_detail: None,
+            pending_question: None,
+            pending_question_at: None,
+            transcript_path: None,
+            pending_approvals: Vec::new(),
+            approval_seq: 0,
+            recent_tool_calls: Vec::new(),
+            claude_gate: Default::default(),
+            model: None,
+            finished_a_turn: false,
+            connection_id: conn.map(String::from),
+        };
+
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert("mcp-tab-1".to_string(), mk("tab-1", Some("mcp-conn-1")));
+        sessions.insert("old-persisted-1".to_string(), mk("tab-1", Some("mcp-conn-1")));
+        sessions.insert("real-conv-1".to_string(), mk("tab-1", Some("mcp-conn-1")));
+        sessions.insert("mcp-tab-2".to_string(), mk("tab-2", Some("mcp-conn-2")));
+
+        super::drop_agy_mcp_placeholders(&mut sessions, "tab-1", "real-conv-1");
+
+        assert!(!sessions.contains_key("mcp-tab-1"), "fresh placeholder should be dropped");
+        assert!(!sessions.contains_key("old-persisted-1"), "stale seeded session on same tab should be dropped");
+        assert!(sessions.contains_key("real-conv-1"), "matching real session must survive");
+        assert!(sessions.contains_key("mcp-tab-2"), "other tabs must not be touched");
     }
 }

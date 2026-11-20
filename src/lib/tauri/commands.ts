@@ -2361,6 +2361,13 @@ export async function buildCodexSetupScript(remotePort: number, auth: string, ta
   return invoke('build_codex_setup_script', { remotePort, auth, tabId, hooks });
 }
 
+/** Render the remote-Antigravity (`agy`) setup shell script (plugin + Python stdio bridge +
+ *  mcp_config.json + settings.json allow + optional hooks). Instance-independent; no-ops on
+ *  hosts without the `agy` CLI. */
+export async function buildAgySetupScript(hooks: boolean): Promise<string> {
+  return invoke('build_agy_setup_script', { hooks });
+}
+
 export async function checkFullDiskAccess(): Promise<boolean> {
   return invoke('check_full_disk_access');
 }

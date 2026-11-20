@@ -115,6 +115,8 @@ log "=== maiTerm deploy: $SRC -> $DEST ==="
 # writing its transcript to disk (chat-history loss). maiTerm also scrubs these at PTY
 # spawn (AGENT_ENV_MARKERS) as the real fix; keep the app process itself clean too.
 unset CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH CLAUDECODE MAITERM_VIA_MOD MAITERM_MOD_SESSION
+# Scrub Antigravity CLI / per-PTY maiTerm markers as well when deploying from an `agy` tab.
+unset ANTIGRAVITY_AGENT ANTIGRAVITY_CLI_ALIAS ANTIGRAVITY_EDITOR_APP_ROOT MAITERM_BIN MAITERM_PORT MAITERM_AUTH MAITERM_TAB_ID
 # Belt-and-suspenders: scrub the legacy env-var sentinel too, so a shell inside an app
 # launched by a PRE-argv build of this script stops propagating MAITERM_DEPLOY_DETACHED=1.
 unset MAITERM_DEPLOY_DETACHED

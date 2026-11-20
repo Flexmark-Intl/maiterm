@@ -96,12 +96,39 @@ const codex: RuntimeDescriptorTs = {
 };
 
 const gemini: RuntimeDescriptorTs = {
-  ...codex,
   runtime: 'gemini',
-  launch: 'gemini',
-  displayName: 'Gemini',
+  launch: 'agy',
+  displayName: 'Antigravity',
   sessionIdVar: 'geminiSessionId',
-  configHint: '~/.gemini/settings.json',
+  supportsFork: false,
+  toolStaleTimeoutMs: 15_000,
+  configHint: '~/.gemini/config/plugins/maiterm',
+  // Antigravity (`agy`) built-in tools use PascalCase args (`CommandLine`, `Path`, `Role`, `toolSummary`).
+  summarizeTool(toolName, toolInput) {
+    if (!toolInput) return undefined;
+    switch (toolName) {
+      case 'run_command': {
+        const summary = toolInput.toolSummary as string | undefined;
+        if (summary) return summary;
+        const cmd = toolInput.CommandLine as string | undefined;
+        if (!cmd) return undefined;
+        return cmd.length > 50 ? cmd.slice(0, 47) + '...' : cmd;
+      }
+      case 'read_file':
+      case 'edit_file':
+      case 'write_file': {
+        const fp = toolInput.Path as string | undefined;
+        if (!fp) return undefined;
+        return fp.split('/').pop() || fp;
+      }
+      case 'invoke_subagent':
+        return (toolInput.Role ?? toolInput.TypeName) as string | undefined;
+      case 'search_web':
+        return toolInput.query as string | undefined;
+      default:
+        return commonDetail(toolInput);
+    }
+  },
 };
 
 /** Resolve the frontend descriptor for a runtime (defaults to Claude). */
