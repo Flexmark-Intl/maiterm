@@ -1345,6 +1345,12 @@ pub fn build_codex_setup_script(remote_port: u16, auth: String, tab_id: String, 
     let hooks_py = CODEX_HOOKS_MERGE_PY;
 
     let mut lines: Vec<String> = Vec::new();
+    // Non-interactive sshd sessions have a minimal PATH that omits ~/.local/bin, Homebrew, and
+    // user npm/bun/volta shims where `codex` is commonly installed.
+    lines.push(
+        "PATH=\"$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.bun/bin:$HOME/.volta/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\""
+            .to_string(),
+    );
     // No-op cleanly on hosts without the Codex CLI. Use if/then/fi (NOT `|| exit`):
     // this script is also written into the INTERACTIVE PTY by the "Install MCP for
     // Current User" path, where `exit` would close the user's shell.
@@ -2359,6 +2365,8 @@ mod tests {
         assert!(ok, "bash -n rejected the generated script:\n{}\n--- stderr ---\n{}", script, stderr);
 
         // Spot-check the load-bearing pieces are present and pointed at the tunnel port.
+        assert!(script.contains("$HOME/.local/bin"), "augments non-interactive SSH PATH for codex");
+        assert!(script.contains("$HOME/.npm-global/bin"), "includes npm global bin on non-interactive SSH PATH");
         assert!(script.contains("if command -v codex >/dev/null 2>&1; then"));
         assert!(script.contains("fi"));
         assert!(script.contains("http://127.0.0.1:40123/mcp"), "config url uses tunnel port");

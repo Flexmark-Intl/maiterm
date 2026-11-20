@@ -47,8 +47,10 @@
 //! session reads `isSidechain: false`), and they live in the sidecar instead.
 
 use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+
+use crate::state::AgentRuntime;
 
 /// A delegation as the phone renders it. Field names are the wire contract.
 #[derive(Clone)]
@@ -424,11 +426,12 @@ const SIDECAR_STALE_MS: u64 = 2 * 60 * 60 * 1000;
 /// growing elapsed timer for six months.
 const NO_SIDECAR_STALE_MS: u64 = 12 * 60 * 60 * 1000;
 
-/// The roster for a Claude session id: transcript reconstruction plus each entry's progress line.
-/// `None` for a session with no locatable transcript. The REST path, which pays both halves.
-pub fn roster(session_id: &str) -> Option<Vec<Subagent>> {
-    let mut agents = roster_from_transcript(session_id)?;
-    refresh_progress(&mut agents, session_id);
+/// Runtime-dispatched delegation roster (Claude `Agent` and Antigravity `invoke_subagent`):
+/// transcript reconstruction plus each entry's progress line. `None` for a session with no
+/// locatable transcript. The REST path, which pays both halves.
+pub fn roster_for(rt: AgentRuntime, session_id: &str) -> Option<Vec<Subagent>> {
+    let mut agents = roster_from_transcript_for(rt, session_id)?;
+    refresh_progress_for(rt, &mut agents, session_id);
     Some(agents)
 }
 
@@ -436,13 +439,20 @@ pub fn roster(session_id: &str) -> Option<Vec<Subagent>> {
 /// tens of MB here. Split out so the live ticker can gate it on the parent transcript's mtime,
 /// which is sound for delegations and would not be for shells: a shell exiting appends nothing,
 /// but a subagent's launch AND its completion notification are both written to the parent.
-pub fn roster_from_transcript(session_id: &str) -> Option<Vec<Subagent>> {
+pub fn roster_from_transcript_for(rt: AgentRuntime, session_id: &str) -> Option<Vec<Subagent>> {
     // Re-derived only when the transcript changed (the REST path re-polls every 2 s).
     static MEMO: super::transcript::FileMemo<Vec<Subagent>> = std::sync::LazyLock::new(Default::default);
-    super::transcript::memo_by_transcript(&MEMO, session_id, false, || {
-        let lines = super::transcript::claude_lines(session_id, SUBAGENT_TAIL_BYTES)?;
-        Some(subagents_from_lines(&lines))
-    })
+    match rt {
+        AgentRuntime::Claude => super::transcript::memo_by_transcript_for(&MEMO, rt, session_id, false, || {
+            let lines = super::transcript::claude_lines(session_id, SUBAGENT_TAIL_BYTES)?;
+            Some(subagents_from_lines(&lines))
+        }),
+        AgentRuntime::Gemini => super::transcript::memo_by_transcript_for(&MEMO, rt, session_id, false, || {
+            let lines = super::transcript::agy_lines(session_id, SUBAGENT_TAIL_BYTES)?;
+            Some(agy_subagents_from_lines(&lines))
+        }),
+        AgentRuntime::Codex => None,
+    }
 }
 
 /// The CHEAP half — a 64 KB tail per RUNNING entry, so it costs nothing on the overwhelmingly
@@ -450,16 +460,303 @@ pub fn roster_from_transcript(session_id: &str) -> Option<Vec<Subagent>> {
 /// transcript hasn't moved: a subagent's progress goes to its own sidecar, so between launch and
 /// completion the parent is silent and the mtime gate would freeze the strip's status line for
 /// the entire run — the exact "one line that never changes" this feature exists to end.
-pub fn refresh_progress(agents: &mut [Subagent], session_id: &str) {
+pub fn refresh_progress_for(rt: AgentRuntime, agents: &mut [Subagent], session_id: &str) {
     if !agents.iter().any(|a| a.status == SubagentStatus::Running) {
         return;
     }
-    let Some(transcript) = super::transcript::claude_transcript_path(session_id) else { return };
-    let dir = sidecar_dir(&transcript, session_id);
     let now = super::now_ms();
-    for a in agents.iter_mut() {
-        attach_sidecar(a, &dir, now);
+    match rt {
+        AgentRuntime::Claude => {
+            let Some(transcript) = super::transcript::claude_transcript_path(session_id) else { return };
+            let dir = sidecar_dir(&transcript, session_id);
+            for a in agents.iter_mut() {
+                attach_sidecar(a, &dir, now);
+            }
+        }
+        AgentRuntime::Gemini => {
+            let Some(transcript) = super::transcript::agy_transcript_path(session_id) else { return };
+            // Local brain dir (e.g. ~/.gemini/antigravity-cli/brain); None for an SSH shadow file,
+            // in which case `attach_agy_sidecar` still runs the no-sidecar stale-settle check.
+            let brain = agy_brain_dir(&transcript);
+            for a in agents.iter_mut() {
+                attach_agy_sidecar(a, brain.as_deref(), now);
+            }
+        }
+        AgentRuntime::Codex => {}
     }
+}
+
+// ─── Antigravity (`agy`) delegation roster ────────────────────────────────────────────────
+
+fn agy_line_ts(v: &Value) -> u64 {
+    v.get("created_at")
+        .and_then(|t| t.as_str())
+        .map(super::transcript::rfc3339_to_ms)
+        .unwrap_or(0)
+        .max(0) as u64
+}
+
+/// Extract the `conversationId` from an `agy` `invoke_subagent` `GENERIC` ack:
+/// `Created the following subagent:\n{\n  "conversationId": "<uuid>", ...}`.
+fn parse_agy_subagent_ack(content: &str) -> Option<String> {
+    const MARKER: &str = "Created the following subagent:";
+    let after = content.split(MARKER).nth(1)?;
+    let brace = after.find('{')?;
+    let mut stream = serde_json::Deserializer::from_str(&after[brace..]).into_iter::<Value>();
+    let obj = stream.next()?.ok()?;
+    obj.get("conversationId")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Extract `(sender_id, body)` from an `agy` inter-agent `SYSTEM_MESSAGE`:
+/// `[Message] timestamp=... sender=<conversationId> priority=... content=<body>\n</SYSTEM_MESSAGE>`.
+fn parse_agy_subagent_message(content: &str) -> Option<(String, String)> {
+    const PREFIX: &str = "[Message] ";
+    let start = content.find(PREFIX)? + PREFIX.len();
+    let rest = &content[start..];
+    let sender_start = rest.find("sender=")? + "sender=".len();
+    let sender_rest = &rest[sender_start..];
+    let sender: String = sender_rest
+        .chars()
+        .take_while(|c| !c.is_whitespace())
+        .collect();
+    if sender.is_empty() {
+        return None;
+    }
+    let body_start = sender_rest.find("content=")? + "content=".len();
+    let mut body = &sender_rest[body_start..];
+    if let Some(end) = body.rfind("</SYSTEM_MESSAGE>") {
+        body = &body[..end];
+    }
+    Some((sender, body.trim().to_string()))
+}
+
+/// Parse an Antigravity (`agy`) parent transcript into the delegation roster, keyed by subagent
+/// `conversationId` and ordered by launch. Pure function over transcript lines — no I/O.
+pub fn agy_subagents_from_lines(lines: &[Value]) -> Vec<Subagent> {
+    // FIFO queue of launches from the current PLANNER_RESPONSE awaiting their GENERIC acks.
+    // `agy` has no tool_use_id in transcript_full.jsonl, and emits parallel tool-result GENERIC
+    // lines in call order; clearing on each new PLANNER_RESPONSE/USER_INPUT ensures a failed
+    // `invoke_subagent` never shifts pairing on a later turn.
+    let mut pending: VecDeque<(String, Option<String>, u64)> = VecDeque::new();
+    let mut agents: Vec<Subagent> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
+    let mut messaged_at: HashMap<String, u64> = HashMap::new();
+
+    for v in lines {
+        let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let ts = agy_line_ts(v);
+        match ty {
+            "USER_INPUT" => {
+                pending.clear();
+            }
+            "PLANNER_RESPONSE" => {
+                pending.clear();
+                let Some(calls) = v.get("tool_calls").and_then(|c| c.as_array()) else {
+                    continue;
+                };
+                for call in calls {
+                    let name = call.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    let args = call
+                        .get("args")
+                        .map(super::transcript::unquote_agy_args)
+                        .unwrap_or(Value::Null);
+                    match name {
+                        "invoke_subagent" => {
+                            let field = |k: &str| args.get(k).and_then(|x| x.as_str());
+                            let label = field("Role")
+                                .or_else(|| field("Prompt"))
+                                .map(|s| capped(s, 160));
+                            if let Some(label) = label {
+                                pending.push_back((
+                                    label,
+                                    field("TypeName").map(str::to_string),
+                                    ts,
+                                ));
+                            }
+                        }
+                        "send_message" => {
+                            let to = args.get("Recipient").and_then(|r| r.as_str());
+                            if let Some(t) = to.filter(|t| index.contains_key(*t)) {
+                                messaged_at.insert(t.to_string(), ts);
+                            }
+                            if let Some(&i) = to.and_then(|t| index.get(t)) {
+                                if agents[i].status != SubagentStatus::Running {
+                                    agents[i].status = SubagentStatus::Running;
+                                    agents[i].ended_at = None;
+                                    agents[i].started_at = ts;
+                                    agents[i].last_line = None;
+                                    agents[i].last_line_ts = None;
+                                }
+                            }
+                        }
+                        "manage_subagents" => {
+                            match args.get("Action").and_then(|a| a.as_str()) {
+                                Some("kill") => {
+                                    if let Some(ids) =
+                                        args.get("ConversationIds").and_then(|c| c.as_array())
+                                    {
+                                        for id in ids.iter().filter_map(|x| x.as_str()) {
+                                            if let Some(&i) = index.get(id) {
+                                                if agents[i].status == SubagentStatus::Running {
+                                                    agents[i].status = SubagentStatus::Failed;
+                                                    agents[i].ended_at = Some(ts);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Some("kill_all") => {
+                                    for a in agents.iter_mut() {
+                                        if a.status == SubagentStatus::Running {
+                                            a.status = SubagentStatus::Failed;
+                                            a.ended_at = Some(ts);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            "GENERIC" => {
+                let Some(content) = v.get("content").and_then(|c| c.as_str()) else {
+                    continue;
+                };
+                let Some(id) = parse_agy_subagent_ack(content) else {
+                    continue;
+                };
+                let Some((description, agent_type, started_at)) = pending.pop_front() else {
+                    continue;
+                };
+                if index.contains_key(&id) {
+                    continue;
+                }
+                index.insert(id.clone(), agents.len());
+                agents.push(Subagent {
+                    id,
+                    description,
+                    agent_type,
+                    status: SubagentStatus::Running,
+                    started_at,
+                    ended_at: None,
+                    last_line: None,
+                    last_line_ts: None,
+                });
+            }
+            "SYSTEM_MESSAGE" => {
+                if v.get("source").and_then(|s| s.as_str()) == Some("SYSTEM_SDK") {
+                    continue;
+                }
+                let Some(content) = v.get("content").and_then(|c| c.as_str()) else {
+                    continue;
+                };
+                let Some((sender, body)) = parse_agy_subagent_message(content) else {
+                    continue;
+                };
+                let Some(&i) = index.get(&sender) else {
+                    continue;
+                };
+                if ts < messaged_at.get(&sender).copied().unwrap_or(0) {
+                    continue;
+                }
+                agents[i].status = SubagentStatus::Done;
+                agents[i].ended_at = Some(ts);
+                if let Some(line) = first_meaningful_line(&body) {
+                    agents[i].last_line = Some(line);
+                    agents[i].last_line_ts = Some(ts);
+                }
+            }
+            _ => {}
+        }
+    }
+    agents
+}
+
+/// Derive `~/.gemini/antigravity-cli/brain` from a local parent transcript path
+/// (`…/brain/<session_id>/.system_generated/logs/transcript[_full].jsonl`).
+/// Returns `None` for SSH mirror shadow paths (`<data>/mailink-mirror/<sid>.jsonl`) so a remote
+/// session degrades cleanly to lifecycle-only without probing unrelated local brain dirs.
+fn agy_brain_dir(transcript: &Path) -> Option<PathBuf> {
+    let logs = transcript.parent()?;
+    if logs.file_name()?.to_str()? != "logs" {
+        return None;
+    }
+    let sys_gen = logs.parent()?;
+    if sys_gen.file_name()?.to_str()? != ".system_generated" {
+        return None;
+    }
+    let session_dir = sys_gen.parent()?;
+    Some(session_dir.parent()?.to_path_buf())
+}
+
+fn agy_sidecar_path(brain_dir: &Path, agent_id: &str) -> PathBuf {
+    let logs = brain_dir
+        .join(agent_id)
+        .join(".system_generated")
+        .join("logs");
+    let full = logs.join("transcript_full.jsonl");
+    if full.is_file() {
+        full
+    } else {
+        logs.join("transcript.jsonl")
+    }
+}
+
+fn attach_agy_sidecar(agent: &mut Subagent, brain_dir: Option<&Path>, now: u64) {
+    if agent.status != SubagentStatus::Running {
+        return;
+    }
+    let path = brain_dir.map(|b| agy_sidecar_path(b, &agent.id));
+    let mtime = path.as_ref().and_then(|p| {
+        std::fs::metadata(p).ok().and_then(|m| {
+            m.modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+        })
+    });
+    let verdict = sidecar_verdict(agent.started_at, mtime, now);
+    if reads_progress(&verdict) {
+        if let Some(p) = path.as_ref() {
+            if let Some((line, ts)) = last_agy_assistant_line(p, agent.started_at) {
+                agent.last_line = Some(line);
+                agent.last_line_ts = Some(ts);
+            }
+        }
+    }
+    if let SidecarVerdict::Ended(at) = verdict {
+        agent.status = SubagentStatus::Done;
+        agent.ended_at = at;
+    }
+}
+
+/// The `agy` subagent's most recent assistant text (`PLANNER_RESPONSE.content`, skipping
+/// `thinking`) since `started_at`.
+fn last_agy_assistant_line(path: &PathBuf, started_at: u64) -> Option<(String, u64)> {
+    let body = super::transcript::read_tail(path, SIDECAR_TAIL_BYTES)?;
+    for line in body.lines().rev() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if v.get("type").and_then(|t| t.as_str()) != Some("PLANNER_RESPONSE") {
+            continue;
+        }
+        let ts = agy_line_ts(&v);
+        if ts < started_at {
+            return None;
+        }
+        let Some(text) = v.get("content").and_then(|c| c.as_str()) else {
+            continue;
+        };
+        if let Some(t) = first_meaningful_line(text) {
+            return Some((t, ts));
+        }
+    }
+    None
 }
 
 /// `<projects>/<slug>/<session_id>/subagents/`, derived from the located parent transcript.
@@ -1039,6 +1336,146 @@ mod tests {
             a.to_json().get("lastLine").is_none(),
             "an undated progress line must not ship — the phone would read it as current"
         );
+    }
+
+    // ─── Antigravity (`agy`) delegation roster tests ───────────────────────────────────
+
+    fn agy_launch(calls: &[(&str, &str)], ts: &str) -> Value {
+        let tool_calls: Vec<Value> = calls
+            .iter()
+            .map(|(role, kind)| {
+                json!({
+                    "name": "invoke_subagent",
+                    "args": { "Role": role, "TypeName": kind, "Prompt": "Review it." }
+                })
+            })
+            .collect();
+        json!({ "type": "PLANNER_RESPONSE", "source": "MODEL", "created_at": ts, "tool_calls": tool_calls })
+    }
+
+    fn agy_ack(conv_id: &str, ts: &str) -> Value {
+        json!({
+            "type": "GENERIC",
+            "source": "MODEL",
+            "created_at": ts,
+            "content": format!(
+                "Created At: 2026-11-20T14:04:39-06:00\nCreated the following subagent:\n{{\n  \"conversationId\":  \"{conv_id}\",\n  \"logAbsoluteUri\":  \"file:///Users/x/.gemini/antigravity-cli/brain/{conv_id}/.system_generated/logs/transcript.jsonl\"\n}}\nThe subagent will send you a message when it has completed its task."
+            )
+        })
+    }
+
+    fn agy_reply(conv_id: &str, body: &str, ts: &str) -> Value {
+        json!({
+            "type": "SYSTEM_MESSAGE",
+            "source": "SYSTEM",
+            "created_at": ts,
+            "content": format!(
+                "The following is a <SYSTEM_MESSAGE> not actually sent by the user.\n\n<SYSTEM_MESSAGE>\n[Message] timestamp={ts} sender={conv_id} priority=MESSAGE_PRIORITY_HIGH content={body}\n</SYSTEM_MESSAGE>"
+            )
+        })
+    }
+
+    #[test]
+    fn agy_parallel_subagents_lifecycle_reopen_and_kill() {
+        let lines = vec![
+            agy_launch(
+                &[
+                    ("Reviewer: Registration, MCP & SSH", "research"),
+                    ("Reviewer: Hooks, State & TUI Guards", "research"),
+                ],
+                "2026-11-20T20:04:25Z",
+            ),
+            // Unrelated tool output between acks must not disturb FIFO pairing.
+            json!({ "type": "GENERIC", "source": "MODEL", "created_at": "2026-11-20T20:04:30Z", "content": "Showing lines 1-20" }),
+            agy_ack("a870d3c2-3722-4e4b-88f7-bee28341f52e", "2026-11-20T20:04:39Z"),
+            agy_ack("2b4baa5e-4dd1-4f18-abb4-41c33e95bb88", "2026-11-20T20:04:43Z"),
+            // Hook injection SYSTEM_SDK message is ignored.
+            json!({ "type": "SYSTEM_MESSAGE", "source": "SYSTEM_SDK", "created_at": "2026-11-20T20:04:50Z", "content": "<SYSTEM_MESSAGE>\nHook text\n</SYSTEM_MESSAGE>" }),
+            // Background command task completion (unknown sender) is ignored.
+            agy_reply("parent-conv/task-918", "Command exited with code 0.", "2026-11-20T20:05:00Z"),
+            // First subagent finishes.
+            agy_reply(
+                "a870d3c2-3722-4e4b-88f7-bee28341f52e",
+                "5 Important, 3 Nit, 1 Pre-existing\n\n### Important",
+                "2026-11-20T20:13:15Z",
+            ),
+        ];
+
+        let agents = agy_subagents_from_lines(&lines);
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0].id, "a870d3c2-3722-4e4b-88f7-bee28341f52e");
+        assert_eq!(agents[0].description, "Reviewer: Registration, MCP & SSH");
+        assert_eq!(agents[0].agent_type.as_deref(), Some("research"));
+        assert!(agents[0].status == SubagentStatus::Done);
+        assert_eq!(agents[0].last_line.as_deref(), Some("5 Important, 3 Nit, 1 Pre-existing"));
+        assert!(agents[0].last_line_ts.is_some());
+
+        assert_eq!(agents[1].id, "2b4baa5e-4dd1-4f18-abb4-41c33e95bb88");
+        assert_eq!(agents[1].description, "Reviewer: Hooks, State & TUI Guards");
+        assert!(agents[1].status == SubagentStatus::Running);
+        assert!(agents[1].ended_at.is_none());
+
+        // send_message reopens a finished subagent, and manage_subagents kill fails a running one.
+        let mut extended = lines.clone();
+        extended.push(json!({
+            "type": "PLANNER_RESPONSE",
+            "created_at": "2026-11-20T20:15:00Z",
+            "tool_calls": [
+                { "name": "send_message", "args": { "Recipient": "\"a870d3c2-3722-4e4b-88f7-bee28341f52e\"", "Message": "Double check line 42." } },
+                { "name": "manage_subagents", "args": { "Action": "kill", "ConversationIds": ["2b4baa5e-4dd1-4f18-abb4-41c33e95bb88"] } }
+            ]
+        }));
+        let after = agy_subagents_from_lines(&extended);
+        assert!(after[0].status == SubagentStatus::Running, "send_message reopens finished subagent");
+        assert!(after[0].last_line.is_none(), "old completion summary cleared on reopen");
+        assert!(after[1].status == SubagentStatus::Failed, "killed subagent marked failed");
+        assert!(after[1].ended_at.is_some());
+    }
+
+    #[test]
+    fn agy_failed_launch_does_not_shift_later_turns_and_sidecar_enforces_floor() {
+        // Turn 1 fails to launch (no GENERIC ack); Turn 2 succeeds and keeps its own label.
+        let lines = vec![
+            agy_launch(&[("Failed launch", "unknown")], "2026-11-20T20:00:00Z"),
+            json!({ "type": "GENERIC", "created_at": "2026-11-20T20:00:01Z", "content": "Error: unknown subagent type" }),
+            agy_launch(&[("Real reviewer", "research")], "2026-11-20T20:01:00Z"),
+            agy_ack("conv-real-2", "2026-11-20T20:01:02Z"),
+        ];
+        let agents = agy_subagents_from_lines(&lines);
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].id, "conv-real-2");
+        assert_eq!(agents[0].description, "Real reviewer");
+
+        // Brain dir derivation works on local brain paths and refuses SSH shadow paths.
+        let local = PathBuf::from("/Users/x/.gemini/antigravity-cli/brain/parent-1/.system_generated/logs/transcript_full.jsonl");
+        assert_eq!(agy_brain_dir(&local), Some(PathBuf::from("/Users/x/.gemini/antigravity-cli/brain")));
+        let shadow = PathBuf::from("/Users/x/Library/Application Support/com.maisoft.aiterm/mailink-mirror/parent-1.jsonl");
+        assert_eq!(agy_brain_dir(&shadow), None);
+
+        // Sidecar progress skips thinking-only turns and enforces started_at floor.
+        let dir = std::env::temp_dir().join(format!("maiterm-agy-subagent-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sidecar = dir.join("transcript_full.jsonl");
+        std::fs::write(
+            &sidecar,
+            format!(
+                "{}\n{}\n",
+                json!({ "type": "PLANNER_RESPONSE", "created_at": "2026-11-20T20:05:00Z", "content": "## Findings\nFirst pass checked." }),
+                json!({ "type": "PLANNER_RESPONSE", "created_at": "2026-11-20T20:10:30Z", "thinking": "internal thoughts only" }),
+            ),
+        )
+        .unwrap();
+        let run1 = crate::mailink::transcript::rfc3339_to_ms("2026-11-20T20:00:00Z") as u64;
+        let run2 = crate::mailink::transcript::rfc3339_to_ms("2026-11-20T20:10:00Z") as u64;
+        assert_eq!(
+            last_agy_assistant_line(&sidecar, run1).map(|(l, _)| l),
+            Some("First pass checked.".to_string())
+        );
+        assert!(
+            last_agy_assistant_line(&sidecar, run2).is_none(),
+            "thinking-only resumed run must not leak previous run's content"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

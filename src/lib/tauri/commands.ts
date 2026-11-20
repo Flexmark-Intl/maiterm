@@ -575,7 +575,7 @@ export async function getAgentLivenessBatch(ptyIds: string[]): Promise<Record<st
 
 /** Per-tab agent facts for the Overlord engine (docs/overlord.md §5) — cheap cached signals
  *  from the transcript tail-facts cache. All fields optional: a tab may resolve a session
- *  before its first assistant turn (no meta yet), and Gemini has no transcript source. */
+ *  before its first assistant turn (no meta yet). */
 export interface OverlordTabFacts {
   runtime: 'claude' | 'codex' | 'gemini';
   session_id: string;
@@ -585,7 +585,7 @@ export interface OverlordTabFacts {
   model?: string;
   /** Unix-ms timestamp of the session's last REAL turn. */
   last_turn_ts?: number;
-  /** Unix-ms of the newest `git commit` Bash tool call (Claude-only today). */
+  /** Unix-ms of the newest `git commit` tool call (Claude and Antigravity). */
   last_commit_ts?: number;
   /** Unix-ms of the newest compaction boundary (isCompactSummary / compact_boundary). */
   last_compact_ts?: number;

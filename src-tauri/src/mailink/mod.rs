@@ -1661,7 +1661,7 @@ fn wake_detail(reason: &str) -> &'static str {
     match reason {
         "no-pty" => "This tab has no live terminal — resume its workspace first.",
         "no-agent" => "This tab's agent has exited and it has no resume command to restart it.",
-        "trust_dialog" => "Claude is asking whether to trust this folder. Answer that first.",
+        "trust_dialog" => "The agent is asking whether to trust this folder. Answer that first.",
         "hive_done" => "This Hive is done. Send a message to wake it.",
         "hive" => "A Hive agent starts through its Hive: its queen restarts a worker, and a queen comes back when its Hive is resumed.",
         _ => "The agent is still starting up — try again in a moment.",
@@ -2530,16 +2530,20 @@ fn shell_roster(app: &AppState, tab_id: &str, exact: bool) -> Vec<shells::AgentS
 
 /// A tab's delegation roster (mailink/subagents.rs), or empty when it has none.
 ///
-/// Claude-only, but — unlike `shell_roster` — NOT local-only. A background shell is a remote
-/// PROCESS whose liveness the local process table can't see, so an SSH tab reports none; a
-/// subagent's whole lifecycle is written into the parent transcript, which the mirror shadows
-/// (mirror.rs). So an SSH tab gets correct start/finish here and merely loses `lastLine`, whose
-/// sidecar stays on the remote host. There is no Stop button to be wrong about.
+/// Supported for Claude (`Agent`) and Antigravity (`invoke_subagent`), and — unlike `shell_roster`
+/// — NOT local-only. A background shell is a remote PROCESS whose liveness the local process table
+/// can't see, so an SSH tab reports none; a subagent's whole lifecycle is written into the parent
+/// transcript, which the mirror shadows (mirror.rs). So an SSH tab gets correct start/finish here
+/// and merely loses `lastLine`, whose sidecar stays on the remote host. There is no Stop button to
+/// be wrong about.
 fn subagent_roster(app: &AppState, tab_id: &str) -> Vec<subagents::Subagent> {
-    let Some((AgentRuntime::Claude, sid)) = resolved_session_for_tab(app, tab_id) else {
+    let Some((rt, sid)) = resolved_session_for_tab(app, tab_id) else {
         return Vec::new();
     };
-    subagents::roster(&sid).unwrap_or_default()
+    if !matches!(rt, AgentRuntime::Claude | AgentRuntime::Gemini) {
+        return Vec::new();
+    }
+    subagents::roster_for(rt, &sid).unwrap_or_default()
 }
 
 /// Whether the tab rides a live SSH/mosh session (its agent runs on another host).
@@ -3920,6 +3924,8 @@ async fn stream_new_messages(
             // Background shells: also outside the transcript-mtime gate — a shell EXITING appends
             // nothing to the transcript, and that transition is exactly what the strip must show.
             stream_shells_if_changed(socket, app, &t.tab_id, shell_keys).await?;
+        }
+        if matches!(rt, AgentRuntime::Claude | AgentRuntime::Gemini) {
             // Delegations: outside the mtime gate for the same reason, but only HALF of it is —
             // the roster's transcript parse is gated internally, while its progress lines come
             // from per-subagent sidecars the parent transcript never sees move.
@@ -3930,7 +3936,7 @@ async fn stream_new_messages(
             // a tab already being streamed — see `stream_subagents_if_changed`, where losing that
             // distinction removed the stale settle from the one case it exists for.
             let has_pty = pty_for_tab(app, &t.tab_id).is_some();
-            stream_subagents_if_changed(socket, &t.tab_id, &sid, has_pty, subagent_stream, &mut cold_budget).await?;
+            stream_subagents_if_changed(socket, &t.tab_id, rt, &sid, has_pty, subagent_stream, &mut cold_budget).await?;
         }
         // mtime gate: an unchanged transcript means no new turns, so skip the tail re-parse.
         if let Some(mt) = transcript::mtime_for(rt, &sid) {
@@ -4004,6 +4010,7 @@ const SUBAGENT_COLD_PARSES_PER_TICK: usize = 3;
 async fn stream_subagents_if_changed(
     socket: &mut WebSocket,
     tab_id: &str,
+    rt: AgentRuntime,
     session_id: &str,
     has_live_pty: bool,
     st: &mut SubagentStream,
@@ -4037,8 +4044,8 @@ async fn stream_subagents_if_changed(
     // quiet. The roster is then refreshed from the sidecars every tick, which is what keeps a
     // running delegation's progress line live while the parent transcript sits still.
     let roster = st.rosters.entry(tab_id.to_string()).or_default();
-    let previous = std::mem::replace(roster, subagents::roster_from_transcript(session_id).unwrap_or_default());
-    subagents::refresh_progress(roster, session_id);
+    let previous = std::mem::replace(roster, subagents::roster_from_transcript_for(rt, session_id).unwrap_or_default());
+    subagents::refresh_progress_for(rt, roster, session_id);
     // A sidecar read that finds no line (the tail is one huge tool_result, say) leaves the fresh
     // copy's `last_line` empty; the line shown last tick for the same delegation still stands.
     for a in roster.iter_mut().filter(|a| a.last_line.is_none()) {
@@ -6050,11 +6057,11 @@ fn display_model(model_id: &str) -> String {
 
 /// Per-agent telemetry (mailink-protocol §12.1 `meta`): model display name + context gauge, read
 /// from the session's transcript file — Claude JSONL `message.usage` (the SessionStart hook's
-/// model is often null), or a Codex rollout's `token_count`/`turn_context` (which state the
-/// window and model directly). Live/persisted session id so it also resolves during the
-/// resume-before-init window. `effort` (Claude-only reasoning level) rides the same assistant
-/// JSONL line as the usage block. None for Gemini tabs (no transcript source) or before the
-/// first assistant turn.
+/// model is often null), a Codex rollout's `token_count`/`turn_context` (which state the window
+/// and model directly), or an Antigravity (`agy`) `PLANNER_RESPONSE`'s `input_tokens` +
+/// `cache_read_tokens`. Live/persisted session id so it also resolves during the
+/// resume-before-init window. `effort` rides the Claude assistant JSONL line or Antigravity's
+/// model id suffix. None before the first assistant turn.
 fn build_meta(app: &AppState, tab_id: &str) -> Option<Value> {
     let (rt, sid) = resolved_session_for_tab(app, tab_id)?;
     let meta = transcript::meta_for(rt, &sid)?;
@@ -6074,8 +6081,8 @@ fn build_meta(app: &AppState, tab_id: &str) -> Option<Value> {
     if !model_id.is_empty() {
         m["model"] = json!(display_model_for(rt, model_id));
     }
-    // Reasoning-effort level (Claude-only; low/medium/high/xhigh/max) read from the transcript's
-    // top-level `effort` field. Optional — omitted for effort-less models and non-Claude runtimes.
+    // Reasoning-effort level (low/medium/high/xhigh/max) read from Claude's transcript `effort`
+    // field or Antigravity's model id suffix. Optional — omitted for effort-less models.
     if let Some(effort) = meta.effort {
         m["effort"] = json!(effort);
     }
@@ -6198,8 +6205,8 @@ fn prompt_matches(prompt: &str, turn: &str) -> bool {
 /// NOTE `last_turn_ts` is absent for a tab whose transcript this machine cannot read.
 /// Callers must treat its absence as "unknown", never as "no turns". For an SSH tab the
 /// JSONL lives on the remote host, and the mirror shadows it whenever Overlord or maiLink is
-/// enabled — but only for Claude, and only while the tab's bridge tunnel is up. A Codex or
-/// Gemini SSH tab, or one whose bridge is down, still has no facts at all.
+/// enabled — for Claude and Antigravity (`agy`), while the tab's bridge tunnel is up. A Codex
+/// SSH tab, or one whose bridge is down, still has no facts at all.
 pub(crate) fn overlord_tab_facts(app: &AppState, tab_id: &str) -> Option<Value> {
     let (rt, sid) = resolved_session_for_tab(app, tab_id)?;
     let mut v = json!({
@@ -6269,8 +6276,8 @@ pub(crate) fn overlord_tab_facts(app: &AppState, tab_id: &str) -> Option<Value> 
 
 /// tab_id → scrollback `updated_at` in unix ms (one DB read). SQLite stores `datetime('now')` as
 /// `YYYY-MM-DD HH:MM:SS` UTC; normalize to RFC3339 (`T` + `Z`) for the shared transcript parser.
-/// Used as the last-activity fallback for tabs without a Claude transcript (Codex/Gemini, or a
-/// Claude tab before its first turn).
+/// Used as the last-activity fallback for tabs without a transcript yet (Codex, or a Claude /
+/// Antigravity tab before its first turn).
 fn scrollback_times(app: &AppState) -> HashMap<String, u64> {
     let mut out = HashMap::new();
     if let Ok(rows) = app.scrollback_db.tab_times() {

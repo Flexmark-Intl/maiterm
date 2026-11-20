@@ -5,19 +5,22 @@
 //! as terminal chrome in the phone's GFM renderer. Instead we read each turn's **source markdown**
 //! straight from the agent's session transcript (the actual output, pre-TUI-render).
 //!
-//! Two sources, dispatched by runtime (`turns_for` / `meta_for` / `mtime_for` /
+//! Three sources, dispatched by runtime (`turns_for` / `meta_for` / `mtime_for` /
 //! `last_turn_ts_for`):
 //!   * **Claude** — `~/.claude/projects/*/<session_id>.jsonl`, located by the unique session id.
 //!   * **Codex** — `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<session_id>.jsonl` (codex-rs
 //!     appends to the same rollout on resume, so the path is stable per session id).
+//!   * **Antigravity (`agy`, `AgentRuntime::Gemini`)** —
+//!     `~/.gemini/antigravity-cli/brain/<session_id>/.system_generated/logs/transcript_full.jsonl`
+//!     (falling back to `transcript.jsonl`, or the SSH mirror shadow).
 //!
 //! Each maiLink message is `{msg_id, role, text, ts}` where role is the frozen contract set
 //! `agent | user | system | tool`:
 //!   - assistant text            → role "agent" (the markdown that lights up code fences/lists)
 //!   - tool calls                → role "tool", a slim one-line marker (e.g. `Bash(rm …)`)
 //!   - genuine human messages    → role "user"
-//! Thinking/reasoning blocks and tool outputs are skipped (private / noisy). Gemini has no
-//! transcript source yet; callers fall back to `recent_text()` when nothing resolves.
+//! Thinking/reasoning blocks and tool outputs are skipped (private / noisy). Callers fall back to
+//! `recent_text()` when nothing resolves.
 
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -424,7 +427,7 @@ pub(crate) fn claude_transcript_path(session_id: &str) -> Option<PathBuf> {
 /// Does this session's transcript live on THIS machine? A session id recorded over ssh names a
 /// remote session, and resuming it in a local shell would be the wrong machine
 /// (docs/follow-ups.md §6.2). A mirrored remote transcript doesn't count: it is a local copy of a
-/// remote session. Gemini has no transcript maiTerm can find, so it is never "local" here.
+/// remote session.
 pub(crate) fn session_is_local(runtime: &str, session_id: &str) -> bool {
     match runtime {
         "claude" => locate_jsonl(session_id)
@@ -438,11 +441,25 @@ pub(crate) fn session_is_local(runtime: &str, session_id: &str) -> bool {
 
 /// Parsed transcript lines from the last `max_bytes` of a Claude session's JSONL, oldest first.
 /// For consumers that need the raw entries rather than distilled turns (the background-shell
-/// roster). A truncated leading line simply fails to parse and is skipped, as everywhere else.
+/// roster and delegation roster). A truncated leading line simply fails to parse and is skipped,
+/// as everywhere else.
 pub(crate) fn claude_lines(session_id: &str, max_bytes: u64) -> Option<Vec<Value>> {
     let path = locate_jsonl(session_id)?;
     let body = read_tail(&path, max_bytes)?;
     Some(body.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).collect())
+}
+
+/// Parsed transcript lines from the last `max_bytes` of an Antigravity (`agy`) session's JSONL,
+/// oldest first.
+pub(crate) fn agy_lines(session_id: &str, max_bytes: u64) -> Option<Vec<Value>> {
+    let path = locate_agy_jsonl(session_id)?;
+    let body = read_tail(&path, max_bytes)?;
+    Some(body.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).collect())
+}
+
+/// Located Antigravity (`agy`) transcript path (local brain or SSH mirror shadow).
+pub(crate) fn agy_transcript_path(session_id: &str) -> Option<PathBuf> {
+    locate_agy_jsonl(session_id)
 }
 
 fn turns_for_session(session_id: &str, limit: usize, tools: ToolRender) -> Option<Vec<Value>> {
@@ -605,7 +622,22 @@ pub(crate) fn memo_by_transcript<T: Clone>(
     exact: bool,
     compute: impl FnOnce() -> Option<T>,
 ) -> Option<T> {
-    let Some(path) = locate_jsonl(session_id) else { return compute() };
+    memo_by_transcript_for(memo, AgentRuntime::Claude, session_id, exact, compute)
+}
+
+pub(crate) fn memo_by_transcript_for<T: Clone>(
+    memo: &FileMemo<T>,
+    rt: AgentRuntime,
+    session_id: &str,
+    exact: bool,
+    compute: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+    let path = match rt {
+        AgentRuntime::Claude => locate_jsonl(session_id),
+        AgentRuntime::Codex => locate_codex_jsonl(session_id),
+        AgentRuntime::Gemini => locate_agy_jsonl(session_id),
+    };
+    let Some(path) = path else { return compute() };
     let Ok(md) = std::fs::metadata(&path) else { return compute() };
     let mtime = md.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64);
     let key = (md.len(), mtime);
@@ -1149,7 +1181,8 @@ pub fn claude_todo_store(session_id: &str) -> Option<Value> {
 
 /// Overlord signals from a session's transcript tail (docs/overlord.md §5): commit
 /// detection + the TodoWrite mirror. Served from the same (mtime,len)-gated cache as the
-/// other tail facts. Claude-only today — Codex/Gemini return all-None fields.
+/// other tail facts. Claude supplies all fields; Antigravity (`agy`) supplies commit detection
+/// (`last_commit_ts`); Codex returns all-None fields.
 pub struct OverlordTailFacts {
     pub last_commit_ts: Option<u64>,
     pub todos: Option<Value>,
@@ -1888,9 +1921,9 @@ fn extract_agy_user_request(raw: &str) -> &str {
 }
 
 /// `agy` transcript `tool_calls[].args` frequently stores string values as JSON-encoded literals
-/// (e.g. `"\"/repo/src/lib.rs\""` or `"{\"a\":1}"`). Unquote them so `compact_tool_arg` and
-/// `peer_send_turn` see clean strings/objects.
-fn unquote_agy_args(args: &Value) -> Value {
+/// (e.g. `"\"/repo/src/lib.rs\""` or `"{\"a\":1}"`). Unquote them so `compact_tool_arg`,
+/// `peer_send_turn`, and `subagents` see clean strings/objects.
+pub(crate) fn unquote_agy_args(args: &Value) -> Value {
     let Some(obj) = args.as_object() else {
         return args.clone();
     };

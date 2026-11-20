@@ -545,9 +545,12 @@ pub struct Collisions {
 /// from a copy read before one of them would drop it.
 fn edit_json(path: &Path, mut f: impl FnMut(&mut Value) -> Applied) -> Result<Applied, String> {
     let _serial = crate::util::json_file::write_lock();
+    // Preserve symlinked dotfile configs (e.g. ~/.claude.json or ~/.gemini/config/mcp_config.json
+    // symlinked into a dotfiles repo) by writing through the canonical target.
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     for _ in 0..5 {
-        let before = crate::util::json_file::stamp(path);
-        let raw = match std::fs::read_to_string(path) {
+        let before = crate::util::json_file::stamp(&target);
+        let raw = match std::fs::read_to_string(&target) {
             Ok(r) => Some(r),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(format!("cannot read: {e}")),
@@ -565,7 +568,7 @@ fn edit_json(path: &Path, mut f: impl FnMut(&mut Value) -> Applied) -> Result<Ap
             root.as_object_mut().map(|o| o.remove("mcpServers"));
         }
         let rendered = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-        if crate::util::json_file::replace_if_unchanged(path, before, rendered.as_bytes()).map_err(|e| format!("cannot write: {e}"))? {
+        if crate::util::json_file::replace_if_unchanged(&target, before, rendered.as_bytes()).map_err(|e| format!("cannot write: {e}"))? {
             return Ok(applied);
         }
     }
@@ -931,5 +934,30 @@ mod tests {
             agy_duplicates(&root, "https://mcp.linear.app/mcp/"),
             vec![format!("Antigravity: {}", entry_name("linear"))]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn edit_json_preserves_symlinked_config() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!("maiterm-proxy-symlink-{}", uuid::Uuid::new_v4()));
+        let dotfiles = dir.join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let real = dotfiles.join("mcp_config.json");
+        let link = dir.join("mcp_config.json");
+        std::fs::write(&real, r#"{"mcpServers":{"native":{"command":"x"}}}"#).unwrap();
+        symlink(&real, &link).unwrap();
+
+        let wrapper = Path::new("/tmp/mcp-stdio.sh");
+        let ours_not = (entry_name("notion"), agy_entry_with_wrapper(wrapper, "notion"));
+        let applied = edit_json(&link, |root| apply_agy(root, &[ours_not.clone()])).unwrap();
+        assert!(applied.changed);
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&real).unwrap()).unwrap();
+        assert!(after["mcpServers"][entry_name("notion")].is_object());
+        assert_eq!(after["mcpServers"]["native"]["command"], "x");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
