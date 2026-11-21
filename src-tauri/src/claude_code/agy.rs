@@ -52,17 +52,17 @@ const AGY_AGENTS_MD: &str = r#"# maiTerm Terminal Integration
 You are running inside a **maiTerm** terminal tab. Your MCP server is **`maiterm`**.
 
 - **Automatic tab identity:** Every `maiterm` tool call automatically carries your tab ID (`$MAITERM_TAB_ID`). Do **not** call `initSession` at startup; call it only if a tool answers that your tab is unknown or when the user asks for `/maiterm init`.
-- **Decision / action cards (maiTerm Tasks):** A maiTerm "decision card" or "action card" is a task created via **`maiterm/createTasks`** with a **`blocker`** object (or updated via `maiterm/updateTasks`). Do not also ask the same question with `ask_question`.
-  - Decision card: `createTasks({ tasks: [{ title: "...", status: "in_progress", blocker: { kind: "decision", question: "...", options: ["Option A", "Option B"], context: "..." } }] })`
-  - Multi-pick decision: add `pick: "many"` (with `options`).
-  - Action card (human runs a command): `blocker: { kind: "action", question: "...", command: "...", context: "..." }`
-  - Other task tools: `listTasks`, `updateTasks`, `deleteTasks`.
-- **Overlord supervision:** If your SessionStart priming mentions an Overlord, call `maiterm/replyToOverlord({ kind: "ready" })` (and `kind: "ack"` / `"needs_human"` when appropriate).
-- **Notes & workspace UI:** `getTabNotes`, `setTabNotes`, `editTabNotes`, `openNotesPanel`, `listWorkspaceNotes`, `readWorkspaceNote`, `writeWorkspaceNote`, `openFile`, `showDiff` (`ref: "@turn"` or git ref), `listWorkspaces`, `getActiveTab`, `switchTab`, `sendNotification`, `setMuted`.
-- **Mesh / Agent Bridge:** `listBridgedPeers`, `sendToBridgedAgent`, `getBridgedAgent`, `listTopics`, `startTopic`, `completeTopic`.
-- **Workspace Stack (dev servers, databases, watchers):** ALWAYS check **`maiterm/listStack({})`** *before* running a dev server, database, or background watcher in the shell — maiTerm may already manage it as a service. Start/inspect via `startService({ service })`, `restartService({ service })`, `stopService({ service })`, `waitForService({ service, timeout })`, `getServiceOutput({ service, lines })`.
-- **Follow-ups:** `createFollowUp`, `listFollowUps`, `cancelFollowUp`.
-- **Browser Link (linked Chrome tabs):** `browserStatus`, `browserSnapshot`, `browserClick`, `browserType`, `browserConsole`, `browserNetwork`, `browserScreenshot`.
+- **Workspace Stack (dev servers, databases, watchers):** ALWAYS check **`maiterm/listStack({})`** *before* running a dev server, database, or background watcher in the shell — maiTerm may already manage it as a service.
+  - Manage services: `listStack({})`, `startService({ service, on? })`, `restartService({ service, on? })`, `stopService({ service, on? })`, `waitForService({ service, timeout?, on? })`, `getServiceOutput({ service, lines?, on? })`, `createService({ name, command, cwd?, ready_pattern?, auto_start?, restart? })`, `updateService({ service, url?, port?, ready?, command?, note? })`.
+- **Tasks & decision/action cards:** A maiTerm "decision card" or "action card" is a task with a **`blocker`** object (via `createTasks` or `updateTasks`). Do not also ask the same question with `ask_question`.
+  - Decision card: `createTasks({ workstream?, tasks: [{ title: "...", blocker: { kind: "decision", question: "...", options: [{ label: "Option A", detail: "...", recommended: true }, { label: "Option B" }], context: "..." } }] })` (add `pick: "many"` for multi-select).
+  - Action card (human runs a command): `blocker: { kind: "action", question: "...", command: "...", context: "...", run_in?: "peer name" }`.
+  - Task tools: `createTasks({ tasks, workstream? })` (`status`: `"backlog"|"todo"|"active"|"blocked"|"review"|"done"`), `listTasks({ scope?: "tab"|"workspace", status?, ready?, limit? })`, `updateTasks({ updates: [{ id, status?, note?, detail?, blocker?, assign_to?, block_on?, unblock_from? }] })`, `deleteTasks({ ids?, workstreams? })`.
+- **Overlord & review:** If priming mentions an Overlord, call `replyToOverlord({ kind: "ready"|"ack"|"status"|"escalate", state: "working"|"blocked"|"done"|"idle", summary: "...", task?, next?, blockers?, needs_human? })`. After non-trivial commits, call `getReviewBrief({ repo?, head? })`.
+- **Notes & workspace UI:** `getTabNotes({})`, `setTabNotes({ notes, mode?: "replace"|"append" })`, `editTabNotes({ old_string, new_string } | { edits })`, `openNotesPanel({ open? })`, `listWorkspaceNotes({ workspaceId? })`, `readWorkspaceNote({ noteId, workspaceId? })`, `writeWorkspaceNote({ content, noteId?, mode?, workspaceId? })`, `openFile({ filePath, startLine?, endLine? })`, `showDiff({ filePath, ref?: "@turn"|"@session"|"<git-ref>" })`, `listWorkspaces({ windowId? })`, `getActiveTab({})`, `switchTab({})`, `sendNotification({ title, body?, type? })`, `setMuted({ muted, scope?, target? })`.
+- **Mesh / Agent Bridge:** `listBridgedPeers({})`, `sendToBridgedAgent({ message, recipient?, topic? })`, `getBridgedAgent({})`, `listTopics({})`, `startTopic({ label })`, `completeTopic({ topicId })`.
+- **Follow-ups:** `createFollowUp({ text, in_minutes? | at? | when_script? | when_service_ready? | when_service_stopped? | when_task_done?, expires_in_minutes? })`, `listFollowUps({})`, `cancelFollowUp({ id })`.
+- **Browser Link (linked Chrome tabs):** `browserStatus({})`, `browserSnapshot({ tab?, max_chars? })`, `browserClick({ ref, tab?, double? })`, `browserType({ text, ref?, tab?, clear?, submit? })`, `browserConsole({ tab?, errors_only?, clear? })`, `browserNetwork({ tab?, failed_only?, filter?, request_id? })`, `browserScreenshot({ tab?, full_page? })`.
 - For `/maiterm resolve` (Mattermost threads) or detailed `/maiterm` subcommand mappings, activate the `maiterm` skill.
 "#;
 
@@ -679,6 +679,12 @@ mod tests {
         assert!(paths.plugin_dir.join("plugin.json").exists());
         assert!(!paths.plugin_dir.join("mcp_config.json").exists(), "legacy plugin mcp_config.json removed");
         assert!(paths.plugin_dir.join("rules/AGENTS.md").exists());
+        let agents_md = fs::read_to_string(paths.plugin_dir.join("rules/AGENTS.md")).unwrap();
+        assert!(agents_md.contains("maiterm/listStack({})"));
+        assert!(agents_md.contains("replyToOverlord({ kind:"));
+        assert!(agents_md.contains("sendToBridgedAgent({ message,"));
+        assert!(agents_md.contains("createFollowUp({ text,"));
+        assert!(!agents_md.contains("in_progress"), "createTasks status enum uses active, not in_progress");
         assert!(paths.plugin_dir.join("hooks.json").exists());
         assert!(paths.plugin_dir.join("hooks/agy-hook.sh").exists());
         assert!(paths.plugin_dir.join("skills/maiterm/SKILL.md").exists());
