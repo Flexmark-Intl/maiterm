@@ -31,8 +31,8 @@
 //! a hook fires, and a poll-driven refresh would scale with the fleet instead of with
 //! activity.
 //!
-//! Scope: Claude runtime only (Codex/Gemini keep the snapshot). Neither feature enabled —
-//! no ssh traffic.
+//! Scope: Claude and Antigravity (`agy`) runtimes (Codex keeps the snapshot). Neither feature
+//! enabled — no ssh traffic.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -149,9 +149,9 @@ pub fn on_appended(app: &Arc<AppState>, tab_id: &str, session_id: &str) -> bool 
     true
 }
 
-/// Schedule a fetch for every given tab that has a live Claude session with a known
-/// transcript path. Called from the maiLink WS loop on a slow tick (phone connected) so
-/// appends between hook events still stream.
+/// Schedule a fetch for every given tab that has a live Claude or Antigravity (`agy`) session
+/// with a known transcript path. Called from the maiLink WS loop on a slow tick (phone connected)
+/// so appends between hook events still stream.
 pub fn refresh_tabs(app: &Arc<AppState>, tab_ids: &[String]) {
     let targets: Vec<(String, String, String)> = {
         let sessions = app.agent_sessions.read();

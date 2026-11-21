@@ -1345,15 +1345,16 @@ pub fn build_codex_setup_script(remote_port: u16, auth: String, tab_id: String, 
     let hooks_py = CODEX_HOOKS_MERGE_PY;
 
     let mut lines: Vec<String> = Vec::new();
-    // Non-interactive sshd sessions have a minimal PATH that omits ~/.local/bin, Homebrew, and
-    // user npm/bun/volta shims where `codex` is commonly installed.
+    // Run inside a subshell so augmenting PATH (appended after user's $PATH so virtualenv/nvm/
+    // pyenv precedence is preserved) and temp vars never leak into an interactive PTY shell when
+    // reused by "Install MCP for Current User". Non-interactive sshd sessions have a minimal PATH
+    // that omits ~/.local/bin, Homebrew, and user npm/bun/volta shims where `codex` is installed.
+    lines.push("(".to_string());
     lines.push(
-        "PATH=\"$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.bun/bin:$HOME/.volta/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\""
+        "PATH=\"$PATH:$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.bun/bin:$HOME/.volta/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin\""
             .to_string(),
     );
-    // No-op cleanly on hosts without the Codex CLI. Use if/then/fi (NOT `|| exit`):
-    // this script is also written into the INTERACTIVE PTY by the "Install MCP for
-    // Current User" path, where `exit` would close the user's shell.
+    // No-op cleanly on hosts without the Codex CLI. Use if/then/fi (NOT `|| exit`).
     lines.push("if command -v codex >/dev/null 2>&1; then".to_string());
     lines.push("mkdir -p ~/.codex/hooks ~/.codex/prompts".to_string());
     lines.push("shim_abs=\"$HOME/.codex/hooks/agent-hook.sh\"".to_string());
@@ -1391,6 +1392,7 @@ pub fn build_codex_setup_script(remote_port: u16, auth: String, tab_id: String, 
         lines.push("python3 -c '".to_string() + CODEX_HOOKS_STRIP_PY + "'");
     }
     lines.push("fi".to_string());
+    lines.push(")".to_string());
 
     lines.join("\n")
 }
@@ -1491,18 +1493,18 @@ const AGY_SETTINGS_ALLOW_MERGE_PY: &str = concat!(
     " os.replace(tmp,p)\n",
 );
 
-/// Non-interactive sshd PATH augmentation so default `agy` installs (`~/.local/bin/agy`,
-/// `/opt/homebrew/bin/agy`, `$HOME/bin/agy`) are found during `ssh_run_setup`.
+/// Non-interactive sshd PATH fallback dirs so default `agy` installs (`~/.local/bin/agy`,
+/// `/opt/homebrew/bin/agy`, `$HOME/bin/agy`) are found during `ssh_run_setup`. Appended after
+/// `$PATH` inside a subshell so interactive PTY runs never mutate or reorder the user's `PATH`.
 const AGY_REMOTE_PATH_LINE: &str =
-    "PATH=\"$HOME/.local/bin:$HOME/.antigravity/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\"";
+    "PATH=\"$PATH:$HOME/.local/bin:$HOME/.antigravity/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin\"";
 
 /// Build the shell script that installs maiTerm's Antigravity (`agy`) integration on a REMOTE
 /// host over the SSH reverse tunnel, reusing the same Rust renderers (`render_agy_remote_artifacts`)
 /// so local and remote never drift. Instance-independent: no port or token is baked into disk
 /// files — `mcp-stdio.sh` + `mcp-stdio.py` read `$MAITERM_PORT`, `$MAITERM_AUTH`, and
-/// `$MAITERM_TAB_ID` from the shell environment (with `~/.aiterm` fallback). No-ops cleanly on
-/// hosts without `agy` (uses `if/fi`, never `exit`, so it is safe in interactive `sudo`/`su`
-/// shells too).
+/// `$MAITERM_TAB_ID` from the shell environment (with `~/.aiterm` fallback). Wrapped in a subshell
+/// and guarded with `if/fi` (never `exit`), so it is safe in interactive `sudo`/`su` shells too.
 #[tauri::command]
 pub fn build_agy_setup_script(hooks: bool) -> String {
     let art = crate::claude_code::agy::render_agy_remote_artifacts();
@@ -1510,6 +1512,7 @@ pub fn build_agy_setup_script(hooks: bool) -> String {
     let q = |s: &str| s.replace('\'', "'\\''");
 
     let mut lines: Vec<String> = Vec::new();
+    lines.push("(".to_string());
     lines.push(AGY_REMOTE_PATH_LINE.to_string());
     lines.push("if command -v agy >/dev/null 2>&1; then".to_string());
     lines.push("__agy_plugin=\"$HOME/.gemini/config/plugins/maiterm\"".to_string());
@@ -1550,6 +1553,7 @@ pub fn build_agy_setup_script(hooks: bool) -> String {
     );
     lines.push("python3 -c '".to_string() + AGY_SETTINGS_ALLOW_MERGE_PY + "'");
     lines.push("fi".to_string());
+    lines.push(")".to_string());
 
     lines.join("\n")
 }
@@ -1562,11 +1566,13 @@ pub fn build_agy_proxy_refresh_script() -> String {
     let proxy_json = crate::mcp_proxy::entries::remote_agy().to_string();
     let q = |s: &str| s.replace('\'', "'\\''");
     [
+        "(".to_string(),
         AGY_REMOTE_PATH_LINE.to_string(),
         "if command -v agy >/dev/null 2>&1 && [ -x \"$HOME/.gemini/config/plugins/maiterm/mcp-stdio.sh\" ]; then".to_string(),
         format!("__agy_proxy='{}'", q(&proxy_json)),
         "__agy_proxy=\"$__agy_proxy\" python3 -c '".to_string() + AGY_MCP_CONFIG_MERGE_PY + "'",
         "fi".to_string(),
+        ")".to_string(),
     ]
     .join("\n")
 }
@@ -2365,7 +2371,8 @@ mod tests {
         assert!(ok, "bash -n rejected the generated script:\n{}\n--- stderr ---\n{}", script, stderr);
 
         // Spot-check the load-bearing pieces are present and pointed at the tunnel port.
-        assert!(script.contains("$HOME/.local/bin"), "augments non-interactive SSH PATH for codex");
+        assert!(script.starts_with("(\n") && script.ends_with("\n)"), "runs in a subshell so interactive PATH is untouched");
+        assert!(script.contains("PATH=\"$PATH:$HOME/.local/bin:"), "appends fallback bins after existing PATH");
         assert!(script.contains("$HOME/.npm-global/bin"), "includes npm global bin on non-interactive SSH PATH");
         assert!(script.contains("if command -v codex >/dev/null 2>&1; then"));
         assert!(script.contains("fi"));
@@ -2421,8 +2428,9 @@ mod tests {
         let on = build_agy_setup_script(true);
         let (ok, stderr) = pipe_ok("bash", &["-n"], &on);
         assert!(ok, "bash -n rejected agy setup script:\n{}\n--- stderr ---\n{}", on, stderr);
+        assert!(on.starts_with("(\n") && on.ends_with("\n)"), "runs in a subshell so interactive PATH is untouched");
         assert!(on.contains("if command -v agy >/dev/null 2>&1; then"));
-        assert!(on.contains("$HOME/.local/bin"), "augments non-interactive SSH PATH for agy");
+        assert!(on.contains("PATH=\"$PATH:$HOME/.local/bin:"), "appends fallback bins after existing PATH");
         assert!(on.contains("os.getpid()"), "remote temp file uses PID");
         assert!(on.contains("MAITERM_AGY_SHIM_EOF"));
         assert!(on.contains("MAITERM_AGY_HOOKS_EOF"));

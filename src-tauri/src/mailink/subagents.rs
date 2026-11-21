@@ -496,9 +496,19 @@ fn agy_line_ts(v: &Value) -> u64 {
         .max(0) as u64
 }
 
+/// Validate an `agy` subagent `conversationId` before admitting it to the roster or joining it
+/// onto `brain_dir`: rejects empty strings, path separators, `..`, and non-identifier characters.
+pub(crate) fn is_valid_agy_conversation_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+}
+
 /// Extract the `conversationId` from an `agy` `invoke_subagent` `GENERIC` ack:
 /// `Created the following subagent:\n{\n  "conversationId": "<uuid>", ...}`.
-fn parse_agy_subagent_ack(content: &str) -> Option<String> {
+pub(crate) fn parse_agy_subagent_ack(content: &str) -> Option<String> {
     const MARKER: &str = "Created the following subagent:";
     let after = content.split(MARKER).nth(1)?;
     let brace = after.find('{')?;
@@ -507,8 +517,31 @@ fn parse_agy_subagent_ack(content: &str) -> Option<String> {
     obj.get("conversationId")
         .and_then(|v| v.as_str())
         .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .filter(|s| is_valid_agy_conversation_id(s))
         .map(str::to_string)
+}
+
+/// Exact check for whether `candidate_id` appears in `parent_session_id`'s `agy` delegation
+/// roster. Used by `claude_code/server.rs` only for unseen `session_id`s so background subagents
+/// arriving after the parent's `Stop` (or after a maiTerm restart) are still recognized.
+pub(crate) fn is_known_agy_subagent(parent_session_id: &str, candidate_id: &str) -> bool {
+    if !is_valid_agy_conversation_id(candidate_id) {
+        return false;
+    }
+    static MEMO: super::transcript::FileMemo<Vec<Subagent>> = std::sync::LazyLock::new(Default::default);
+    let Some(agents) = super::transcript::memo_by_transcript_for(
+        &MEMO,
+        AgentRuntime::Gemini,
+        parent_session_id,
+        true,
+        || {
+            let lines = super::transcript::agy_lines(parent_session_id, SUBAGENT_TAIL_BYTES)?;
+            Some(agy_subagents_from_lines(&lines))
+        },
+    ) else {
+        return false;
+    };
+    agents.iter().any(|a| a.id == candidate_id)
 }
 
 /// Extract `(sender_id, body)` from an `agy` inter-agent `SYSTEM_MESSAGE`:
@@ -566,7 +599,12 @@ pub fn agy_subagents_from_lines(lines: &[Value]) -> Vec<Subagent> {
                         .unwrap_or(Value::Null);
                     match name {
                         "invoke_subagent" => {
-                            let field = |k: &str| args.get(k).and_then(|x| x.as_str());
+                            let field = |k: &str| {
+                                args.get(k)
+                                    .and_then(|x| x.as_str())
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                            };
                             let label = field("Role")
                                 .or_else(|| field("Prompt"))
                                 .map(|s| capped(s, 160));
@@ -680,8 +718,8 @@ pub fn agy_subagents_from_lines(lines: &[Value]) -> Vec<Subagent> {
 
 /// Derive `~/.gemini/antigravity-cli/brain` from a local parent transcript path
 /// (`…/brain/<session_id>/.system_generated/logs/transcript[_full].jsonl`).
-/// Returns `None` for SSH mirror shadow paths (`<data>/mailink-mirror/<sid>.jsonl`) so a remote
-/// session degrades cleanly to lifecycle-only without probing unrelated local brain dirs.
+/// Returns `None` for SSH mirror shadow paths (`<data>/remote-transcripts/<sid>.jsonl`) so a
+/// remote session degrades cleanly to lifecycle-only without probing unrelated local brain dirs.
 fn agy_brain_dir(transcript: &Path) -> Option<PathBuf> {
     let logs = transcript.parent()?;
     if logs.file_name()?.to_str()? != "logs" {
@@ -695,24 +733,27 @@ fn agy_brain_dir(transcript: &Path) -> Option<PathBuf> {
     Some(session_dir.parent()?.to_path_buf())
 }
 
-fn agy_sidecar_path(brain_dir: &Path, agent_id: &str) -> PathBuf {
+fn agy_sidecar_path(brain_dir: &Path, agent_id: &str) -> Option<PathBuf> {
+    if !is_valid_agy_conversation_id(agent_id) {
+        return None;
+    }
     let logs = brain_dir
         .join(agent_id)
         .join(".system_generated")
         .join("logs");
     let full = logs.join("transcript_full.jsonl");
-    if full.is_file() {
+    Some(if full.is_file() {
         full
     } else {
         logs.join("transcript.jsonl")
-    }
+    })
 }
 
 fn attach_agy_sidecar(agent: &mut Subagent, brain_dir: Option<&Path>, now: u64) {
     if agent.status != SubagentStatus::Running {
         return;
     }
-    let path = brain_dir.map(|b| agy_sidecar_path(b, &agent.id));
+    let path = brain_dir.and_then(|b| agy_sidecar_path(b, &agent.id));
     let mtime = path.as_ref().and_then(|p| {
         std::fs::metadata(p).ok().and_then(|m| {
             m.modified()
@@ -1476,6 +1517,34 @@ mod tests {
             "thinking-only resumed run must not leak previous run's content"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agy_rejects_traversal_conversation_ids_and_falls_back_from_empty_role() {
+        // Untrusted GENERIC tool output containing path-traversal conversationIds must be ignored
+        // and must not consume the queued pending launch before the real ack arrives.
+        let lines = vec![
+            json!({
+                "type": "PLANNER_RESPONSE",
+                "created_at": "2026-11-20T20:00:00Z",
+                "tool_calls": [{
+                    "name": "invoke_subagent",
+                    "args": { "Role": "   ", "TypeName": "research", "Prompt": "Audit auth flow." }
+                }]
+            }),
+            agy_ack("/etc/passwd", "2026-11-20T20:00:01Z"),
+            agy_ack("../../escape", "2026-11-20T20:00:01Z"),
+            agy_ack("a870d3c2-3722-4e4b-88f7-bee28341f52e", "2026-11-20T20:00:02Z"),
+        ];
+        let agents = agy_subagents_from_lines(&lines);
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].id, "a870d3c2-3722-4e4b-88f7-bee28341f52e");
+        assert_eq!(agents[0].description, "Audit auth flow.", "empty/whitespace Role falls back to Prompt");
+
+        let brain = PathBuf::from("/Users/x/.gemini/antigravity-cli/brain");
+        assert!(agy_sidecar_path(&brain, "/etc/passwd").is_none());
+        assert!(agy_sidecar_path(&brain, "../../other").is_none());
+        assert!(agy_sidecar_path(&brain, "a870d3c2-3722-4e4b-88f7-bee28341f52e").is_some());
     }
 }
 

@@ -3986,8 +3986,42 @@ fn drop_agy_mcp_placeholders(
     });
 }
 
+fn remember_agy_subagent(session_id: &str) {
+    if session_id.is_empty() {
+        return;
+    }
+    let mut subagents = AGY_SUBAGENT_SESSIONS.lock();
+    if subagents.len() > 512 {
+        subagents.clear();
+    }
+    subagents.insert(session_id.to_string());
+}
+
+/// Extract a spawned subagent's `conversationId` from an `agy` `PostToolUse` hook payload for
+/// `invoke_subagent`, checking the common protojson / snake_case response shapes.
+fn extract_agy_subagent_id_from_post_tool(event: &serde_json::Value) -> Option<String> {
+    for key in ["toolResponse", "tool_response", "toolResult", "tool_result", "result", "output"] {
+        let Some(val) = event.get(key) else { continue };
+        if let Some(s) = val.as_str() {
+            if let Some(id) = crate::mailink::subagents::parse_agy_subagent_ack(s) {
+                return Some(id);
+            }
+        } else if let Some(id) = val.get("conversationId").and_then(|v| v.as_str()) {
+            let trimmed = id.trim();
+            if crate::mailink::subagents::is_valid_agy_conversation_id(trimmed) {
+                return Some(trimmed.to_string());
+            }
+        } else if let Some(s) = val.get("content").and_then(|v| v.as_str()) {
+            if let Some(id) = crate::mailink::subagents::parse_agy_subagent_ack(s) {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
 /// True when an incoming `AgentRuntime::Gemini` hook belongs to an ephemeral subagent (or nested
-/// `agy -p`) spawned during an already-active parent `agy` turn on `tab_id`. Remembers the
+/// `agy -p`) spawned during an already-active parent turn on `tab_id`. Remembers the
 /// subagent's `session_id` so its later hooks (including `Stop` after the parent goes idle) are
 /// also ignored without hijacking the parent tab's state or `geminiSessionId`.
 fn is_agy_subagent_hook(
@@ -3999,8 +4033,7 @@ fn is_agy_subagent_hook(
     if session_id.is_empty() || tab_id.is_empty() {
         return false;
     }
-    let mut subagents = AGY_SUBAGENT_SESSIONS.lock();
-    if subagents.contains(session_id) {
+    if AGY_SUBAGENT_SESSIONS.lock().contains(session_id) {
         return true;
     }
     if sessions.contains_key(session_id) {
@@ -4013,10 +4046,7 @@ fn is_agy_subagent_hook(
             && matches!(s.state, AgentSessionState::Active | AgentSessionState::WaitingPermission)
     });
     if parent_mid_turn {
-        if subagents.len() > 512 {
-            subagents.clear();
-        }
-        subagents.insert(session_id.to_string());
+        remember_agy_subagent(session_id);
         return true;
     }
     false
@@ -5770,13 +5800,66 @@ async fn hooks_handler(
     // `$MAITERM_TAB_ID`) before they touch `agent_sessions`, `geminiSessionId`, or Files state.
     if runtime == crate::state::AgentRuntime::Gemini && !session_id.is_empty() {
         if let Some(tab_id) = tab_id_from_param.as_deref() {
-            let is_sub = {
+            let (mut is_sub, need_persisted, mut candidate_parents) = {
                 let sessions = srv.state.agent_sessions.read();
-                is_agy_subagent_hook(&sessions, tab_id, &session_id)
+                let sub = is_agy_subagent_hook(&sessions, tab_id, &session_id);
+                if !sub && !sessions.contains_key(&session_id) {
+                    let p: Vec<String> = sessions
+                        .iter()
+                        .filter(|(sid, s)| {
+                            s.tab_id == tab_id
+                                && s.runtime == crate::state::AgentRuntime::Gemini
+                                && sid.as_str() != session_id
+                                && !sid.starts_with("mcp-")
+                        })
+                        .map(|(sid, _)| sid.clone())
+                        .collect();
+                    (sub, true, p)
+                } else {
+                    (sub, false, Vec::new())
+                }
             };
+            if need_persisted {
+                // Read persisted `geminiSessionId` after releasing `agent_sessions` to avoid
+                // nested lock acquisition, and walk live `data.windows` (not deprecated `workspaces`).
+                let persisted = {
+                    let data = srv.state.app_data.read();
+                    data.windows
+                        .iter()
+                        .flat_map(|w| w.workspaces.iter())
+                        .flat_map(|ws| ws.panes.iter())
+                        .flat_map(|pane| pane.tabs.iter())
+                        .find(|t| t.id == tab_id)
+                        .and_then(|t| t.trigger_variables.get("geminiSessionId"))
+                        .filter(|s| !s.is_empty() && s.as_str() != session_id)
+                        .cloned()
+                };
+                if let Some(psid) = persisted {
+                    if !candidate_parents.contains(&psid) {
+                        candidate_parents.push(psid);
+                    }
+                }
+            }
+            // Fallback for async `invoke_subagent` whose first hook arrives after the parent's
+            // `Stop` (or after a maiTerm restart): check the parent's transcript delegation roster
+            // outside all locks, only once for an unseen session_id.
+            if !is_sub && !candidate_parents.is_empty() {
+                let sid_check = session_id.clone();
+                let matched = tokio::task::spawn_blocking(move || {
+                    candidate_parents
+                        .iter()
+                        .any(|parent| crate::mailink::subagents::is_known_agy_subagent(parent, &sid_check))
+                })
+                .await
+                .unwrap_or(false);
+                if matched {
+                    remember_agy_subagent(&session_id);
+                    is_sub = true;
+                }
+            }
             if is_sub {
                 log::debug!(
-                    "Agy hook: ignoring subagent '{}' session {} on busy parent tab {}",
+                    "Agy hook: ignoring subagent '{}' session {} on parent tab {}",
                     hook_event_name,
                     &session_id[..session_id.len().min(8)],
                     tab_id
@@ -6693,6 +6776,14 @@ async fn hooks_handler(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+
+            // Record any subagent conversationId as soon as `invoke_subagent` finishes, so even
+            // an async subagent whose first hook arrives after the parent's `Stop` is filtered.
+            if runtime == crate::state::AgentRuntime::Gemini && tool_name == "invoke_subagent" {
+                if let Some(sub_id) = extract_agy_subagent_id_from_post_tool(&event) {
+                    remember_agy_subagent(&sub_id);
+                }
+            }
 
             // Clear tool fields, and retire the approval THIS tool call was gated on — matched by
             // its own tool_use_id, so a gate held for a parallel tool survives untouched. The
@@ -7858,5 +7949,14 @@ mod tests {
         claude_parent.runtime = AgentRuntime::Claude;
         sessions.insert("claude-parent-1".to_string(), claude_parent);
         assert!(super::is_agy_subagent_hook(&sessions, "tab-claude", "nested-agy-conv-1"));
+
+        // Recording a spawned subagent from PostToolUse filters it even when the parent is idle.
+        let post_ev = serde_json::json!({
+            "toolResponse": "Created the following subagent:\n{\"conversationId\":\"async-sub-42\"}"
+        });
+        let extracted = super::extract_agy_subagent_id_from_post_tool(&post_ev).expect("extracts id");
+        assert_eq!(extracted, "async-sub-42");
+        super::remember_agy_subagent(&extracted);
+        assert!(super::is_agy_subagent_hook(&sessions, "tab-1", "async-sub-42"));
     }
 }
