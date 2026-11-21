@@ -567,6 +567,32 @@ fn parse_agy_subagent_message(content: &str) -> Option<(String, String)> {
     Some((sender, body.trim().to_string()))
 }
 
+/// Extract `(subagent_id, optional_response)` from a `sender=system` idle notice that `agy`
+/// emits when a subagent stops without calling `send_message`:
+/// `Subagent <uuid> has gone idle. This was the subagent's most recent response: <text>`
+/// (or `Subagent <uuid> has gone idle.`).
+fn parse_agy_subagent_idle(body: &str) -> Option<(String, Option<String>)> {
+    let rest = body.trim_start().strip_prefix("Subagent ")?;
+    let id: String = rest
+        .chars()
+        .take_while(|c| !c.is_whitespace())
+        .collect();
+    if !is_valid_agy_conversation_id(&id) {
+        return None;
+    }
+    let after_id = rest[id.len()..].trim_start();
+    if !after_id.starts_with("has gone idle") {
+        return None;
+    }
+    const RESP_MARKER: &str = "This was the subagent's most recent response:";
+    let response = after_id
+        .split_once(RESP_MARKER)
+        .map(|(_, r)| r.trim())
+        .filter(|r| !r.is_empty())
+        .map(str::to_string);
+    Some((id, response))
+}
+
 /// Parse an Antigravity (`agy`) parent transcript into the delegation roster, keyed by subagent
 /// `conversationId` and ordered by launch. Pure function over transcript lines — no I/O.
 pub fn agy_subagents_from_lines(lines: &[Value]) -> Vec<Subagent> {
@@ -697,6 +723,38 @@ pub fn agy_subagents_from_lines(lines: &[Value]) -> Vec<Subagent> {
                 let Some((sender, body)) = parse_agy_subagent_message(content) else {
                     continue;
                 };
+                if sender == "system" {
+                    let Some((sub_id, response)) = parse_agy_subagent_idle(&body) else {
+                        continue;
+                    };
+                    let Some(&i) = index.get(&sub_id) else {
+                        continue;
+                    };
+                    if ts < messaged_at.get(&sub_id).copied().unwrap_or(0) {
+                        continue;
+                    }
+                    // Settle a Running subagent that went idle without calling `send_message`.
+                    // Never clobber a Killed (`Failed`) entry or overwrite a substantive
+                    // `send_message` summary from an already-Done entry.
+                    match agents[i].status {
+                        SubagentStatus::Running => {
+                            agents[i].status = SubagentStatus::Done;
+                            agents[i].ended_at = Some(ts);
+                            if let Some(line) = response.as_deref().and_then(first_meaningful_line) {
+                                agents[i].last_line = Some(line);
+                                agents[i].last_line_ts = Some(ts);
+                            }
+                        }
+                        SubagentStatus::Done if agents[i].last_line.is_none() => {
+                            if let Some(line) = response.as_deref().and_then(first_meaningful_line) {
+                                agents[i].last_line = Some(line);
+                                agents[i].last_line_ts = Some(ts);
+                            }
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
                 let Some(&i) = index.get(&sender) else {
                     continue;
                 };
@@ -1545,6 +1603,96 @@ mod tests {
         assert!(agy_sidecar_path(&brain, "/etc/passwd").is_none());
         assert!(agy_sidecar_path(&brain, "../../other").is_none());
         assert!(agy_sidecar_path(&brain, "a870d3c2-3722-4e4b-88f7-bee28341f52e").is_some());
+    }
+
+    #[test]
+    fn agy_system_idle_notice_settles_running_subagents_without_clobbering_replies_or_kills() {
+        let lines = vec![
+            agy_launch(
+                &[
+                    ("Idle-only subagent", "research"),
+                    ("Replied then went idle", "research"),
+                    ("Killed subagent", "research"),
+                    ("Idle without response", "research"),
+                ],
+                "2026-11-20T23:32:00Z",
+            ),
+            agy_ack("sub-idle-1", "2026-11-20T23:32:01Z"),
+            agy_ack("sub-replied-2", "2026-11-20T23:32:02Z"),
+            agy_ack("sub-killed-3", "2026-11-20T23:32:03Z"),
+            agy_ack("sub-bare-4", "2026-11-20T23:32:04Z"),
+            // sub-replied-2 reports findings via send_message first.
+            agy_reply("sub-replied-2", "1 Important, 0 Nit, 0 Pre-existing", "2026-11-20T23:38:54Z"),
+            // sub-killed-3 is killed by the parent.
+            json!({
+                "type": "PLANNER_RESPONSE",
+                "created_at": "2026-11-20T23:39:00Z",
+                "tool_calls": [{ "name": "manage_subagents", "args": { "Action": "kill", "ConversationIds": ["sub-killed-3"] } }]
+            }),
+            // system idle notices arrive for all four.
+            agy_reply(
+                "system",
+                "Subagent sub-idle-1 has gone idle. This was the subagent's most recent response: Acknowledged completion of background search task; no additional findings.",
+                "2026-11-20T23:48:06Z",
+            ),
+            agy_reply(
+                "system",
+                "Subagent sub-replied-2 has gone idle. This was the subagent's most recent response: Review complete; findings sent to parent agent.",
+                "2026-11-20T23:48:07Z",
+            ),
+            agy_reply(
+                "system",
+                "Subagent sub-killed-3 has gone idle.",
+                "2026-11-20T23:48:08Z",
+            ),
+            agy_reply(
+                "system",
+                "Subagent sub-bare-4 has gone idle.",
+                "2026-11-20T23:48:09Z",
+            ),
+            // Unknown subagent idle notice is ignored.
+            agy_reply("system", "Subagent unknown-99 has gone idle.", "2026-11-20T23:48:10Z"),
+        ];
+
+        let agents = agy_subagents_from_lines(&lines);
+        assert_eq!(agents.len(), 4);
+
+        // sub-idle-1 settled directly from the system idle notice.
+        assert!(agents[0].status == SubagentStatus::Done);
+        assert!(agents[0].ended_at.is_some());
+        assert_eq!(
+            agents[0].last_line.as_deref(),
+            Some("Acknowledged completion of background search task; no additional findings.")
+        );
+
+        // sub-replied-2 kept its substantive send_message summary and timestamp.
+        assert!(agents[1].status == SubagentStatus::Done);
+        assert_eq!(agents[1].last_line.as_deref(), Some("1 Important, 0 Nit, 0 Pre-existing"));
+        let replied_ts = crate::mailink::transcript::rfc3339_to_ms("2026-11-20T23:38:54Z") as u64;
+        assert_eq!(agents[1].ended_at, Some(replied_ts));
+
+        // sub-killed-3 stayed Failed.
+        assert!(agents[2].status == SubagentStatus::Failed);
+
+        // sub-bare-4 settled to Done with no response text.
+        assert!(agents[3].status == SubagentStatus::Done);
+        assert!(agents[3].ended_at.is_some());
+        assert!(agents[3].last_line.is_none());
+
+        // A stale idle notice older than a send_message reopen must not close the resumed run.
+        let mut reopened = lines.clone();
+        reopened.push(json!({
+            "type": "PLANNER_RESPONSE",
+            "created_at": "2026-11-20T23:50:00Z",
+            "tool_calls": [{ "name": "send_message", "args": { "Recipient": "sub-idle-1", "Message": "Follow up." } }]
+        }));
+        reopened.push(agy_reply(
+            "system",
+            "Subagent sub-idle-1 has gone idle. This was the subagent's most recent response: Old notice.",
+            "2026-11-20T23:49:00Z",
+        ));
+        let after = agy_subagents_from_lines(&reopened);
+        assert!(after[0].status == SubagentStatus::Running, "stale idle notice predating reopen is ignored");
     }
 }
 
