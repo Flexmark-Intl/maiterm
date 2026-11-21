@@ -834,7 +834,11 @@
                 <span class="hive-badge">HIVE</span>
               </Tooltip>
             {/if}
-            {#if preferencesStore.overlordEnabled && !workspace.overlord && !workspace.hive}
+            <!-- A Hive's tabs are never the engine's anyway (docs/hive.md §7.3), so it isn't
+                 offered there; but one already set (before "Make this a Hive", say) still turns
+                 off its watch scripts, stack tools and follow-up relaunches, so it stays shown
+                 and clearable. -->
+            {#if preferencesStore.overlordEnabled && !workspace.overlord && (!workspace.hive || workspace.overlord_exempt)}
               <!-- Overlord exemption for the whole workspace (docs/overlord.md §11). Stays
                    visible while exempt, not hover-only: an exemption you can't see is one
                    you forget you set, and then wonder why the fleet is missing a workspace. -->
