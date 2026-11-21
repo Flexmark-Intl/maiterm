@@ -225,7 +225,8 @@ impl FileTreeState {
     /// `end_graces`, so "after its grace" is a step the test takes rather than a sleep.
     #[cfg(test)]
     pub(crate) fn hold_graces(&self) {
-        *self.held_reaps.lock() = Some(Vec::new());
+        // Reaps already held stay held: a second call mid-test must not drop them.
+        self.held_reaps.lock().get_or_insert_with(Vec::new);
     }
 
     /// Test seam: every grace period running now is over (`hold_graces`).

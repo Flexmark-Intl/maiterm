@@ -495,6 +495,10 @@ pub struct GitCore {
     /// Tests: signals accepted so far (each one set a run due).
     #[cfg(test)]
     signals: AtomicU64,
+    /// Tests: told when the worker thread has returned (`wait_exited`). Its own condvar, so a
+    /// waiting test never takes a `signal`'s `notify_one` meant for the worker.
+    #[cfg(test)]
+    exited: Condvar,
 }
 
 impl GitCore {
@@ -526,7 +530,33 @@ impl GitCore {
             probe: cfg.probe.clone(),
             #[cfg(test)]
             signals: AtomicU64::new(0),
+            #[cfg(test)]
+            exited: Condvar::new(),
         })
+    }
+
+    /// Tests: block until no worker thread runs, so no git process has its working directory in
+    /// the root any more. On Windows a folder that is some process's working directory can't be
+    /// deleted (OS error 32), and a test's cleanup deletes the root. Call it after the hub is
+    /// gone (its `Drop` stops the worker); a run in flight finishes first. False only when `hang`
+    /// passed first: something still holds the hub, a test's fault to report, not wait out.
+    #[cfg(test)]
+    pub(crate) fn wait_exited(&self, hang: Duration) -> bool {
+        let until = Instant::now() + hang;
+        let mut s = self.sched.lock();
+        while s.thread {
+            if self.exited.wait_until(&mut s, until).timed_out() {
+                return !s.thread;
+            }
+        }
+        true
+    }
+
+    /// The worker is returning: under the sched lock, so `wait_exited` can't miss it.
+    fn exit(&self, s: &mut Sched) {
+        s.thread = false;
+        #[cfg(test)]
+        self.exited.notify_all();
     }
 
     /// Tests: how many signals have set a run due so far. A `Decision::Ran` whose `covers`
@@ -1056,7 +1086,7 @@ fn worker(core: Arc<GitCore>) {
             let mut s = core.sched.lock();
             loop {
                 if s.stop {
-                    s.thread = false;
+                    core.exit(&mut s);
                     return;
                 }
                 match s.due {
@@ -1080,7 +1110,7 @@ fn worker(core: Arc<GitCore>) {
             covers = core.signals_taken();
         }
         let Some(hub) = core.hub.upgrade() else {
-            core.sched.lock().thread = false;
+            core.exit(&mut core.sched.lock());
             return;
         };
         let epoch = core.epoch();

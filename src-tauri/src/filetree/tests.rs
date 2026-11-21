@@ -555,6 +555,22 @@ fn a_deleted_root_says_root_gone() {
     assert!(rec.msgs.lock().iter().any(|m| m.ev == TreeEvent::RootGone));
 }
 
+/// Close a test's last subscription to its hub and wait until nothing of the hub runs in the
+/// root, before the test deletes it. The git worker runs `git -C root`, and on Windows a folder
+/// that is some process's working directory can't be deleted (OS error 32): so the hub is
+/// reaped (its grace ended by the test, not slept through) and its worker waited out. `hub` is
+/// the test's last handle on it.
+fn close_and_settle(ft: &FileTreeState, sub: u64, hub: Arc<RootHub>) {
+    let git = hub.git.clone();
+    ft.hold_graces();
+    ft.close(sub);
+    ft.end_graces();
+    drop(hub);
+    if let Some(g) = git {
+        assert!(g.wait_exited(super::test_support::HANG), "the hub's git worker never stopped: something still holds the hub");
+    }
+}
+
 fn git_init(dir: &std::path::Path) {
     let ok = std::process::Command::new("git").args(["init", "-q"]).current_dir(dir).status().is_ok_and(|s| s.success());
     assert!(ok, "git init");
@@ -726,7 +742,7 @@ fn a_lost_git_init_reopens_on_an_edge() {
     ft.note_command_in(&root);
     probe.reconciled(&hub, asked);
     assert!(rec.msgs.lock().iter().any(|m| m.ev == TreeEvent::Reopen), "the view is told to reopen");
-    ft.close(ack.sub_id);
+    close_and_settle(&ft, ack.sub_id, hub);
     std::fs::remove_dir_all(&root).unwrap();
 }
 
@@ -766,7 +782,7 @@ fn a_lost_ignore_rule_change_shows_after_an_edge() {
     assert_eq!(ignored(), Some(true), "the repository's info/exclude (re-listed {relisted:?})");
     let flipped = rec.msgs.lock().iter().filter(|m| matches!(&m.ev, TreeEvent::Delta { rel, chg, .. } if rel.is_empty() && chg.iter().any(|e| e.n == "dist"))).count();
     assert_eq!(flipped, 3, "the client saw each flip as a Delta");
-    ft.close(ack.sub_id);
+    close_and_settle(&ft, ack.sub_id, hub);
     std::fs::remove_dir_all(&root).unwrap();
 }
 
@@ -798,7 +814,7 @@ fn idle_edges_over_a_future_dated_gitignore_do_nothing() {
         assert!(relisted.is_empty(), "idle edge {i} re-listed {relisted:?}");
     }
     assert_eq!(core.test_signals(), signals, "idle edges asked git for nothing");
-    ft.close(ack.sub_id);
+    close_and_settle(&ft, ack.sub_id, hub);
     std::fs::remove_dir_all(&root).unwrap();
 }
 
@@ -845,7 +861,7 @@ fn a_lost_gitignore_in_a_closed_folder_shows_when_reopened() {
     hub.expand(ack.sub_id, vec![DirReq { rel: "other".into(), known_gen: None }]);
     probe.idle(&hub);
     assert_eq!(flag("", "pkg"), Some(true), "the open root, listed again with the rules on disk");
-    ft.close(ack.sub_id);
+    close_and_settle(&ft, ack.sub_id, hub);
     std::fs::remove_dir_all(&root).unwrap();
 }
 
@@ -879,7 +895,7 @@ fn a_folder_loaded_for_git_or_find_opens_with_the_rules_on_disk() {
         probe.idle(&hub);
         let gen = hub.dirs.lock().get("pkg").and_then(|d| d.entries.iter().find(|e| e.n == "gen").map(|e| e.f & super::types::FLAG_IGNORED != 0));
         assert_eq!(gen, Some(true), "find={find}: pkg opened with the rules on disk");
-        ft.close(ack.sub_id);
+        close_and_settle(&ft, ack.sub_id, hub);
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
@@ -919,8 +935,8 @@ fn a_lost_gitignore_shows_when_reopened_within_the_grace() {
         assert!(Arc::ptr_eq(&hub, &hub2), "the same hub, back from its grace");
         probe.idle(&hub);
         assert_eq!(flag("pkg", "gen"), Some(true), "in_place={in_place}: pkg reopened within the grace with the rules on disk");
-        ft.close(again.sub_id);
-        ft.end_graces();
+        drop(hub2);
+        close_and_settle(&ft, again.sub_id, hub);
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
@@ -950,7 +966,7 @@ fn refresh_lists_an_open_folder_with_the_rules_on_disk() {
         hub.refresh(ack.sub_id, if one { Some("pkg".into()) } else { None });
         probe.idle(&hub);
         assert_eq!(flag("pkg", "gen"), Some(true), "refresh one={one}: pkg listed with the rules on disk");
-        ft.close(ack.sub_id);
+        close_and_settle(&ft, ack.sub_id, hub);
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
@@ -1000,7 +1016,7 @@ fn rules_files_are_read_without_the_ignore_lock() {
     probe.idle(&hub);
     take("a fresh open");
     super::ignore_cache::MOVED_HOOKS.lock().retain(|(r, _)| r != &key);
-    ft.close(ack.sub_id);
+    close_and_settle(&ft, ack.sub_id, hub);
     std::fs::remove_dir_all(&root).unwrap();
 }
 
