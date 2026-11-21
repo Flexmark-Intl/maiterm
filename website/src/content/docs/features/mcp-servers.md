@@ -1,6 +1,6 @@
 ---
 title: MCP Servers
-description: Sign in to a remote MCP server once in maiTerm, and Claude Code and Codex both get its tools — under every managed account, and on your SSH hosts under your own sign-in.
+description: Sign in to a remote MCP server once in maiTerm, and Claude Code, Codex and Antigravity all get its tools — under every managed account, and on your SSH hosts under your own sign-in.
 ---
 
 Installing a remote MCP server the usual way means installing it once per agent: once in Claude Code, again in Codex, again for each [Claude account](/features/accounts/), again on every SSH host — and signing in each time. Those sign-ins then fight each other. Most services rotate their refresh tokens, so a token two places hold stops working for whichever one refreshes second.
@@ -17,11 +17,11 @@ Each server you add appears to the agent as **its own MCP server**, under the na
 - **Your rules still apply.** `/mcp`, turning a server off in the agent, and permission rules like `mcp__linear__*` work as usual.
 - **Tools as the server publishes them.** Names, descriptions and schemas are passed through unchanged.
 
-maiTerm writes these entries into Claude Code's `~/.claude.json` (and every [managed account](/features/accounts/)'s copy) and Codex's `~/.codex/config.toml`, for each agent whose maiTerm integration is on, and keeps them current alongside its own `maiterm` entry. They're removed when maiTerm quits, so a server added here works only while maiTerm is running.
+maiTerm writes these entries into Claude Code's `~/.claude.json` (and every [managed account](/features/accounts/)'s copy), Codex's `~/.codex/config.toml` and Antigravity's `~/.gemini/config/mcp_config.json`, for each agent whose maiTerm integration is on, and keeps them current alongside its own `maiterm` entry. They're removed when maiTerm quits, so a server added here works only while maiTerm is running.
 
 ### On your SSH hosts
 
-Claude Code on a host you've reached through the [SSH MCP bridge](/features/agents/#ssh-mcp-bridge) gets the same servers. Each agent there reaches **your** maiTerm through your own tunnel, so it uses your sign-in, and on a host several people share, each person's agents use their own. A server you add reaches the hosts you're connected to straight away, and any other host the next time you connect to it.
+Claude Code and Antigravity on a host you've reached through the [SSH MCP bridge](/features/agents/#ssh-mcp-bridge) get the same servers. Each agent there reaches **your** maiTerm through your own tunnel, so it uses your sign-in, and on a host several people share, each person's agents use their own. A server you add reaches the hosts you're connected to straight away, and any other host the next time you connect to it.
 
 The remote side only ever adds. maiTerm never overwrites a server of your own with the same name there, and never deletes an entry, because on a shared account it can't tell whether a teammate still uses it. An entry for a server your maiTerm doesn't serve is simply empty: no tools, and no error.
 
@@ -33,6 +33,8 @@ The remote side only ever adds. maiTerm never overwrites a server of your own wi
 4. Click **Add and sign in** to finish the sign-in in your browser, or **Add** for a server with no sign-in or a token.
 
 Some services publish a sign-in but don't let apps register themselves (GitHub, for one). For those, maiTerm asks for a **client id** from an app you registered with the service, plus its secret if it has one. The app's callback URL must allow `http://127.0.0.1` on any port. Or tick **Use a token instead of signing in** and paste an API key or access token.
+
+Other services don't let apps register either, but accept a **client metadata document** instead — ElevenLabs, for one. Those need nothing from you: maiTerm identifies itself with the document it publishes at `https://maiterm.dev/oauth/client-metadata.json`, so there's no app to create on the service's side, and the sign-in comes back to maiTerm on one of three fixed local ports (21847, 26413 or 29581), since the document has to list them.
 
 Sign-ins, tokens and client secrets are kept in your system's credential store (the Keychain on macOS), never in a file. The URL itself is saved as you typed it, in plain text, so a key written into a URL isn't protected the way a token is. maiTerm refreshes a sign-in before it expires, and once more if the service refuses it.
 
@@ -63,7 +65,7 @@ Only the server itself can remove a tool. When its tool list changes, maiTerm pa
 
 Ask an agent to install an MCP server and it can tell you maiTerm is an option, with the trade-off, and let you choose:
 
-- **Through maiTerm:** set up once for every agent here and Claude on your SSH hosts, one sign-in kept fresh by maiTerm, signed in as you on a shared host. It works only while maiTerm runs.
+- **Through maiTerm:** set up once for every agent here and for Claude Code and Antigravity on your SSH hosts, one sign-in kept fresh by maiTerm, signed in as you on a shared host. It works only while maiTerm runs.
 - **Installed directly:** works without maiTerm, but only in that one agent, and each agent signs in for itself.
 
 If you choose maiTerm, the agent's `addMcpServer` doesn't add the server. It files a [request](/features/agents/#organising-tabs-meshes-and-maiterm), a card headed **Add this MCP server for every agent?** in the [Loom's Decisions](/features/loom/#decisions), and on your phone with [maiLink](/features/mailink/). The card is in maiTerm's words: the name, the URL, that its tools load into every session started afterwards, and how it signs in. Approve one that needs a sign-in at your desk and the sign-in opens in your browser. Approved from your phone, it waits as **Needs a sign-in** until you're back at your computer, since the sign-in finishes in your computer's browser. One that takes a token waits for you to paste it. Neither the agent nor the approval ever completes a sign-in.
@@ -78,4 +80,4 @@ A [Hive](/features/hive/#setting-a-provider-up) sets media providers up through 
 
 - **Remote servers only, with two exceptions.** maiTerm talks to servers over Streamable HTTP. A local server you start with a command (`npx …`) is still installed directly in each agent, except MiniMax and Meshy: set up from [What it can make](/features/hive/#minimax-and-meshy), maiTerm runs those itself on macOS and Linux, with the key in your keychain, and serves them here like any other.
 - **Tools only.** An MCP server's resources and prompts aren't passed through yet.
-- **Claude Code and Codex on this computer, and Claude Code on SSH hosts.** Codex on SSH hosts and Gemini don't get these servers yet.
+- **Claude Code, Codex and Antigravity on this computer, and Claude Code and Antigravity on SSH hosts.** Codex on SSH hosts doesn't get these servers yet.

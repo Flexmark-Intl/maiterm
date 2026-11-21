@@ -57,14 +57,14 @@ export const COMPARISONS: Comparison[] = [
     whatItIs:
       'Warp is a Rust terminal with a GPU renderer, structured command blocks, saved workflows, and an AI agent built into the product, backed by team and cloud features. The agent, the terminal and the platform are one thing, sold together.',
     verdict:
-      'If you want one vendor to supply the terminal and the agent, and you like working in blocks with cloud sync across machines, Warp is a coherent product and does that well. maiTerm is for the other case: you have already chosen Claude Code or Codex, you pay for them directly, and what you are missing is somewhere to run a dozen of them without losing track.',
+      'If you want one vendor to supply the terminal and the agent, and you like working in blocks with cloud sync across machines, Warp is a coherent product and does that well. maiTerm is for the other case: you have already chosen Claude Code, Codex or Antigravity, you pay for them directly, and what you are missing is somewhere to run a dozen of them without losing track.',
     theirEdge:
       'Warp is a more polished terminal in the conventional sense — the block model, the command palette, the completions and the GPU renderer are genuinely nice to use, and its agent is tuned to the terminal it lives in. It also has a real team offering, which maiTerm has nothing equivalent to.',
     rows: [
       {
         dimension: 'The agent',
         maiterm:
-          'None built in. Runs the Claude Code or Codex CLI already installed on your machine, on your own account.',
+          'None built in. Runs the Claude Code, Codex or Antigravity CLI already installed on your machine, on your own account.',
         theirs: 'Warp ships its own agent, billed by Warp, with your own model keys as an option.',
       },
       {
@@ -153,7 +153,7 @@ export const COMPARISONS: Comparison[] = [
       {
         dimension: 'The agent CLIs',
         maiterm:
-          'Claude Code and Codex through one runtime-neutral pipeline. Others run in a tab, without the agent-aware features.',
+          'Claude Code, Codex and Antigravity (`agy`) through one runtime-neutral pipeline. Others run in a tab, without the agent-aware features.',
         theirs:
           'Built-in support for a longer list — Claude Code, Codex, Amp, Gemini CLI, OpenCode, Copilot CLI and more — plus any interactive CLI as a custom tool.',
       },

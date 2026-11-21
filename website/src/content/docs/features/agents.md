@@ -1,9 +1,9 @@
 ---
 title: Agent Integration
-description: One runtime-neutral pipeline that wires Claude Code and OpenAI Codex into maiTerm — IDE tools, live agent state, auto-resume, and bridging.
+description: One runtime-neutral pipeline that wires Claude Code, OpenAI Codex and Google's Antigravity CLI into maiTerm — IDE tools, live agent state, auto-resume, and bridging.
 ---
 
-maiTerm integrates deeply with coding agents — **Claude Code** and **OpenAI Codex** — through a single runtime-neutral pipeline. Both connect to the same MCP/IDE server, drive the same live agent-state indicators, auto-resume after a restart, pair through [Agent Bridge](/features/agent-bridge/), and send notifications — all without a manual setup step. maiTerm detects which agent connected from its own identity, so the right integration just lights up the moment you run `claude` or `codex`.
+maiTerm integrates deeply with coding agents — **Claude Code**, **OpenAI Codex** and Google's **Antigravity CLI** (`agy`) — through a single runtime-neutral pipeline. All three connect to the same MCP/IDE server, drive the same live agent-state indicators, auto-resume after a restart, pair through [Agent Bridge](/features/agent-bridge/), and send notifications — all without a manual setup step. maiTerm detects which agent connected from its own identity, so the right integration just lights up the moment you run `claude`, `codex` or `agy`.
 
 ## Supported agents
 
@@ -11,19 +11,33 @@ maiTerm integrates deeply with coding agents — **Claude Code** and **OpenAI Co
 |-------|---------------|-------------|
 | **Claude Code** | Yes | MCP/IDE tools, hooks + the [maiTerm mod](#the-maiterm-mod-claude-code), auto-resume, Agent Bridge (fork or connect), SSH bridge, `/maiterm` skill + status line |
 | **Codex** | Yes | MCP/IDE tools, lifecycle hooks, auto-resume, Agent Bridge (connect, or fork — new), SSH bridge, `maiterm` prompt |
+| **Antigravity** (`agy`) — new | Yes | MCP/IDE tools, lifecycle hooks, auto-resume, Agent Bridge (connect), SSH bridge, a maiTerm plugin with the `maiterm` skill |
 
-Both agents get the same core treatment: live state in the sidebar and footer, tab activity indicators, auto-resume after a crash or relaunch, and notifications — all driven through the same hooks pipeline. Integration is on by default for each; it only takes effect once you actually run that agent.
+All three get the same core treatment: live state in the sidebar and footer, tab activity indicators, auto-resume after a crash or relaunch, and notifications — all driven through the same hooks pipeline. Integration is on by default for each; it only takes effect once you actually run that agent.
+
+### Antigravity
+
+maiTerm treats an `agy` tab as a full agent, the way it treats Claude Code and Codex:
+
+- **It's in the Loom, the sidebar and on your phone**, with its chat, its model and how much of its context it has used. The [Loom](/features/loom/)'s model and effort menus work for it too.
+- **What it's stopped at reaches you.** Antigravity has no hook for its tool-permission prompt, so maiTerm reads the prompt off the screen and shows it as waiting for permission, answerable from the Loom, the Overlord or your [phone](/features/mailink/). Its workspace-trust dialog is treated the same way: maiTerm waits for you there rather than pressing a key.
+- **It never types over your draft.** Messages maiTerm sends it — from the phone, the Loom, a peer or a follow-up — read its input box first, exactly as they do for Claude Code and Codex.
+- **Its subagents show in its chat**, with their progress.
+- **It resumes with its conversation** after a restart, through `agy --conversation …`.
+
+Antigravity sessions can't be forked, so a bridge to one connects to an existing tab.
 
 ## How It Works
 
 ```
-Claude Code / Codex CLI ←→ Streamable HTTP ←→ axum server (Rust) ←→ Tauri events ←→ Frontend (Svelte)
+Claude Code / Codex / Antigravity CLI ←→ Streamable HTTP ←→ axum server (Rust) ←→ Tauri events ←→ Frontend (Svelte)
 ```
 
 There's **one** MCP/IDE server, shared by every agent. It starts automatically when maiTerm launches and listens on a single port with a single auth token. What differs per agent is only the on-disk config a CLI reads to discover it:
 
 - **Claude Code** — a lock file in `~/.claude/ide/`, an `mcpServers` entry in `~/.claude.json`, lifecycle hooks in `~/.claude/settings.json`, and a small [Claude Code mod](#the-maiterm-mod-claude-code) each tab's shell points Claude at.
 - **Codex** — an MCP block in `~/.codex/config.toml`, lifecycle hooks in `~/.codex/hooks.json`, and a `maiterm` prompt in `~/.codex/prompts/`.
+- **Antigravity** — a `maiterm` entry in `~/.gemini/config/mcp_config.json`, an allow rule for maiTerm's tools (`mcp(maiterm/*)`) in `~/.gemini/antigravity-cli/settings.json`, and a maiTerm plugin in `~/.gemini/config/plugins/maiterm/` holding its lifecycle hooks, a short rules file and the `maiterm` skill. Antigravity talks to maiTerm through a small stdio bridge that is maiTerm's own binary, so no port or secret is written to disk.
 
 When an agent connects, maiTerm identifies the runtime from the client's own handshake — so a Codex connection never binds to a Claude tab. And **no agent needs a manual registration step**: a tab names itself on the wire, and the session links itself the moment the agent process starts. See [Acting as the right tab](#acting-as-the-right-tab).
 
@@ -48,11 +62,20 @@ Agent settings live in one runtime-neutral **AI Agents** section in Preferences,
 - **Codex MCP bridge over SSH** — expose IDE tools to remote Codex
 - **Skip the one-time Codex hook-trust prompt** *(advanced)* — the only agent toggle off by default; Codex's one-time hook-trust approval is deliberately kept unless you opt out
 
+**Antigravity (agy)**
+
+- **Enable Antigravity IDE integration** — the MCP entry, the allow rule for maiTerm's tools, and the maiTerm plugin
+- **Bridge SSH sessions for Antigravity** — install the plugin and its bridge on SSH hosts, so a remote `agy` reaches this maiTerm (the host needs `python3`; a host without `agy` is left alone)
+- **Antigravity lifecycle hooks** — the plugin's hooks that report the session's state, tool activity and priming to maiTerm
+- **Antigravity auto-resume** — capture conversation IDs and resume with `agy --conversation` on restore
+
+The last three appear once the one above them is on.
+
 A separate **Deshittification** section switches off the vendor-serving parts of an agent — telemetry, feedback nags, Remote Control, and the `Co-Authored-By` trailer in your commits — and stops Claude Code asking permission for its own memory writes. Those rules edit the agent's own config rather than maiTerm's, so they hold in every terminal. See [Deshittification](/features/deshittification/).
 
 ### SSH MCP Bridge
 
-When you're SSH'd into a remote server, maiTerm bridges the MCP connection so an agent running remotely still has access to all IDE tools. A reverse SSH tunnel is set up automatically in the background — no manual port forwarding needed. For each enabled agent maiTerm writes the matching remote config (Claude Code's lock file and `~/.claude.json`, or Codex's `~/.codex/config.toml` and `hooks.json`), gracefully no-op'ing on a host that doesn't have that CLI installed. The bridge status is shown in the tab bar with a bolt icon (green = connected).
+When you're SSH'd into a remote server, maiTerm bridges the MCP connection so an agent running remotely still has access to all IDE tools. A reverse SSH tunnel is set up automatically in the background — no manual port forwarding needed. For each enabled agent maiTerm writes the matching remote config (Claude Code's lock file and `~/.claude.json`, Codex's `~/.codex/config.toml` and `hooks.json`, or Antigravity's plugin and `mcp_config.json`), gracefully no-op'ing on a host that doesn't have that CLI installed. The bridge status is shown in the tab bar with a bolt icon (green = connected).
 
 If a tunnel goes down — a network blip, or your Mac putting its displays to sleep — maiTerm rebuilds it on its own, backing off between attempts and staggering the tabs that share a host so they rejoin one connection rather than all re-authenticating at once. A tab whose shell has since `ssh`'d somewhere else follows the shell instead of being reconnected to the host it left.
 
@@ -197,7 +220,7 @@ An agent's way to pick work back up later without you having to remember it — 
 | `moveWorkspace` | Move a whole workspace to another window — at once, unless it's a mesh linked with another in its window, which the move would break |
 | `setMesh` | Make a workspace a Mesh Workspace, or stop it being one — **asks you** |
 | `linkMeshes` / `unlinkMesh` | Link two mesh workspaces into one mesh, or take one back out — **asks you** |
-| `createTab` | Open a new Claude Code, Codex or Gemini tab in a workspace, in a local folder or in a folder on an SSH host, optionally named — **asks you** |
+| `createTab` | Open a new Claude Code, Codex or Antigravity tab in a workspace, in a local folder or in a folder on an SSH host, optionally named — **asks you** |
 | `bridgeWith` | Bridge this agent 1:1 with another agent's tab in the same window, or fork that agent into a new tab and bridge with the copy — **asks you** |
 | `disconnectBridge` | Close this agent's [Agent Bridge](/features/agent-bridge/) — **asks you** |
 | `reloadTab` | Reload a terminal tab as `Cmd+Shift+R` does — its own tab at once (only if it will come back), another agent's tab **asks you** |
@@ -239,6 +262,8 @@ With **Preferences → Chrome extension** on, an agent gets eleven `browser…` 
 
 If [Overlord](/features/overlord/) is enabled and this window has an Overlord workspace, every supervised agent also gets `replyToOverlord`, and the supervisor agent gets a set of tools of its own — driving another tab, answering a prompt it's stuck at, proposing rule changes, and putting a finished session away. See [Overlord](/features/overlord/).
 
+`getReviewBrief` is how an agent gets its own work reviewed: rules for itself, a brief to hand a fresh reviewer unchanged, and the commits to review — everything since this tab's last review, not only the newest commit. Overlord's **Review after commit** rule points the agent at it.
+
 ### Acting as the right tab
 
 Every tool call an agent makes has to be attributed to the tab it's running in — that's what makes `getTabNotes` read *your* notes and `switchTab` mean something. maiTerm establishes that two ways, both automatic:
@@ -260,7 +285,7 @@ The `getTabContext` tool lets your agent peek at what's happening in your tabs �
 
 ## Agent Hooks
 
-maiTerm integrates with each agent's hook system for real-time session awareness — no regex triggers needed. Claude Code's hooks are registered in `~/.claude/settings.json`; Codex's lifecycle events are registered in `~/.codex/hooks.json`. Both feed the same pipeline:
+maiTerm integrates with each agent's hook system for real-time session awareness — no regex triggers needed. Claude Code's hooks are registered in `~/.claude/settings.json`; Codex's lifecycle events are registered in `~/.codex/hooks.json`; Antigravity's come from the `hooks.json` in maiTerm's plugin. All of them feed the same pipeline:
 
 - **Session lifecycle** — tracks session start, end, and compaction events
 - **Active tool overlay** — see what the agent is doing right now (editing files, running bash, etc.) in the terminal corner
@@ -282,7 +307,7 @@ The mod works from inside Claude Code rather than by pressing keys in its termin
 - **Other Claude sessions are off limits.** Claude Code lets sessions on the same machine message each other directly with its `SendMessage` tool. An agent in a maiTerm tab is refused a send to another session, and told to use `sendToBridgedAgent` instead — so a [bridge](/features/agent-bridge/) or a [mesh](/features/mesh-workspace/), which you set up, is the only way one maiTerm agent reaches another. Its own subagents and teammates are unaffected.
 - **SSH transcripts stream.** For an agent over SSH, the mod tells maiTerm as each part of the conversation is written, so text the agent wrote before a slow tool call reaches the phone and the Loom as the tool starts, not when it finishes.
 
-Codex tabs, and Claude Code versions without mods, keep the keystroke paths described on each feature's page.
+Codex and Antigravity tabs, and Claude Code versions without mods, keep the keystroke paths described on each feature's page.
 
 ## Agent State Indicators
 
@@ -298,7 +323,7 @@ A finished agent shows a **filled** green dot (unread); once you view its tab it
 
 ## Auto-resume
 
-The moment an agent's session starts, maiTerm captures its session ID and arms auto-resume so a restored or relaunched tab reconnects to the same conversation. Auto-resume is **runtime-aware**: the resume modal preselects the right command for whichever agent is running — `claude --resume …` for Claude Code, `codex resume …` for Codex — and hides itself entirely when a tab has no agent.
+The moment an agent's session starts, maiTerm captures its session ID and arms auto-resume so a restored or relaunched tab reconnects to the same conversation. Auto-resume is **runtime-aware**: the resume modal preselects the right command for whichever agent is running — `claude --resume …` for Claude Code, `codex resume …` for Codex, `agy --conversation …` for Antigravity — and hides itself entirely when a tab has no agent.
 
 ## Agent Bridge
 
@@ -318,7 +343,7 @@ You can also paste images from your clipboard (Cmd+V) into an agent session. mai
 
 ## The `/maiterm` Skill
 
-For Claude Code, maiTerm installs a skill that gives your agent fast slash-command access to the most common tools — `/maiterm notes`, `/maiterm tabs`, `/maiterm diag`, and more — without making it hunt through every MCP tool. It's written on launch and removed on exit, and it works the same way over SSH on bridged remote hosts. Codex gets an equivalent `maiterm` prompt written to `~/.codex/prompts/`.
+For Claude Code, maiTerm installs a skill that gives your agent fast slash-command access to the most common tools — `/maiterm notes`, `/maiterm tabs`, `/maiterm diag`, and more — without making it hunt through every MCP tool. It's written on launch and removed on exit, and it works the same way over SSH on bridged remote hosts. Codex gets an equivalent `maiterm` prompt written to `~/.codex/prompts/`, and Antigravity gets the skill inside maiTerm's plugin, beside a short rules file it reads at the start of every session.
 
 It also ships a recommended **status line** for Claude Code. Run `/maiterm-statusline` (not Claude Code's own `/statusline`, which copies your shell prompt) and your agent installs a compact status line showing host · cwd · git branch · model · reasoning effort · context usage. The installer renders a live colored preview first, only writes to `~/.claude/statusline-command.sh` and your settings (it's idempotent — safe to re-run), and tells you if `jq` is missing instead of leaving a broken line. It works on local sessions and on SSH-bridged hosts.
 

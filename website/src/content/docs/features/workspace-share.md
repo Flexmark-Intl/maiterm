@@ -32,7 +32,7 @@ A stack service's environment often holds tokens. The **names** of its variables
 
 ### Agent tabs
 
-A tab running Claude Code or Codex — or one whose auto-resume starts one — is listed with a **Start Claude** (or **Start Codex**) tick. Leave it ticked and the tab starts an agent on the other side; untick it and it arrives as a plain shell, and none of its agent commands come with it.
+A tab running Claude Code, Codex or Antigravity — or one whose auto-resume starts one — is listed with a **Start Claude** (or **Start Codex**, or **Start Antigravity**) tick. Leave it ticked and the tab starts an agent on the other side; untick it and it arrives as a plain shell, and none of its agent commands come with it.
 
 ## What travels, and what doesn't
 

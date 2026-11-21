@@ -68,5 +68,5 @@ An agent's claim to its own tab comes back with it: a tab names itself on every 
 Bridged tabs show a small link badge in the tab bar so you can see which sessions are paired at a glance. To break a bridge, right-click the tab and choose **Disconnect Agent Bridge** — the same tab menu that offers **Create Agent Bridge…**.
 
 :::note
-Agent Bridge is part of maiTerm's [agent integration](/features/agents/). It needs a supported agent (Claude Code or Codex) running in both tabs, and works over SSH through the same reverse-tunnel MCP bridge that powers the rest of the integration.
+Agent Bridge is part of maiTerm's [agent integration](/features/agents/). It needs a supported agent (Claude Code, Codex or Antigravity) running in both tabs, and works over SSH through the same reverse-tunnel MCP bridge that powers the rest of the integration.
 :::

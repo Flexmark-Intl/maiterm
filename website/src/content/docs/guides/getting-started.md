@@ -52,7 +52,7 @@ If you want to build maiTerm from source, you'll need:
 
 ## Setting Up Agent Integration
 
-maiTerm integrates with **Claude Code** and **OpenAI Codex**, both enabled by default. When you run `claude` or `codex` in a terminal tab, maiTerm automatically:
+maiTerm integrates with **Claude Code**, **OpenAI Codex** and Google's **Antigravity CLI** (`agy`), all enabled by default. When you run `claude`, `codex` or `agy` in a terminal tab, maiTerm automatically:
 
 1. Exposes MCP/IDE tools to the agent
 2. Tracks live state through the agent's hooks

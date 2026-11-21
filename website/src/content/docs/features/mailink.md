@@ -103,7 +103,7 @@ maiLink stays responsive on real workloads — a hundred-tab window and sessions
   <figcaption>Every reachable agent — a live transcript you can pick up and resume.</figcaption>
 </figure>
 
-maiLink only ever surfaces **agent tabs** (Claude Code, Codex) — never plain shells. Which of those are reachable is up to you, under **Preferences → maiLink**:
+maiLink only ever surfaces **agent tabs** (Claude Code, Codex, Antigravity) — never plain shells. Which of those are reachable is up to you, under **Preferences → maiLink**:
 
 - **Default-on** — every agent tab is available, except ones you exclude with **Make unavailable in maiLink** in the tab's right-click menu.
 - **Opt-in** — flip off *Make all tabs available in maiLink*, and only tabs (or whole workspaces) you explicitly mark **Make available in maiLink** appear on your phone.

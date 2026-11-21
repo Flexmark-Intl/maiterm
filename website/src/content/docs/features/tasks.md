@@ -67,7 +67,9 @@ When an agent asks which of several changes to make, the options come as checkbo
 
 ### Run
 
-When a card for something only you can do carries a command, **Run** runs it for you. A one-line `! …` command for a Claude Code agent is typed into the agent's own tab, where Claude Code runs it as a shell command and the agent sees the output, so the question closes. That's refused rather than held while the agent is mid-turn, while a dialog is open in its tab, or while you have a draft there or are typing in it. Anything else opens a new tab beside the agent, in its folder and on its SSH host if it has one, where a `sudo` can ask for your password; press **I've done it** once it has finished. A second **Run** of the same question within 30 seconds, while its tab is still open, is refused, so a retried tap doesn't run the command twice.
+When a card for something only you can do carries a command, **Run** runs it for you. A one-line `! …` command for a Claude Code agent is typed into the agent's own tab, where Claude Code runs it as a shell command and the agent sees the output, so the question closes. A busy agent doesn't stop it: Claude Code queues the line and runs it when its turn ends. It's refused rather than held while a dialog is open in its tab, or while you have a draft there or are typing in it. Anything else opens a new tab beside the agent, in its folder and on its SSH host if it has one, where a `sudo` can ask for your password; press **I've done it** once it has finished. A second **Run** of the same question within 30 seconds, while its tab is still open, is refused, so a retried tap doesn't run the command twice.
+
+A command can be meant for **another agent's tab** — a [mesh](/features/mesh-workspace/) peer or the agent's [bridge](/features/agent-bridge/) partner, say when a coordinator asks you to run something its peer needs. The card then says **For** that tab, and the host if it's over SSH, and shows in that tab's corner too; **Run** runs the command there (typed into that agent's tab, or in a new tab beside it), and the agent that asked is told. If that tab is no longer one the asking agent can reach, the card says so and offers no **Run**.
 
 With a maiLink build that shows it, **Run** works from your phone too.
 
@@ -109,7 +111,7 @@ The same list is editable from your phone: [maiLink](/features/mailink/#what-you
 
 ## What your agent gets
 
-Every agent tab — Claude Code, Codex, local or over SSH — gets four tools:
+Every agent tab — Claude Code, Codex, Antigravity, local or over SSH — gets four tools:
 
 | Tool | Description |
 |------|-------------|

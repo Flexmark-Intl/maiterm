@@ -50,7 +50,7 @@ Typing letters in the tree without `/` jumps to the next name that starts with t
 
 ## What your agents are doing
 
-Agent activity comes from the agents' own hooks, so it covers Claude Code and Codex tabs working in the folder the tree shows, local or on an SSH host.
+Agent activity comes from the agents' own hooks, so it covers Claude Code, Codex and Antigravity tabs working in the folder the tree shows, local or on an SSH host.
 
 - **Reads light up.** A file an agent reads or searches glows briefly and leaves no lasting mark.
 - **Changes stay marked.** A file being edited pulses while the edit runs; afterwards it keeps a dot in the agent's colour for the rest of the turn. A deleted file is struck through. Each agent tab has its own colour, the same one on its chip at the top of the tree.

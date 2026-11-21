@@ -58,11 +58,13 @@ A job result that comes in while you have the Hive paused is kept on disk, not i
 
 **Needs you** gathers everything any of the Hive's agents is waiting on you for — questions, permissions and approvals, from the Queen or any worker — in one list, answerable in place. Below it, **With the queen** lists what she's holding for now, each with **Take over** to answer it yourself.
 
+A decision or approval from the Queen herself opens here, beside her chat, rather than under it, so a long question doesn't cover the conversation that led to it; her chat shows a line that takes you to it.
+
 ## The Queen answers her workers
 
 A worker's permission prompts, questions and blockers go to the Queen first. She answers what she can and brings you only what she can't decide. Some things always come to you: anything you've set to **Ask me**, a permission row that would save a rule or change a mode, and anything she hasn't answered in time (five minutes by default, set in **Autonomy…**).
 
-**Autonomy…** in the Hive's settings decides who answers each kind of decision, **Queen** or **Ask me**: *Plan*, *Workers' questions*, *Workers' permission prompts*, *Landing*, *Picking finals in the gallery*, *Adding a dependency, changing a public interface*, and *Changing Hive settings*. Everything starts with the Queen except changing the Hive's settings, which asks you — and Landing, when work lands through an integration branch.
+**Autonomy…** in the Hive's settings decides who answers each kind of decision, **Queen** or **Ask me**: *Plan*, *Workers' questions*, *Workers' permission prompts*, *Landing*, *Picking finals in the gallery*, *Adding a dependency, changing a public interface*, and *Changing Hive settings*. Everything starts with the Queen except changing the Hive's settings, which asks you.
 
 When you answer something yourself, the Queen can record it as a **precedent** and cite it the next time the same question comes up, so you aren't asked twice. Precedents, and every decision she made, are under **Memory → Precedents** and **Memory → Decisions**, where you can edit a precedent, make it apply to every Hive, or override a decision.
 
@@ -74,13 +76,24 @@ When you answer something yourself, the Queen can record it as a **precedent** a
 
 **Their own app.** Workers don't install packages in their own shell; the folder's **Setup** installs from the lockfile, and a reinstall, a build or a test run is a job they queue with maiTerm, which runs it in a sandbox of its own and schedules jobs so a dozen builds don't swamp the machine. A worker can serve the app it's building on a port booked for it, fetch its pages and take screenshots of them, so it can check what it made before reporting.
 
+**The right Node.** A job runs on the Node version its folder asks for — `.nvmrc`, `.node-version`, `.tool-versions`, or else `engines.node` in `package.json` — using the newest installed version that fits (from Homebrew, nvm, fnm, Volta or asdf), not your shell's default. A builder's first setup uses the same one, so native packages are built for the Node its jobs run on.
+
+**Whole output kept.** When a job ends, everything its terminal kept is saved in the Hive's folder as `runs/<job>/output.log`, and a failed check names that file, so the Queen reads what failed instead of running it again.
+
 **The network.** A worker reaches only the hosts the Queen has granted the Hive, plus the package registries for installs. A refused host goes to her; she grants or removes hosts herself, with a reason that's kept in her decision log, and you can edit the list under **Workers and access…**.
+
+**A local database.** A worker's sandbox closes off this Mac's network services, so a builder whose tests need a database can't reach the one you run. Under **Workers and access…**, **Local databases workers may connect to** takes the socket of a Postgres, MySQL or Redis server on this Mac; builders, their jobs and their land checks may then connect to it. Reviewers never get one. A worker reaches every database that server holds, yours included, so give the Hive a database of its own. Only you can add one, and it applies from each worker's next launch.
 
 **Reviewed.** A finished builder's work is checked by a fresh reviewer worker, on a copy pinned at the commits it reported. Three failed reviews go to the Queen to settle.
 
 ## Landing work
 
-When a reviewed worker's work is ready, the Queen lands it — the exact commits that were reviewed — into the folder's **Base**, after the **Land check** you or she set for that repository passes. **How work lands** chooses between **Straight into Base** and **Into an integration branch, each land approved by you**. Whichever you chose, a land that changes agent or build configuration — hooks, settings, scripts that would run on your machine outside any sandbox — asks you first.
+When a reviewed worker's work is ready, the Queen lands it — the exact commits that were reviewed — into the folder's **Base**, after the **Land check** you or she set for that repository passes. **How work lands**, chosen when you make the Hive, is one of:
+
+- **Straight into Base** — the Queen merges each finished worker into its repository's Base branch.
+- **Into a branch of its own** — the Queen lands each finished worker into the Hive's own branch, by herself unless you've set *Landing* to **Ask me**. Base stays untouched until the work is in, and then she asks you once, with a card in the Hive and on your phone, to land that branch into Base. The card says whether the branch's last land check passed on exactly what would land. Approved, it becomes one merge commit on Base; nothing is pushed. Undoing that merge is done by hand.
+
+Whichever you chose, a land that changes agent or build configuration — hooks, settings, scripts that would run on your machine outside any sandbox — asks you first.
 
 Landing never touches your uncommitted work. **Land log** lists every land, undo and post-land check, newest first, and **Undo…** on a land writes a revert commit and lands it like any other: history is never rewritten. **Push after each land** pushes when you've asked for it; the Queen never pushes on her own.
 
@@ -145,7 +158,7 @@ Filter by kind (**All**, **Images**, **Video**, **Audio**, **Docs**) and more, g
 
 A finished Hive is **Done**, with the Queen's **Report**. Give a Done or paused Hive another goal with **New goal**, in the same Queen tab: the sheet takes the new goal, brief and files, and **Start the new goal** begins the next round; work from the last goal that hasn't landed yet stays in view over the board. **Earlier goals** keeps the ones before it.
 
-Or just message her: a message to a Done Hive's Queen — from the desktop or from your phone — wakes her in her old session.
+The Queen keeps running after Done. Write to her in the Hive's message box, or from your phone, and the Hive picks up again in the same session. Typing in her own terminal doesn't wake the Hive — her terminal says so while the Hive is Done — so use the message box.
 
 **Delete Hive…** lists what stops, which branches haven't landed, and what's kept. Clean copies are removed; anything holding work, the shared memory included, stays on disk, and no branch is ever deleted.
 

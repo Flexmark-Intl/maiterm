@@ -49,9 +49,9 @@ Guards are **human-only**. The supervisor agent can propose changes to a rule's 
 
 | Rule | What it does |
 |------|--------------|
-| **Checkpoint before compaction** | When an **idle** agent reaches 35% context and 130k tokens, have it commit finished work (never half-finished work), update docs, memory and code comments, clean up its own rows on the [task board](/features/tasks/) and leave a note on the task it's in the middle of saying where it is and what comes next — then compact. Claude Code and Codex tabs both get the `/compact` |
+| **Checkpoint before compaction** | When an **idle** agent reaches 35% context and 130k tokens, have it commit finished work (never half-finished work), update docs, memory and code comments, clean up its own rows on the [task board](/features/tasks/) and leave a note on the task it's in the middle of saying where it is and what comes next — then compact. Claude Code, Codex and Antigravity tabs all get the `/compact` |
 | **Checkpoint a busy agent** | The same checkpoint for an agent that never goes idle: at 55% context and 130k tokens it interrupts the working agent, instead of letting it hit the auto-compact wall mid-thought. It shares a cooldown with the rule above, so a tab gets one checkpoint, not two |
-| **Review after commit** | After a commit lands, nudge the agent to have non-trivial work reviewed by a subagent before moving on |
+| **Review after commit** | After a commit lands, have the agent get non-trivial work reviewed, following maiTerm's review brief, before moving on |
 | **Keep a task list** | A tab doing sustained work with nothing on the [maiTerm board](/features/tasks/) gets nudged to record it |
 
 They behave like [triggers](/features/triggers/): seeded on first run, individually toggleable, editable in place, hideable and restorable, and auto-updated with new versions of maiTerm until you edit one — at which point your wording is frozen and left alone. If a later version retires a default you had edited, your copy stays, as a rule of your own. **Checkpoint a busy agent** arrived split out of **Checkpoint before compaction**, so it starts with that rule's on/off and scope, and doesn't arrive at all if you had edited or deleted it.

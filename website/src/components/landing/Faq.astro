@@ -21,7 +21,7 @@ const FAQS = [
   },
   {
     q: 'Can maiTerm manage my MCP servers?',
-    a: 'The remote ones, if you want it to. Add a server in Preferences → MCP servers and sign in once: maiTerm keeps the sign-in in your system\'s credential store, refreshes it, and serves the server to Claude Code under every account, to Codex, and to Claude Code on your SSH hosts — where, on a machine several people share, each person\'s agents use their own sign-in. A server that goes down keeps its tools instead of vanishing mid-task. It is opt-in per server, and servers you installed directly keep working untouched. Local servers started with a command (apart from MiniMax and Meshy, which maiTerm runs itself for a Hive), Codex over SSH and Gemini aren\'t covered yet.',
+    a: 'The remote ones, if you want it to. Add a server in Preferences → MCP servers and sign in once: maiTerm keeps the sign-in in your system\'s credential store, refreshes it, and serves the server to Claude Code under every account, to Codex and Antigravity, and to Claude Code and Antigravity on your SSH hosts — where, on a machine several people share, each person\'s agents use their own sign-in. A server that goes down keeps its tools instead of vanishing mid-task. It is opt-in per server, and servers you installed directly keep working untouched. Local servers started with a command (apart from MiniMax and Meshy, which maiTerm runs itself for a Hive) and Codex over SSH aren\'t covered yet.',
   },
   {
     q: 'Can my agent see what is going wrong in my browser?',
@@ -37,7 +37,7 @@ const FAQS = [
   },
   {
     q: 'Can I see which files my agents changed?',
-    a: 'Yes. The Files column (Cmd+Shift+B) is a project tree that follows the tab you\'re in, and lights a file up as an agent reads it and marks what each agent changed this turn and this session, in that agent\'s colour. Narrow it to one agent\'s turn, or compare a file with how it was before the agent\'s first edit. It is built from the agents\' own tool calls, for Claude Code and Codex: a file that changed while an agent\'s shell command ran is labelled as exactly that, not as the agent\'s edit.',
+    a: 'Yes. The Files column (Cmd+Shift+B) is a project tree that follows the tab you\'re in, and lights a file up as an agent reads it and marks what each agent changed this turn and this session, in that agent\'s colour. Narrow it to one agent\'s turn, or compare a file with how it was before the agent\'s first edit. It is built from the agents\' own tool calls, for Claude Code, Codex and Antigravity: a file that changed while an agent\'s shell command ran is labelled as exactly that, not as the agent\'s edit.',
   },
   {
     q: 'Can I be signed in to two Claude accounts at once?',
@@ -45,7 +45,7 @@ const FAQS = [
   },
   {
     q: 'Which coding agents does it support?',
-    a: 'Claude Code and OpenAI Codex, through one runtime-neutral pipeline — you pick which ones maiTerm wires up in Preferences. Any other CLI still runs in a tab like it would in any terminal; it just does not get the agent-aware features.',
+    a: 'Claude Code, OpenAI Codex and Google\'s Antigravity CLI (agy), through one runtime-neutral pipeline — you pick which ones maiTerm wires up in Preferences. Any other CLI still runs in a tab like it would in any terminal; it just does not get the agent-aware features.',
   },
   {
     q: 'Is there an LLM built into the terminal?',

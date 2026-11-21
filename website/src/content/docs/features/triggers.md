@@ -3,7 +3,7 @@ title: Triggers & Automation
 description: Regex triggers that watch terminal output and fire actions — notifications, commands, and variable capture.
 ---
 
-Triggers watch your terminal output for patterns and fire actions automatically. Agent tracking (Claude Code and Codex) has moved to [hooks](/features/agents/#agent-hooks), but the trigger engine is fully available for your own custom automation.
+Triggers watch your terminal output for patterns and fire actions automatically. Agent tracking (Claude Code, Codex and Antigravity) has moved to [hooks](/features/agents/#agent-hooks), but the trigger engine is fully available for your own custom automation.
 
 ## How Triggers Work
 

@@ -16,7 +16,7 @@ import Faq from '../components/landing/Faq.astro';
 
 const title = 'maiTerm — keep a window full of coding agents on track';
 const description =
-  'A terminal for running Claude Code, Codex and your shells side by side: a kanban board shared with your agents, a rules-driven supervisor watching the window, and every tab back exactly as it was after a restart.';
+  'A terminal for running Claude Code, Codex, Antigravity and your shells side by side: a kanban board shared with your agents, a rules-driven supervisor watching the window, and every tab back exactly as it was after a restart.';
 
 /**
  * The hero rail: this page's own table of contents, newest feature first.
@@ -36,11 +36,21 @@ const description =
  * points at does the explaining.
  *
  * On the top entry, name the RUNTIME rather than "agent". Everywhere else on this
- * site an agent IS a CLI — Claude Code, Codex — so "two agent logins" reads as
+ * site an agent IS a CLI — Claude Code, Codex, Antigravity — so "two agent logins" reads as
  * two different agents signed in, which is the one thing that feature does not
  * do. It is two accounts for the same agent.
  */
 const KEY_FEATURES = [
+  {
+    id: 'antigravity',
+    // v3.16.0. Backed by features/agents.md "Antigravity", checked against
+    // src-tauri/src/claude_code/agy.rs, mcp_stdio.rs and src/lib/agents/descriptor.ts.
+    // Google's Antigravity CLI (`agy`), wire key "gemini". It is NOT Gemini CLI — never say
+    // "Gemini" here. No fork (supportsFork: false); Hive workers stay Claude Code only.
+    title: 'Antigravity',
+    blurb: 'A third agent, fully wired in',
+    new: true,
+  },
   {
     id: 'hive',
     // v3.13.0. Backed by features/hive.md, checked against src-tauri/src/hive/ and
@@ -48,7 +58,6 @@ const KEY_FEATURES = [
     // refuses queued jobs elsewhere; create.rs refuses Windows) — the band note says so.
     title: 'Hive',
     blurb: 'One goal, a Queen and her crew',
-    new: true,
   },
   {
     id: 'files',
@@ -69,10 +78,11 @@ const KEY_FEATURES = [
   {
     id: 'mcp',
     // v3.7.0. Backed by features/mcp-servers.md. Names the runtimes, per the rule above: Claude
-    // Code under every managed account and Codex locally, Claude Code on ssh hosts. NOT Gemini
-    // and NOT Codex over ssh (docs/mcp-proxy.md §2) — don't widen the blurb to "every agent".
+    // Code under every managed account, Codex and Antigravity locally, Claude Code and
+    // Antigravity (v3.16.0) on ssh hosts. NOT Codex over ssh (docs/mcp-proxy.md §2) — don't
+    // widen the blurb to "every agent".
     title: 'One MCP sign-in',
-    blurb: 'Claude Code and Codex, every account and host',
+    blurb: 'Claude Code, Codex, Antigravity, every account',
   },
   {
     id: 'requests',
@@ -139,7 +149,7 @@ const EVERYTHING = [
   },
   {
     title: 'Bridge two agents',
-    body: 'Connect two running sessions — one local, one over SSH, a Claude Code and a Codex — so they ask each other questions directly, in a split pane you can watch.',
+    body: 'Connect two running sessions — one local, one over SSH, a Claude Code beside a Codex or an Antigravity — so they ask each other questions directly, in a split pane you can watch.',
   },
   {
     title: 'A composer, not a shell line',
@@ -167,7 +177,7 @@ const EVERYTHING = [
       <p class="ln-eyebrow">A terminal for multi-agent work</p>
       <h1 class="hero-title">Keep a window full of agents on track</h1>
       <p class="hero-sub">
-        maiTerm runs Claude Code, Codex and your shells side by side — then shares a real
+        maiTerm runs Claude Code, Codex, Antigravity and your shells side by side — then shares a real
         kanban board with them, supervises them against rules you write, and brings every tab
         back exactly as it was. No LLM inside, no chat sidebar.
       </p>
@@ -230,9 +240,67 @@ const EVERYTHING = [
     </div>
   </section>
 
-  {/* ----------------------------------------------------------------- Hive */}
-  {/* The release slot (v3.13.0): the hero rail's top entry links here. --raised, right after the
+  {/* ---------------------------------------------------------- Antigravity */}
+  {/* The release slot (v3.16.0): the hero rail's top entry links here. --raised, right after the
       --flush hero; inserting it flipped every band down to the --sunken compat strip.
+
+      Every claim here is backed by features/agents.md "Antigravity" and checked against the code:
+      - Google's Antigravity CLI, `agy` (descriptor.ts displayName 'Antigravity'). It maps onto the
+        runtime once stubbed as Gemini CLI (wire key "gemini"); never call it Gemini here.
+      - The plugin (claude_code/agy.rs) carries hooks, a rules file and the skill; MCP through the
+        `--mcp-stdio` bridge. All four gemini_* preferences default ON (state/workspace.rs).
+      - Permission prompt + trust dialog are READ OFF THE SCREEN (mailink/permission.rs, trust.rs):
+        agy has no permission hook. Draft hold reads its `>` box (mailink/input_box.rs).
+      - Resume: `agy --conversation %geminiSessionId` (resume.ts). No fork (supportsFork: false).
+      - Proxied MCP servers locally and over ssh (mcp_proxy/entries.rs, ssh_tunnel.rs
+        build_agy_setup_script — needs python3 on the host).
+      - Hive workers are Claude Code only (features/hive.md) — the note says so. */}
+  <section class="ln-band ln-band--raised" id="antigravity">
+    <div class="ln-inner">
+      <p class="ln-eyebrow">Antigravity</p>
+      <h2 class="ln-h2 ln-h2--wide">Antigravity joins Claude Code and Codex.</h2>
+      <p class="ln-lead">
+        Run Google's Antigravity CLI, <code>agy</code>, in a maiTerm tab and it is a full agent,
+        not a program in a box. maiTerm installs its plugin, so the tab gets maiTerm's tools and
+        reports when it is working, idle or asking — in the sidebar, in the Loom and on your
+        phone, with its chat, its model and how much of its context it has used.
+      </p>
+
+      <div class="ln-cards">
+        <div class="ln-card">
+          <h3>Everything the others get</h3>
+          <p>
+            The shared kanban board, follow-ups, mesh and bridge peers, and the MCP servers you
+            signed in to once in maiTerm — on this Mac and on your SSH hosts.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>Stopped? You see where</h3>
+          <p>
+            Its permission prompt and its workspace-trust dialog are read off the screen and wait
+            for you, answerable from the Loom or your phone. Nothing maiTerm sends it is typed
+            over a message you are still writing.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>Back after a restart</h3>
+          <p>
+            A restored tab resumes the same conversation with nothing typed by you, and the
+            subagents it hands work to show in its chat, with their progress.
+          </p>
+        </div>
+      </div>
+      <p class="ln-note band-note">
+        On by default under Preferences → AI Agents; it takes effect once you run <code>agy</code>.
+        Over SSH the host needs <code>python3</code>. A Hive's workers are still Claude Code.
+      </p>
+      <a class="ln-cta-link" href="/features/agents/#antigravity">How maiTerm runs Antigravity</a>
+    </div>
+  </section>
+
+  {/* ----------------------------------------------------------------- Hive */}
+  {/* The release slot until v3.16.0 (v3.13.0). Plain since v3.16.0's Antigravity band went in
+      above it, which flipped every band down to the --sunken compat strip.
 
       Every claim here is backed by features/hive.md and checked against the code:
       - The coordinator is "Queen" on screen (create.rs COORDINATOR_TAB_NAME); she is NOT
@@ -248,7 +316,7 @@ const EVERYTHING = [
         setup is a sign-in, a pasted key or a Homebrew install (lib/hive/mediaSetup.ts), and Verify
         spends nothing (hive/media/verify.rs). Remotion and Google genmedia are guide-only — don't
         say "every provider sets up in place". */}
-  <section class="ln-band ln-band--raised" id="hive">
+  <section class="ln-band" id="hive">
     <div class="ln-inner">
       <p class="ln-eyebrow">Hive</p>
       <h2 class="ln-h2 ln-h2--wide">Give the goal to a Queen. She runs the crew.</h2>
@@ -300,8 +368,8 @@ const EVERYTHING = [
   </section>
 
   {/* ---------------------------------------------------------------- Files */}
-  {/* The release slot until v3.13.0 (v3.12.0). Plain since the Hive band went in above it,
-      which flipped every band down to the --sunken compat strip.
+  {/* The release slot until v3.13.0 (v3.12.0). Plain after the Hive band went in above it;
+      --raised since v3.16.0's Antigravity band flipped the page again.
 
       Every claim here is backed by features/files.md and checked against the code:
       - Reads light briefly, changes keep a dot in the agent's colour for the turn (agents.ts,
@@ -311,7 +379,7 @@ const EVERYTHING = [
       - Only the human opens, closes or resizes the column (workspacesStore.setFileTreeOpen).
       - ssh roots run a python3 helper on the host; without python3 they are read-only.
       - Dropping paths onto a terminal inserts, never submits (utils/insertPaths.ts). */}
-  <section class="ln-band" id="files">
+  <section class="ln-band ln-band--raised" id="files">
     <div class="ln-inner">
       <p class="ln-eyebrow">Files</p>
       <h2 class="ln-h2 ln-h2--wide">See what your agents read and change, as they do it.</h2>
@@ -351,7 +419,7 @@ const EVERYTHING = [
         </div>
       </div>
       <p class="ln-note band-note">
-        Agent activity for Claude Code and Codex. The column opens, closes and changes width only
+        Agent activity for Claude Code, Codex and Antigravity. The column opens, closes and changes width only
         when you do — nothing re-flows a streaming agent behind your back.
       </p>
       <a class="ln-cta-link" href="/features/files/">How Files works</a>
@@ -359,7 +427,7 @@ const EVERYTHING = [
   </section>
 
   {/* ------------------------------------------------------- Browser link */}
-  {/* The release slot until v3.12.0 (v3.11.0). --raised since v3.13.0's Hive band flipped
+  {/* The release slot until v3.12.0 (v3.11.0). Plain since v3.16.0's Antigravity band flipped
       the page.
 
       Every claim here is backed by features/chrome-extension.md and checked against
@@ -370,7 +438,7 @@ const EVERYTHING = [
       - Tools are listed only while Preferences -> Chrome extension is on.
       - On the Chrome Web Store (id mdaccealpnngffgibmnijfgakddfgjpa); Load unpacked is the fallback.
       - Chromium browsers only (install.rs: Chrome, Chromium, Brave, Edge, Vivaldi, Arc). */}
-  <section class="ln-band ln-band--raised" id="browser">
+  <section class="ln-band" id="browser">
     <div class="ln-inner">
       <p class="ln-eyebrow">Chrome extension</p>
       <h2 class="ln-h2 ln-h2--wide">Hand an agent the browser tab with the bug in it.</h2>
@@ -422,17 +490,19 @@ const EVERYTHING = [
   </section>
 
   {/* ---------------------------------------------------------- MCP servers */}
-  {/* The release slot until v3.11.0 (v3.7.0). Plain since v3.13.0's Hive band flipped the page.
+  {/* The release slot until v3.11.0 (v3.7.0). --raised since v3.16.0's Antigravity band flipped the page.
 
       Every claim here is backed by features/mcp-servers.md and checked against
       src-tauri/src/mcp_proxy/ + components/mcp/McpServersPane.svelte:
       - Entries go to ~/.claude.json + every managed account root, and ~/.codex/config.toml,
         each only while that runtime's IDE integration is on (entries.rs sync).
-      - SSH hosts: Claude Code only, merged by the bridge setup; remote Codex and Gemini are v2.
+      - Antigravity (v3.16.0): ~/.gemini/config/mcp_config.json locally, and on ssh hosts through its
+        bridge setup (add-only, like Claude's).
+      - SSH hosts: Claude Code and Antigravity, merged by the bridge setup; remote Codex is v2.
       - A down upstream keeps its catalog; a call answers isError with a sentence.
       - Claude re-lists on list_changed; Codex 0.157 ignores it until its next session.
       - addMcpServer files an mcp_add request; it never signs in. Streamable HTTP + tools only. */}
-  <section class="ln-band" id="mcp">
+  <section class="ln-band ln-band--raised" id="mcp">
     <div class="ln-inner">
       <p class="ln-eyebrow">MCP servers</p>
       <h2 class="ln-h2 ln-h2--wide">Sign in to an MCP server once. Every agent gets it.</h2>
@@ -445,7 +515,7 @@ const EVERYTHING = [
       <p class="ln-lead">
         Add it in <strong>Preferences → MCP servers</strong> instead. maiTerm signs in once, keeps
         the sign-in in your system's credential store and keeps it fresh, and hands the server to
-        Claude Code under every account and to Codex. Each sees it as an ordinary MCP server of its
+        Claude Code under every account, to Codex and to Antigravity. Each sees it as an ordinary MCP server of its
         own, with the same tool names, so your permission rules still apply. The agents never hold
         the token.
       </p>
@@ -454,7 +524,7 @@ const EVERYTHING = [
         <div class="ln-card">
           <h3>Your sign-in, even on a shared host</h3>
           <p>
-            Claude Code on your SSH hosts gets the same servers, through your own tunnel to your
+            Claude Code and Antigravity on your SSH hosts get the same servers, through your own tunnel to your
             own maiTerm. On a machine several people share, each person's agents use their own
             sign-in.
           </p>
@@ -478,7 +548,7 @@ const EVERYTHING = [
       </div>
       <p class="ln-note band-note">
         Opt-in, one server at a time; servers you installed directly are left alone. Remote
-        (HTTP) servers and their tools for now, served while maiTerm is running. Codex over SSH and Gemini don't
+        (HTTP) servers and their tools for now, served while maiTerm is running. Codex over SSH doesn't
         get them yet.
       </p>
       <a class="ln-cta-link" href="/features/mcp-servers/">How MCP servers work</a>
@@ -486,7 +556,7 @@ const EVERYTHING = [
   </section>
 
   {/* ------------------------------------------------------------ Requests */}
-  {/* The release slot until v3.7.0 (v3.5.0). --raised since v3.13.0's Hive band flipped the page.
+  {/* The release slot until v3.7.0 (v3.5.0). Plain since v3.16.0's Antigravity band flipped the page.
 
       Every claim here is backed by features/agents.md "Organising tabs, meshes and maiTerm"
       and checked against src/lib/stores/agentRequests.svelte.ts + src-tauri/src/agent_requests.rs:
@@ -494,8 +564,8 @@ const EVERYTHING = [
         tab's mesh (or breaks a link), which files a request — "around" is the honest verb.
       - bridgeWith / disconnectBridge (v3.6.0) are requests too: a 1:1 bridge changes who can
         message whom. Extends this band rather than taking the release slot.
-      - createTab is ALWAYS a request, mesh or not. It can start gemini too; this page names
-        no runtimes so it doesn't outrun "Claude Code and Codex" elsewhere.
+      - createTab is ALWAYS a request, mesh or not. It can start Antigravity ("gemini") too; this page
+        names no runtimes there, so it needn't track the list.
       - comms_post (v3.15.0): startCommsThread, a one-off postCommsReply, and the first post in
         a thread bound by permalink (bindCommsThread sets outbound_needs_approval — /maiterm
         resolve included). Only a SUMMONED thread, or one whose first post was approved, posts
@@ -503,7 +573,7 @@ const EVERYTHING = [
       - Approval is only the card (Loom Decisions) or a PAIRED phone (authorize_human refuses
         the dev token). AskUserQuestion and Claude's permission dialog are not approval.
       - Pending requests lapse after 30 min (PENDING_TTL_MS). */}
-  <section class="ln-band ln-band--raised" id="requests">
+  <section class="ln-band" id="requests">
     <div class="ln-inner">
       <p class="ln-eyebrow">Agents that ask first</p>
       <h2 class="ln-h2 ln-h2--wide">Your agents can tidy up. Who talks to whom is still your call.</h2>
@@ -547,7 +617,7 @@ const EVERYTHING = [
   </section>
 
   {/* -------------------------------------------------------------- Inside */}
-  {/* The release slot until v3.5.0 (v3.4.0). Plain since v3.13.0's Hive band flipped
+  {/* The release slot until v3.5.0 (v3.4.0). --raised since v3.16.0's Antigravity band flipped
       the page.
 
       Every claim here is backed by features/agents.md "The maiTerm mod (Claude Code)"
@@ -557,7 +627,7 @@ const EVERYTHING = [
       - Prompts go around a draft only BETWEEN TURNS (mod_inbox::takes_now); mid-turn a
         draft still holds them. "Reach an idle agent" is the honest wording.
       - Cross-session refusal is outbound from maiTerm tabs only. */}
-  <section class="ln-band" id="inside">
+  <section class="ln-band ln-band--raised" id="inside">
     <div class="ln-inner">
       <p class="ln-eyebrow">Inside Claude Code</p>
       <h2 class="ln-h2 ln-h2--wide">It works with Claude Code from the inside, not through its keyboard.</h2>
@@ -606,7 +676,7 @@ const EVERYTHING = [
 
       No screenshot yet: a real Focus view is a list of real tab names and transcripts.
       A staged one belongs here once the screenshot playbook has been run for it. */}
-  <section class="ln-band ln-band--raised" id="loom">
+  <section class="ln-band" id="loom">
     <div class="ln-inner">
       <p class="ln-eyebrow">Workstream Loom</p>
       <h2 class="ln-h2 ln-h2--wide">Every agent in the window. None of their terminals.</h2>
@@ -663,7 +733,7 @@ const EVERYTHING = [
       No screenshot on purpose: the Accounts pane is a list of real email
       addresses and organisation names. Every honest shot of it leaks an identity,
       and a staged one would be a fake account list. */}
-  <section class="ln-band" id="accounts">
+  <section class="ln-band ln-band--raised" id="accounts">
     <div class="ln-inner">
       <p class="ln-eyebrow">Agent accounts</p>
       <h2 class="ln-h2 ln-h2--wide">Claude Code has one login slot. Your week does not.</h2>
@@ -727,7 +797,7 @@ const EVERYTHING = [
   </section>
 
   {/* --------------------------------------------------------- Progression */}
-  <section class="ln-band ln-band--raised">
+  <section class="ln-band">
     <div class="ln-inner">
       <p class="ln-eyebrow">Start with what you know</p>
       <h2 class="ln-h2 ln-h2--wide">It is a terminal first. The rest waits until you want it.</h2>
@@ -769,7 +839,7 @@ const EVERYTHING = [
   {/* --------------------------------------------------------------- Stack */}
   {/* .ln-cards sits OUTSIDE the text block on purpose: `.ln-stack > :first-child`
       caps at 46rem, which drops the three-card grid to two columns. */}
-  <section class="ln-band" id="stack">
+  <section class="ln-band ln-band--raised" id="stack">
     <div class="ln-inner ln-stack">
     <div>
       <p class="ln-eyebrow">Workspace stack</p>
@@ -844,7 +914,7 @@ const EVERYTHING = [
   </section>
 
   {/* --------------------------------------------------------------- Tasks */}
-  <section class="ln-band ln-band--raised" id="board">
+  <section class="ln-band" id="board">
     <div class="ln-inner ln-stack">
       <div>
         <p class="ln-eyebrow">Task board</p>
@@ -906,7 +976,7 @@ const EVERYTHING = [
   </section>
 
   {/* ------------------------------------------------------------ Overlord */}
-  <section class="ln-band" id="overlord">
+  <section class="ln-band ln-band--raised" id="overlord">
     <div class="ln-inner">
       <p class="ln-eyebrow">Overlord</p>
       <h2 class="ln-h2">A supervisor for a window full of agents</h2>
@@ -961,7 +1031,7 @@ const EVERYTHING = [
   </section>
 
   {/* ---------------------------------------------------------------- Mesh */}
-  <section class="ln-band ln-band--raised" id="mesh">
+  <section class="ln-band" id="mesh">
     <div class="ln-inner ln-stack">
       <div>
         <p class="ln-eyebrow">Mesh workspace</p>
@@ -997,7 +1067,7 @@ const EVERYTHING = [
   </section>
 
   {/* ------------------------------------------------------------- maiLink */}
-  <section class="ln-band" id="mailink">
+  <section class="ln-band ln-band--raised" id="mailink">
     <div class="ln-inner ln-split">
       <div>
         <p class="ln-eyebrow">maiLink companion</p>
@@ -1054,7 +1124,7 @@ const EVERYTHING = [
       No screenshot here on purpose — a real Mattermost thread is a customer bug
       report with real usernames on it, and staging a fake one convincingly is a
       bigger job than this band is worth. */}
-  <section class="ln-band ln-band--raised" id="comms">
+  <section class="ln-band" id="comms">
     <div class="ln-inner">
       <p class="ln-eyebrow">Chat threads</p>
       <h2 class="ln-h2 ln-h2--wide">The bug report never has to leave the thread it landed in.</h2>
@@ -1111,12 +1181,12 @@ const EVERYTHING = [
   </section>
 
   {/* ---------------------------------------------------------- Follow-ups */}
-  {/* Plain, the last band before the --sunken compat strip: Chat threads above it is
-      --raised (since v3.13.0's Hive band flipped the page), and the sunken strip resets
+  {/* --raised, the last band before the --sunken compat strip: Chat threads above it is
+      plain (since v3.16.0's Antigravity band flipped the page), and the sunken strip resets
       parity below.
       Follow-ups only run while the Overlord is on (Preferences.follow_ups_live()),
       so the note says so rather than letting the band read as always-on. */}
-  <section class="ln-band" id="follow-ups">
+  <section class="ln-band ln-band--raised" id="follow-ups">
     <div class="ln-inner">
       <p class="ln-eyebrow">Follow-ups</p>
       <h2 class="ln-h2 ln-h2--wide">An agent that comes back to it, without you remembering to ask.</h2>
@@ -1161,7 +1231,7 @@ const EVERYTHING = [
         </div>
       </div>
       <p class="ln-note band-note">
-        Part of Overlord, so it is live while Overlord is on. Claude Code and Codex alike, and
+        Part of Overlord, so it is live while Overlord is on. Claude Code, Codex and Antigravity alike, and
         it survives maiTerm restarting. An agent working over SSH has its watch script run on
         that host, where the thing it is waiting for is.
       </p>
@@ -1178,6 +1248,7 @@ const EVERYTHING = [
       <ul class="compat-list">
         <li>Claude Code</li>
         <li>OpenAI Codex</li>
+        <li>Antigravity CLI</li>
         <li>Local shells</li>
         <li>SSH hosts</li>
         <li>macOS</li>

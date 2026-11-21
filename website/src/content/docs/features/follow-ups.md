@@ -23,14 +23,14 @@ While follow-ups are off, agents aren't told the feature exists and don't get th
 | A service stopped | The next time a running stack service stops or crashes |
 | A task is done | When a [task](/features/tasks/) ends — done, or dropped, and the follow-up says which |
 
-Event triggers fire on the **next** change: asking to hear when a service comes up while it's already up is refused, with a note to act now instead. If the service or task is removed before it happens, the agent is told that instead. Event and script follow-ups wait at most 7 days.
+Event triggers fire on the **next** change: asking to hear when a service comes up while it's already up is refused, with a note to act now instead. If the service or task is removed before it happens, the agent is told that instead. Event follow-ups wait at most 7 days. A watch script waits until it passes, however long that takes, unless the agent gives it an expiry, so an alarm watch doesn't need renewing every week.
 
 Each tab can hold 10 pending follow-ups. A follow-up fires once; an agent that wants to keep watching schedules the next one when this one arrives.
 
 | Tool | What it does |
 |------|--------------|
 | `createFollowUp` | Schedule a prompt back to this tab, with exactly one trigger |
-| `listFollowUps` | This tab's pending follow-ups, including ones you added |
+| `listFollowUps` | This tab's pending follow-ups, including ones you added — and for a watch script, how it's really running: its runs in the last hour, how long the last one took, and since when its host has been unreachable |
 | `cancelFollowUp` | Cancel one of this tab's follow-ups |
 
 An agent can only schedule into its own tab. Typing into *another* agent's tab is what Overlord's guarded `driveTab` is for, and a follow-up tool that could do it would hand that power to every agent.
@@ -43,15 +43,15 @@ The agent writes the condition as a short script. maiTerm runs it on a schedule,
 
 - **Exit `0`** — the condition is met. Whatever the script printed is delivered with the follow-up, so the agent learns *what* it found without spending its first turn looking.
 - **Exit `1`** — not yet; run again later.
-- **Anything else**, or a timeout — the script is broken. After three broken runs in a row the follow-up comes due anyway, telling the agent the script broke and why, rather than waiting out seven days on a typo.
+- **Anything else**, or a timeout — the script is broken. After three broken runs in a row the follow-up comes due anyway, telling the agent the script broke and why, rather than waiting forever on a typo.
 
-A script runs every 15 seconds to once a day (every 60 seconds by default), for up to a minute a run. Each run starts in the tab's folder with your login `PATH` but **not** your environment — no agent credentials, no account tokens — and everything it starts is killed when it ends, so a watch script can never leave a process running. It can keep state between runs in a file maiTerm gives it, which is how "changed since last time" is written.
+A script runs every 15 seconds to once a day (every 60 seconds by default), for up to a minute a run. Each run starts in the tab's folder with your login `PATH` but **not** your environment — no agent credentials, no account tokens — and everything it starts is killed when it ends, so a watch script can never leave a process running. It can keep state between runs in a file maiTerm gives it (`$MAITERM_WATCH_STATE`, kept across restarts and never shared with another follow-up), which is how "changed since last time" is written. `$MAITERM_WATCH_LAST_RUN` holds when its previous run started, in Unix seconds (empty on its first run since maiTerm started), so a script can look back over a gap: nothing runs while the Mac sleeps.
 
 ### From an SSH tab, on the host
 
 An agent working over SSH is waiting on something on *that* machine, so its watch script runs **there**, not on your computer. Each run goes over the connection maiTerm's [SSH bridge](/features/agents/#ssh-mcp-bridge) already holds open to the host — no new login — and keeps the same rules on the far side: it starts in the tab's folder on the host, with that user's login `PATH` and a minimal environment, keeps its state file there, and everything it starts is killed when the run ends.
 
-The approval card names the machine — the folder reads as `user@host:folder` — and an approval is for that script in that folder on that host. If the host can't be reached for a run, that counts as waiting, not as the script breaking.
+The approval card names the machine — the folder reads as `user@host:folder` — and an approval is for that script in that folder on that host. If the host can't be reached for a run, that counts as waiting, not as the script breaking — including a struggling host that refuses new sessions on the watch's own connection, however long that lasts. The one exception: when the watch has found no connection it can use for 10 minutes while maiTerm *is* connected to the same `user@host` another way, its runs count as broken, so the agent is woken to schedule it again from a tab with a working connection rather than seeing "unreachable" forever beside an open tab.
 
 ### You approve each script first
 
