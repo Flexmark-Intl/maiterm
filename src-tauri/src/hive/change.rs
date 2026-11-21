@@ -781,17 +781,21 @@ pub(crate) async fn approved_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         args.get("change").cloned().ok_or_else(|| "it had no change".to_string()).and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()));
     let res = match change {
         Ok(c) => match remotes_of(&caller.hive).await {
-            Ok(remotes) => super::change_plan::commit(ctx, caller, &c, By::Approved, &remotes).await.map(|(h, lines)| (h, lines, c)),
+            Ok(remotes) => super::change_plan::commit(ctx, caller, &c, By::Approved, &remotes).await.map(|done| (done, c)),
             Err(e) => Err(e),
         },
         Err(e) => Err(e),
     };
     match res {
-        Ok((hive, lines, c)) => {
+        Ok((done, c)) => {
+            let (hive, lines) = (done.hive, done.lines);
             log_line(caller, "coordinator, approved by the human", &lines, None);
-            ctx.window.settle_request(request_id, true, format!("applied: {}", lines.join("; ")));
+            // What applied stands; a part the Hive's changes meanwhile refused is said with it.
+            let not = done.failed.as_ref().map(|e| format!("; not applied: {e}")).unwrap_or_default();
+            ctx.window.settle_request(request_id, true, format!("applied: {}{not}", lines.join("; ")));
             let running = relaunch_note(caller, &c).await.map(|s| format!("\n{s}")).unwrap_or_default();
-            tell_coordinator(ctx, caller, format!("[maiTerm] Your human approved your settings change:{}{running}", bulleted(&lines))).await;
+            let not = done.failed.map(|e| format!("\nNot applied, as the Hive changed meanwhile: {e}")).unwrap_or_default();
+            tell_coordinator(ctx, caller, format!("[maiTerm] Your human approved your settings change:{}{running}{not}", bulleted(&lines))).await;
             ctx.window.poll_waiters(&caller.workspace_id);
             let moved: Vec<String> = lines.iter().filter_map(|l| l.strip_prefix("Checkpoint, ").map(str::to_string)).collect();
             (!moved.is_empty()).then_some((hive, moved))
