@@ -57,11 +57,11 @@ You are running inside a **maiTerm** terminal tab. Your MCP server is **`maiterm
 - **Tasks & decision/action cards:** A maiTerm "decision card" or "action card" is a task with a **`blocker`** object (via `createTasks` or `updateTasks`). Do not also ask the same question with `ask_question`.
   - Decision card: `createTasks({ workstream?, tasks: [{ title: "...", blocker: { kind: "decision", question: "...", options: [{ label: "Option A", detail: "...", recommended: true }, { label: "Option B" }], context: "..." } }] })` (add `pick: "many"` for multi-select).
   - Action card (human runs a command): `blocker: { kind: "action", question: "...", command: "...", context: "...", run_in?: "peer name" }`.
-  - Task tools: `createTasks({ tasks, workstream? })` (`status`: `"backlog"|"todo"|"active"|"blocked"|"review"|"done"`), `listTasks({ scope?: "tab"|"workspace", status?, ready?, limit? })`, `updateTasks({ updates: [{ id, status?, note?, detail?, blocker?, assign_to?, block_on?, unblock_from? }] })`, `deleteTasks({ ids?, workstreams? })`.
+  - Task tools: `createTasks({ tasks, workstream? })` (`status`: `"backlog"|"todo"|"active"|"blocked"|"review"|"done"`), `listTasks({ scope?: "tab"|"workspace", status?: [...], ready?, limit? })`, `updateTasks({ updates: [{ id, status?, note?, detail?, blocker?, assign_to?, block_on?, unblock_from? }] })`, `deleteTasks({ ids?, workstreams? })`.
 - **Overlord & review:** If priming mentions an Overlord, call `replyToOverlord({ kind: "ready"|"ack"|"status"|"escalate", state: "working"|"blocked"|"done"|"idle", summary: "...", task?, next?, blockers?, needs_human? })`. After non-trivial commits, call `getReviewBrief({ repo?, head? })`.
-- **Notes & workspace UI:** `getTabNotes({})`, `setTabNotes({ notes, mode?: "replace"|"append" })`, `editTabNotes({ old_string, new_string } | { edits })`, `openNotesPanel({ open? })`, `listWorkspaceNotes({ workspaceId? })`, `readWorkspaceNote({ noteId, workspaceId? })`, `writeWorkspaceNote({ content, noteId?, mode?, workspaceId? })`, `openFile({ filePath, startLine?, endLine? })`, `showDiff({ filePath, ref?: "@turn"|"@session"|"<git-ref>" })`, `listWorkspaces({ windowId? })`, `getActiveTab({})`, `switchTab({})`, `sendNotification({ title, body?, type? })`, `setMuted({ muted, scope?, target? })`.
+- **Notes & workspace UI:** `getTabNotes({})`, `setTabNotes({ notes, mode?: "source"|"render" })`, `editTabNotes({ old_string, new_string } | { edits })`, `openNotesPanel({ open? })`, `listWorkspaceNotes({ workspaceId? })`, `readWorkspaceNote({ noteId, workspaceId? })`, `writeWorkspaceNote({ content, noteId?, mode?: "source"|"render", workspaceId? })`, `openFile({ filePath, startLine?, endLine? })`, `showDiff({ filePath, ref?: "@turn"|"@session"|"<git-ref>" })`, `listWorkspaces({ windowId? })`, `getActiveTab({})`, `switchTab({ tabId })`, `sendNotification({ title, body?, type? })`, `setMuted({ muted, scope?, target? })`.
 - **Mesh / Agent Bridge:** `listBridgedPeers({})`, `sendToBridgedAgent({ message, recipient?, topic? })`, `getBridgedAgent({})`, `listTopics({})`, `startTopic({ label })`, `completeTopic({ topicId })`.
-- **Follow-ups:** `createFollowUp({ text, in_minutes? | at? | when_script? | when_service_ready? | when_service_stopped? | when_task_done?, expires_in_minutes? })`, `listFollowUps({})`, `cancelFollowUp({ id })`.
+- **Follow-ups:** `createFollowUp({ text, in_minutes? | at? | when_script?: { script, label?, every_seconds? } | when_service_ready? | when_service_stopped? | when_task_done?, expires_in_minutes? })`, `listFollowUps({})`, `cancelFollowUp({ id })`.
 - **Browser Link (linked Chrome tabs):** `browserStatus({})`, `browserSnapshot({ tab?, max_chars? })`, `browserClick({ ref, tab?, double? })`, `browserType({ text, ref?, tab?, clear?, submit? })`, `browserConsole({ tab?, errors_only?, clear? })`, `browserNetwork({ tab?, failed_only?, filter?, request_id? })`, `browserScreenshot({ tab?, full_page? })`.
 - For `/maiterm resolve` (Mattermost threads) or detailed `/maiterm` subcommand mappings, activate the `maiterm` skill.
 "#;
@@ -685,6 +685,10 @@ mod tests {
         assert!(agents_md.contains("sendToBridgedAgent({ message,"));
         assert!(agents_md.contains("createFollowUp({ text,"));
         assert!(!agents_md.contains("in_progress"), "createTasks status enum uses active, not in_progress");
+        assert!(!agents_md.contains("replace\"|\"append"), "setTabNotes mode is source|render, not replace|append");
+        assert!(agents_md.contains("setTabNotes({ notes, mode?: \"source\"|\"render\" })"));
+        assert!(agents_md.contains("switchTab({ tabId })"));
+        assert!(agents_md.contains("status?: [...]"));
         assert!(paths.plugin_dir.join("hooks.json").exists());
         assert!(paths.plugin_dir.join("hooks/agy-hook.sh").exists());
         assert!(paths.plugin_dir.join("skills/maiterm/SKILL.md").exists());
@@ -856,5 +860,110 @@ mod tests {
         assert_eq!(settings["permissions"]["allow"][0], "mcp(maiterm/*)");
 
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn agy_agents_md_signatures_match_protocol_schemas() {
+        use std::collections::HashMap;
+        use super::super::protocol::{tool_list_response, ToolGates};
+
+        let tools = tool_list_response(ToolGates {
+            tasks: true,
+            stack: true,
+            follow_ups_live: true,
+            escalations_to_overlord: true,
+            browser_link: true,
+            file_tree: true,
+            hive: None,
+        });
+        let by_name: HashMap<&str, &Value> = tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| Some((t["name"].as_str()?, t)))
+            .collect();
+
+        // Check every backticked `toolName({ ... })` (and `maiterm/toolName({ ... })`) signature in
+        // AGY_AGENTS_MD against the real MCP inputSchema in protocol.rs: tool must exist, every
+        // required argument must be named in the signature, and every top-level key named in the
+        // signature must exist in inputSchema.properties.
+        let mut checked = 0usize;
+        for chunk in AGY_AGENTS_MD.split('`').skip(1).step_by(2) {
+            let Some((head, rest)) = chunk.split_once("({") else { continue };
+            let tool = head.strip_prefix("maiterm/").unwrap_or(head);
+            if tool.is_empty() || !tool.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                continue;
+            }
+            let schema = by_name
+                .get(tool)
+                .unwrap_or_else(|| panic!("AGY_AGENTS_MD references unknown MCP tool `{tool}`"));
+            let props = schema["inputSchema"]["properties"].as_object().unwrap();
+            let required: Vec<&str> = schema["inputSchema"]["required"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+
+            // Extract top-level parameter identifiers from inside `{ ... }` (depth 1).
+            let mut depth = 1usize;
+            let mut in_str = false;
+            let mut top_keys: Vec<String> = Vec::new();
+            let mut cur = String::new();
+            let mut expect_key = true;
+            for ch in rest.chars() {
+                if ch == '"' {
+                    in_str = !in_str;
+                    continue;
+                }
+                if in_str {
+                    continue;
+                }
+                match ch {
+                    '{' | '[' => {
+                        depth += 1;
+                    }
+                    '}' | ']' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            if expect_key && !cur.is_empty() {
+                                top_keys.push(std::mem::take(&mut cur));
+                            }
+                            break;
+                        }
+                    }
+                    ',' | '|' if depth == 1 => {
+                        if expect_key && !cur.is_empty() {
+                            top_keys.push(std::mem::take(&mut cur));
+                        }
+                        expect_key = true;
+                    }
+                    ':' if depth == 1 => {
+                        if expect_key && !cur.is_empty() {
+                            top_keys.push(std::mem::take(&mut cur));
+                        }
+                        expect_key = false;
+                    }
+                    '?' | ' ' | '\t' if depth == 1 => {}
+                    c if depth == 1 && expect_key && (c.is_ascii_alphanumeric() || c == '_') => {
+                        cur.push(c);
+                    }
+                    _ => {}
+                }
+            }
+
+            for req in &required {
+                assert!(
+                    top_keys.iter().any(|k| k == req),
+                    "AGY_AGENTS_MD signature for `{tool}` (`{chunk}`) is missing required param `{req}`"
+                );
+            }
+            for key in &top_keys {
+                assert!(
+                    props.contains_key(key.as_str()),
+                    "AGY_AGENTS_MD signature for `{tool}` (`{chunk}`) names unknown param `{key}`"
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked >= 40, "expected to verify >=40 tool signatures in AGY_AGENTS_MD, checked {checked}");
     }
 }
