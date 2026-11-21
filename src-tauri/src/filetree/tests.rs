@@ -602,6 +602,8 @@ fn git_init_in_an_open_root_reopens_it_with_its_repository() {
     assert!(again.repo.is_some(), "the new hub decorates by the new repository");
     let new = ft.hub_of(again.sub_id).unwrap();
     assert!(!Arc::ptr_eq(&old, &new));
+    // The new hub's git worker runs `git -C root`: waited out before the root is deleted.
+    let git = new.git.clone().expect("the new hub has a repository");
     drop((old, new));
     // The old hub's reap (its last subscriber just left) must not take its successor.
     ft.end_graces();
@@ -614,6 +616,10 @@ fn git_init_in_an_open_root_reopens_it_with_its_repository() {
     let plain = ft.open("w", &root.to_string_lossy(), vec![], Arc::new(Recorder::default()), vec![]).unwrap();
     assert!(plain.repo.is_none(), "a hub in its grace is not reused for another repository");
     ft.close(plain.sub_id);
+    // The repository's hub was retired for `plain`; whatever still held it is gone with the
+    // graces ended, and its worker with it.
+    ft.end_graces();
+    assert!(git.wait_exited(super::test_support::HANG), "the repository hub's git worker never stopped");
     std::fs::remove_dir_all(&root).unwrap();
 }
 
