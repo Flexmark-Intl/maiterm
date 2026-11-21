@@ -7,13 +7,13 @@ const hive = (over: Partial<Hive> = {}) => ({ landing_mode: 'base', checkpoints:
 describe('the Autonomy form', () => {
   it('starts from the record, a missing key at its default', () => {
     const f = formFor(hive({ checkpoints: { permissions: 'ask' }, settings: { autonomy: { prompt_timeout_secs: 600, daily_digest: false } } }));
-    expect(f.values).toEqual({ plan: 'coordinator', questions: 'coordinator', permissions: 'ask', landing: 'coordinator', finals: 'coordinator', interfaces: 'coordinator', settings: 'ask' });
+    expect(f.values).toEqual({ plan: 'coordinator', questions: 'coordinator', permissions: 'ask', landing: 'coordinator', finals: 'coordinator', interfaces: 'coordinator', access: 'coordinator', settings: 'ask' });
     expect(f.digest).toBe(false);
     expect(f.minutes).toBe(10);
     expect(formFor(hive()).minutes).toBe(5);
     expect(formFor(hive({ settings: { autonomy: { prompt_timeout_secs: 20, daily_digest: true } } })).minutes).toBe(1);
     expect(formFor(hive({ landing_mode: 'integration' })).values.landing, 'the queen lands into the branch').toBe('coordinator');
-    expect(CHECKPOINT_ROWS.map((r) => r.key)).toEqual(['plan', 'questions', 'permissions', 'landing', 'finals', 'interfaces', 'settings']);
+    expect(CHECKPOINT_ROWS.map((r) => r.key)).toEqual(['plan', 'questions', 'permissions', 'landing', 'finals', 'interfaces', 'access', 'settings']);
     expect(formFor(hive({ checkpoints: { settings: 'coordinator' } })).values.settings, 'handed over').toBe('coordinator');
   });
 
@@ -37,7 +37,7 @@ describe('the Autonomy form', () => {
     f.values.questions = 'ask';
     const out = toSave(h, f);
     expect(out.checkpoints.questions).toBe('ask');
-    expect(Object.keys(out.checkpoints)).toHaveLength(7);
+    expect(Object.keys(out.checkpoints)).toHaveLength(8);
     expect(out.autonomy).toEqual({ prompt_timeout_secs: 900, daily_digest: false, later: 7 });
   });
 

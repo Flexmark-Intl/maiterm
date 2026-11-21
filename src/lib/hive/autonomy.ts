@@ -1,4 +1,4 @@
-/** Hive settings → Autonomy (docs/hive.md §7.4, §4.7, §7.6), pure: the seven checkpoints as the
+/** Hive settings → Autonomy (docs/hive.md §7.4, §4.7, §7.6), pure: the eight checkpoints as the
  *  modal edits them, the prompt timeout in minutes and the daily digest. Rust checks all of it
  *  again (`checkpoints::validate`, the 60–3,600 s clamp); this only says early what it would refuse. */
 
@@ -21,12 +21,13 @@ export const CHECKPOINT_ROWS: readonly CheckpointRow[] = [
   { key: 'landing', label: 'Landing', note: 'Who calls hiveLand, within the landing mode fixed at creation.' },
   { key: 'finals', label: 'Picking finals in the gallery', note: 'Creative Hives often set this to Ask me.' },
   { key: 'interfaces', label: 'Adding a dependency, changing a public interface', note: 'Listed so a Hive can tighten them.' },
-  { key: 'settings', label: 'Changing Hive settings', note: 'Workers at once, models, and the hosts workers reach. Ask me (the default) puts each change on a card for you. Raising workers at once always comes to you; never pushing.' },
+  { key: 'access', label: 'What workers may use', note: 'Websites, local database sockets and tools (MCP servers, CLIs). Queen (the default) grants one the moment a worker needs it, so a Hive doesn\'t stall waiting for you; you\'re told each time.' },
+  { key: 'settings', label: 'Changing other Hive settings', note: 'Workers at once, models, setup and land checks, push after land, the run queue and the rest. Ask me (the default) puts each change on a card for you.' },
 ];
 
 /** What never moves to the coordinator, whatever the settings (§7.4): Rust refuses it by tab. */
 export const NEVER_DELEGATED: readonly string[] = [
-  "Creating a Hive, raising the budget or workers at once, and spending past the budget",
+  'Creating a Hive, raising the budget, spending past it, and changing these checkpoints',
   "Claude's workspace-trust dialog and the plan dialog",
   'Any prompt option that saves a setting or a rule, or changes a mode',
   'Pushing',

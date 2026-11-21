@@ -66,7 +66,7 @@ type CheckpointFields = { landing_mode: string; checkpoints?: Record<string, str
 /** Whether `key` is set to Ask me; a key the record lacks reads as its default for the landing
  *  mode (Rust's `checkpoints::asks`). */
 export function checkpointAsks(hive: CheckpointFields, key: string): boolean {
-  // Defaults as `create::default_checkpoints`: Settings asks, the rest are the queen's.
+  // Defaults as `create::default_checkpoints`: Settings asks, the rest (Access included) are the queen's.
   const set = hive.checkpoints?.[key] ?? (key === 'settings' ? 'ask' : 'coordinator');
   return set === 'ask';
 }
