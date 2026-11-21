@@ -299,6 +299,11 @@
           hint: 'Sets disableRemoteControl: true and remoteControlAtStartup: false. Stops your sessions being exposed to claude.ai/code and the mobile app, and stops the bridge auto-starting. On by default — maiTerm applies it once; switch it off and it stays off.',
         },
         {
+          id: 'cc_disable_artifact_comments',
+          label: 'Ignore artifact comments',
+          hint: 'Sets CLAUDE_CODE_ARTIFACT_COMMENTS=0 and CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT=0. Comments people leave on an artifact Claude published to claude.ai stop arriving in your session as prompts, and Claude stops acting on them by itself: other people\'s words don\'t get typed into your agent. On by default — maiTerm applies it once; switch it off and it stays off.',
+        },
+        {
           id: 'cc_allow_memory_writes',
           label: 'Stop asking to write memory',
           hint: 'Adds a PermissionRequest hook (~/.maiterm/claude-hooks/approve-memory-writes) that approves writes to Markdown files in Claude Code\'s own memory directory. Claude Code means to allow these itself, but misses them wherever its config directory runs through a symlink — every maiTerm account does — so each memory asks, and auto mode refuses. Checks where the path really leads; anything else still prompts. A Bash write into memory (cat > memory/x.md) is refused on the spot with a note to use Write or Edit, instead of waiting for you. On by default — maiTerm applies it once; switch it off and it stays off.',

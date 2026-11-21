@@ -12,17 +12,25 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Claude Code env vars we set to "1" in `~/.claude/settings.json`.
-/// (rule id, env var name)
-const ENV_RULES: &[(&str, &str)] = &[
-    ("cc_disable_telemetry", "DISABLE_TELEMETRY"),
-    ("cc_disable_error_reporting", "DISABLE_ERROR_REPORTING"),
-    ("cc_disable_bug_command", "DISABLE_BUG_COMMAND"),
-    ("cc_disable_feedback_command", "DISABLE_FEEDBACK_COMMAND"),
-    ("cc_disable_feedback_survey", "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"),
+/// Claude Code env vars we set in `~/.claude/settings.json`'s `env`.
+/// (rule id, [(env var name, value)]) — a rule is applied only when every one
+/// of its vars holds its value, and switching it off removes all of them.
+const ENV_RULES: &[(&str, &[(&str, &str)])] = &[
+    ("cc_disable_telemetry", &[("DISABLE_TELEMETRY", "1")]),
+    ("cc_disable_error_reporting", &[("DISABLE_ERROR_REPORTING", "1")]),
+    ("cc_disable_bug_command", &[("DISABLE_BUG_COMMAND", "1")]),
+    ("cc_disable_feedback_command", &[("DISABLE_FEEDBACK_COMMAND", "1")]),
+    ("cc_disable_feedback_survey", &[("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY", "1")]),
+    (
+        RULE_ARTIFACT_COMMENTS,
+        &[("CLAUDE_CODE_ARTIFACT_COMMENTS", "0"), ("CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT", "0")],
+    ),
 ];
 
-const ENV_VALUE: &str = "1";
+/// Rule id for switching off artifact comment watchers: comments viewers leave on
+/// a published claude.ai artifact otherwise arrive in the session as turns — text
+/// from outside typed into the agent — and auto-react starts it working on them.
+const RULE_ARTIFACT_COMMENTS: &str = "cc_disable_artifact_comments";
 
 /// Rule id for `includeCoAuthoredBy: false` in `~/.claude/settings.json`.
 const RULE_CO_AUTHORED: &str = "cc_include_co_authored_by";
@@ -38,7 +46,7 @@ const RULE_MEMORY_WRITES: &str = "cc_allow_memory_writes";
 
 /// Rules maiTerm applies on its own, once per user account (`seed_default_rules`).
 /// After that the usual rule holds — disk is the toggle — so switching one off sticks.
-const DEFAULT_ON_RULES: &[&str] = &[RULE_REMOTE_CONTROL, RULE_MEMORY_WRITES];
+const DEFAULT_ON_RULES: &[&str] = &[RULE_REMOTE_CONTROL, RULE_MEMORY_WRITES, RULE_ARTIFACT_COMMENTS];
 
 /// Which default-on rules have been settled: seeded by maiTerm, or toggled by the
 /// user. One rule id per line. Lives beside the state it protects rather than in
@@ -136,18 +144,23 @@ fn write_claude_settings(settings: &serde_json::Value) -> Result<(), String> {
     })
 }
 
-/// True when `env[key]` is set to our value. Tolerates the number `1` as well as
-/// the string `"1"` — both appear in the wild, Claude Code accepts either.
-fn env_var_applied(settings: &serde_json::Value, key: &str) -> bool {
+/// True when `env[key]` is set to `want` ("1" or "0"). Tolerates the number and
+/// the bool as well as the string — all appear in the wild, Claude Code accepts each.
+fn env_var_applied(settings: &serde_json::Value, key: &str, want: &str) -> bool {
+    let on = want == "1";
     match settings.get("env").and_then(|e| e.get(key)) {
-        Some(serde_json::Value::String(s)) => s == ENV_VALUE,
-        Some(serde_json::Value::Number(n)) => n.as_i64() == Some(1),
-        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::String(s)) => s == want,
+        Some(serde_json::Value::Number(n)) => n.as_i64() == Some(on as i64),
+        Some(serde_json::Value::Bool(b)) => *b == on,
         _ => false,
     }
 }
 
-fn set_env_var(enabled: bool, key: &str) -> Result<(), String> {
+fn env_rule_applied(settings: &serde_json::Value, vars: &[(&str, &str)]) -> bool {
+    vars.iter().all(|(k, v)| env_var_applied(settings, k, v))
+}
+
+fn set_env_vars(enabled: bool, vars: &[(&str, &str)]) -> Result<(), String> {
     let mut settings = read_claude_settings()?;
     let obj = settings
         .as_object_mut()
@@ -158,12 +171,16 @@ fn set_env_var(enabled: bool, key: &str) -> Result<(), String> {
         let env = env
             .as_object_mut()
             .ok_or("\"env\" in ~/.claude/settings.json is not an object")?;
-        env.insert(key.to_string(), serde_json::Value::String(ENV_VALUE.into()));
+        for (key, value) in vars {
+            env.insert((*key).to_string(), serde_json::Value::String((*value).into()));
+        }
     } else {
-        // Only ever runs on a rule that reads as applied, so removing our key
+        // Only ever runs on a rule that reads as applied, so removing our keys
         // can't discard a value the user deliberately set to something else.
         if let Some(env) = obj.get_mut("env").and_then(|v| v.as_object_mut()) {
-            env.remove(key);
+            for (key, _) in vars {
+                env.remove(*key);
+            }
             if env.is_empty() {
                 obj.remove("env");
             }
@@ -912,9 +929,9 @@ fn build_status() -> DeshittifyStatus {
 
     let mut rules: Vec<DeshittifyRuleStatus> = ENV_RULES
         .iter()
-        .map(|(id, key)| DeshittifyRuleStatus {
+        .map(|(id, vars)| DeshittifyRuleStatus {
             id: (*id).into(),
-            applied: settings_err.is_none() && env_var_applied(&settings, key),
+            applied: settings_err.is_none() && env_rule_applied(&settings, vars),
             blocked: settings_err.is_some(),
             detail: settings_err.clone(),
         })
@@ -953,8 +970,8 @@ fn apply_rule(id: &str, enabled: bool) -> Result<(), String> {
 }
 
 fn apply_rule_inner(id: &str, enabled: bool) -> Result<(), String> {
-    if let Some((_, key)) = ENV_RULES.iter().find(|(rid, _)| *rid == id) {
-        return set_env_var(enabled, key);
+    if let Some((_, vars)) = ENV_RULES.iter().find(|(rid, _)| *rid == id) {
+        return set_env_vars(enabled, vars);
     }
     match id {
         RULE_CO_AUTHORED => set_co_authored(enabled),
@@ -1081,11 +1098,13 @@ fn render_remote_setup_script_from(status: &DeshittifyStatus, settings_readable:
     if settings_readable {
         let mut env_set = serde_json::Map::new();
         let mut env_unset: Vec<&str> = Vec::new();
-        for (id, key) in ENV_RULES {
-            if applied(id) {
-                env_set.insert((*key).to_string(), serde_json::Value::String(ENV_VALUE.into()));
-            } else {
-                env_unset.push(key);
+        for (id, vars) in ENV_RULES {
+            for (key, value) in vars.iter() {
+                if applied(id) {
+                    env_set.insert((*key).to_string(), serde_json::Value::String((*value).into()));
+                } else {
+                    env_unset.push(key);
+                }
             }
         }
         let payload = serde_json::json!({
@@ -1504,7 +1523,7 @@ mod tests {
         fs::write(&path, "{\n  \"model\": \"opus\",\n}\n").unwrap();
         let err = read_settings_at(&path).unwrap_err();
         assert!(err.contains("could not be parsed"), "unexpected error: {err}");
-        // set_env_var / set_co_authored propagate this with `?` before writing.
+        // set_env_vars / set_co_authored propagate this with `?` before writing.
 
         // A missing or empty file is genuinely empty settings, not a failure.
         assert_eq!(read_settings_at(&dir.join("nope.json")).unwrap(), serde_json::json!({}));
@@ -1512,6 +1531,31 @@ mod tests {
         assert_eq!(read_settings_at(&path).unwrap(), serde_json::json!({}));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A rule made of "0" values reads as applied only when every one of its vars
+    /// is off — a leftover "1" (or one var missing) leaves the rule off.
+    #[test]
+    fn a_zero_valued_env_rule_needs_every_var_off() {
+        let vars = ENV_RULES.iter().find(|(id, _)| *id == RULE_ARTIFACT_COMMENTS).unwrap().1;
+        let s = |env: serde_json::Value| serde_json::json!({ "env": env });
+        assert!(env_rule_applied(
+            &s(serde_json::json!({"CLAUDE_CODE_ARTIFACT_COMMENTS": "0", "CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT": 0})),
+            vars
+        ));
+        assert!(env_rule_applied(
+            &s(serde_json::json!({"CLAUDE_CODE_ARTIFACT_COMMENTS": false, "CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT": "0"})),
+            vars
+        ));
+        assert!(!env_rule_applied(&s(serde_json::json!({"CLAUDE_CODE_ARTIFACT_COMMENTS": "0"})), vars));
+        assert!(!env_rule_applied(
+            &s(serde_json::json!({"CLAUDE_CODE_ARTIFACT_COMMENTS": "1", "CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT": "0"})),
+            vars
+        ));
+        assert!(!env_rule_applied(&serde_json::json!({}), vars));
+        // The "1" rules are unchanged.
+        assert!(env_var_applied(&s(serde_json::json!({"DISABLE_TELEMETRY": 1})), "DISABLE_TELEMETRY", "1"));
+        assert!(!env_var_applied(&s(serde_json::json!({"DISABLE_TELEMETRY": "0"})), "DISABLE_TELEMETRY", "1"));
     }
 
     fn status_with(all_on: bool) -> DeshittifyStatus {
@@ -1584,6 +1628,8 @@ mod tests {
         assert_eq!(s["model"], "opus", "the remote's own settings were clobbered");
         assert_eq!(s["env"]["DISABLE_TELEMETRY"], "1");
         assert_eq!(s["env"]["CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"], "1");
+        assert_eq!(s["env"]["CLAUDE_CODE_ARTIFACT_COMMENTS"], "0");
+        assert_eq!(s["env"]["CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT"], "0");
         assert_eq!(s["includeCoAuthoredBy"], serde_json::Value::Bool(false));
         assert_eq!(s["disableRemoteControl"], serde_json::Value::Bool(true));
         assert_eq!(s["remoteControlAtStartup"], serde_json::Value::Bool(false));
