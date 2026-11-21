@@ -1,5 +1,57 @@
 # Changelog
 
+## v3.16.0
+
+Antigravity joins Claude Code and Codex as an agent maiTerm runs. Plus Hives that land into a branch, watch scripts that wait as long as you need, and a Files column that keeps up.
+
+### Antigravity
+
+- **Antigravity CLI (`agy`) tabs are full maiTerm agents.** maiTerm installs its plugin, so an `agy` tab gets maiTerm's tools, reports when it's working, idle or asking, and shows in the Loom, the sidebar and on your phone with its chat, model and context use. It resumes with its conversation after a restart, waits for you at its workspace-trust dialog, and never types over your draft. Its subagents show in its chat with their progress. It's on by default; the ssh bridge, hooks and auto-resume each have a switch under Preferences → AI Agents → Antigravity.
+- **MCP servers you add to maiTerm reach Antigravity too**, on this Mac and on ssh hosts.
+
+### Hive
+
+- **Land everything in a branch, then approve the one land into Base.** In branch mode the Queen lands workers' work into the Hive's branch on her own, and asks once, with a card in the Hive and on your phone, to merge the branch into Base. Nothing is pushed.
+- **Builders can use a local database.** Hive settings → Workers takes the sockets of databases on this Mac (Postgres, MySQL, Redis), which builders, their jobs and their land checks may connect to. Reviewers get none.
+- **Jobs run on the Node version their folder asks for** (`.nvmrc`, `.node-version`, `.tool-versions` or `engines.node`), not the shell's default.
+- **A job keeps its whole output** in the Hive's folder, and a failed check names the file, so the Queen no longer re-runs it to see what failed.
+- **The Queen stays running after Done.** A message from her column's box or your phone picks the Hive up again, without waiting for her to relaunch.
+- **Her decisions open under Needs you** beside her chat, instead of covering the chat that led to them.
+- **Builders no longer stall on Claude 2.1.327's folder-trust dialog**, which stopped every builder in a git folder.
+- **A HIVE tag sits beside a Hive's name** in the sidebar, and chat drafts survive switching away from a Hive.
+
+### Watch scripts and follow-ups
+
+- **Watch scripts wait until they pass**, instead of expiring after 7 days. An alarm watch no longer needs renewing every week.
+- **A script knows when it last ran** (`$MAITERM_WATCH_LAST_RUN`), so after the Mac sleeps it can look back over the gap.
+- **A watch on a struggling ssh host keeps going** while the host refuses new sessions, instead of being written off after 10 minutes. It counts as stranded only when it has had no usable connection for 10 minutes while maiTerm still reaches that host another way.
+
+### Action cards
+
+- **A command meant for another agent's tab runs there.** An agent can address a card's command to a mesh peer or bridge partner. The card says which tab and host it's for, and Run types it into that tab.
+- **Run works while the agent is busy.** The agent runs the command when its turn ends, instead of the click being refused.
+
+### MCP servers
+
+- **ElevenLabs signs in.** maiTerm now signs in to servers that take a client metadata document instead of registering a client, as ElevenLabs does, with nothing to create on their side.
+
+### SSH
+
+- **Key paths with spaces work.** An ssh command like `ssh -i "/Users/me/My Keys/id" host` used to break every connection maiTerm makes on its own (the agent bridge, Files, the transcript mirror).
+- **ssh commands no longer grow with each restart** behind a shell alias that adds options (such as `alias ssh='ssh -x -C'`). That growth gave one host several tunnels on one port, failing with a toast and a sound each time. Commands already saved that way shrink back.
+- **A window full of ssh tabs launches faster.** A check those tabs ran twice a second no longer blocks the window.
+
+### Files
+
+- **The Files column catches changes macOS loses under heavy disk load.** When you come back to the window or a command finishes, folders that changed are re-listed. `.gitignore` changes whose events were lost show up too.
+- **On Windows, Files watches folders on its own threads**, which fixes a case where a closed folder's watch could block another file operation.
+
+### Other fixes
+
+- **In the Loom's Focus composer, Option/Alt+Enter makes a new line**, as it does in the agent's own input box.
+- **Phone answers to an agent's menu wait for each key to show on screen**, and text in an Other answer can no longer cancel the question or jump to its Next button.
+- **maiTerm's edits to `.claude.json` no longer race each other**, which could lose one of two changes made at once.
+
 ## v3.15.0
 
 SSH tabs that come back by themselves after a drop, and Mattermost posts that wait for your approval.
