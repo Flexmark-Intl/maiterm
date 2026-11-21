@@ -31,9 +31,24 @@ function getTabName(tabId: string): string {
   return 'Terminal';
 }
 
+/** A Hive agent's tab (docs/hive.md §4): its shell runs the agent, maiTerm relaunches it, and the
+ *  queen reports for it, so a "command completed" there is never the human's command. */
+function isHiveTab(tabId: string): boolean {
+  for (const ws of workspacesStore.workspaces) {
+    for (const pane of ws.panes) {
+      const tab = pane.tabs.find(t => t.id === tabId);
+      if (tab) return !!tab.hive_role;
+    }
+  }
+  return false;
+}
+
 async function handleCommandComplete(tabId: string, exitCode: number) {
   if (preferencesStore.notificationMode === 'disabled') return;
-  if (isTabVisible(tabId)) return;
+  if (isTabVisible(tabId) || isHiveTab(tabId)) {
+    commandStartTimes.delete(tabId);
+    return;
+  }
 
   const startTime = commandStartTimes.get(tabId);
   if (startTime) {
