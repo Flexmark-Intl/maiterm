@@ -44,7 +44,7 @@ pub const COORDINATOR_TAB_NAME: &str = "Queen";
 /// card (§8.3).
 pub fn default_checkpoints(_landing_mode: &str) -> BTreeMap<String, String> {
     let mut out: BTreeMap<String, String> =
-        ["plan", "questions", "permissions", "landing", "finals", "interfaces"].iter().map(|k| (k.to_string(), "coordinator".to_string())).collect();
+        ["plan", "questions", "permissions", "landing", "finals", "interfaces", "access"].iter().map(|k| (k.to_string(), "coordinator".to_string())).collect();
     out.insert("settings".to_string(), "ask".to_string());
     out
 }
@@ -1847,7 +1847,7 @@ mod tests {
         assert_eq!((h.models.coordinator.runtime.as_str(), h.models.coordinator.model.as_str(), h.models.coordinator.effort.as_str()), ("claude", "opus", "medium"));
         assert_eq!((h.models.worker.model.as_str(), h.models.worker.effort.as_str()), ("sonnet", "high"));
         assert_eq!((h.cap, h.budget_cents, h.status.as_str()), (DEFAULT_CAP, 1000, STATUS_ACTIVE));
-        assert_eq!(h.checkpoints.len(), 7);
+        assert_eq!(h.checkpoints.len(), 8);
         assert!(h.checkpoints.iter().all(|(k, v)| v == if k == "settings" { "ask" } else { "coordinator" }), "the human approves settings changes");
         assert_eq!(default_checkpoints(LANDING_INTEGRATION).get("landing").map(String::as_str), Some("coordinator"), "the queen lands into the Hive's branch");
     }

@@ -57,6 +57,7 @@
 pub mod autonomy;
 pub mod brief;
 pub mod change;
+pub mod change_plan;
 pub mod checkpoints;
 pub(crate) mod control;
 pub mod create;

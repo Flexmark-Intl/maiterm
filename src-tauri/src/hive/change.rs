@@ -13,15 +13,17 @@
 //! worker keeps its model and its network until it is relaunched, and a cap lowered under the
 //! workers running stops nobody, it only holds new ones back.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use super::checkpoints::{self, SETTINGS};
+use super::checkpoints;
 use super::deliver::one_line;
 use super::fuses::STATUS_PAUSED;
 use super::gallery::budget::{normalize_host, reaches_remote};
 use super::record::{Hive, HiveModel, STATUS_ACTIVE};
-use super::rpc::{HiveRequest, HiveWindow};
+use super::rpc::HiveWindow;
 use super::tools::{Caller, Ctx};
 
 /// What `hiveChangeSettings` files and approves: the request kind (`agent_requests::KINDS`).
@@ -67,6 +69,49 @@ pub struct SettingsChange {
     /// A git folder's setup or land check, as the project takes shape (§3.6).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub folders: Vec<FolderChange>,
+    /// Tools (MCP servers, CLIs, skills) detected on this Mac, by id (`change_plan`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub add_tools: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub remove_tools: Vec<String>,
+    /// The gallery's generator hosts and output folders, and the budget (`change_plan`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub add_generator_hosts: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub remove_generator_hosts: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub add_output_folders: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub remove_output_folders: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_cents: Option<u64>,
+    /// Autonomy's prompt timeout and daily digest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_timeout_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daily_digest: Option<bool>,
+    /// The run queue, whole: its queued commands and resource limits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_queue: Option<super::record::RunQueueSettings>,
+    /// Checkpoints by key, `coordinator` or `ask`: the queen's change of one is always a card.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub checkpoints: BTreeMap<String, String>,
+}
+
+impl SettingsChange {
+    /// The fields `check` and `apply_to` handle; the rest are `change_plan`'s.
+    pub fn core(&self) -> SettingsChange {
+        SettingsChange {
+            add_tools: Vec::new(),
+            remove_tools: Vec::new(),
+            add_generator_hosts: Vec::new(),
+            remove_generator_hosts: Vec::new(),
+            add_output_folders: Vec::new(),
+            remove_output_folders: Vec::new(),
+            budget_cents: None,
+            ..self.clone()
+        }
+    }
 }
 
 /// One git folder's commands, by its name. `""` clears one; left out, it stays as it is.
@@ -160,9 +205,11 @@ pub fn launch_sockets(hive: &Hive) -> Vec<String> {
 pub enum By {
     /// Hive settings: anything here.
     Human,
-    /// The human's approval of the coordinator's card: the human's limits, on the coordinator's fields.
+    /// The human's approval of the coordinator's card: the human's limits.
     Approved,
-    /// `hiveChangeSettings` with the checkpoint handed over: may lower the cap, never raise it, never push.
+    /// `hiveChangeSettings` applying at once, under a checkpoint handed to the queen
+    /// (`change_plan::route`): anything but the checkpoints themselves and a budget raise, which
+    /// are always a card (the human's approval switch, and money).
     Coordinator,
 }
 
@@ -184,8 +231,19 @@ fn pick(v: &Option<String>, allowed: &[&str], what: &str) -> Result<Option<Strin
 }
 
 /// The change as it would land on `hive`, or why not. `remote_hosts` are the hosts the Hive's
-/// repos push to, which no worker may reach (§7.3).
+/// repos push to, which no worker may reach (§7.3). Only the core fields (`SettingsChange::core`).
 pub fn check(hive: &Hive, c: &SettingsChange, by: By, remote_hosts: &[String]) -> Result<Checked, String> {
+    let ch = check_core(hive, c, by, remote_hosts)?;
+    if ch.lines.is_empty() {
+        return Err(NOTHING.to_string());
+    }
+    Ok(ch)
+}
+
+pub const NOTHING: &str = "Nothing would change: every setting named is already so.";
+
+/// `check`, which may find nothing to change: a change whose other fields are `change_plan`'s.
+pub fn check_core(hive: &Hive, c: &SettingsChange, by: By, remote_hosts: &[String]) -> Result<Checked, String> {
     if hive.status == super::record::STATUS_DONE {
         return Err("This Hive is done: a message to its queen wakes it first.".to_string());
     }
@@ -195,10 +253,6 @@ pub fn check(hive: &Hive, c: &SettingsChange, by: By, remote_hosts: &[String]) -
     if let Some(cap) = c.cap {
         if cap == 0 || cap > MAX_CAP {
             return Err(format!("Workers at once is 1 to {MAX_CAP}."));
-        }
-        // Raising it is the human's, always (a card); the coordinator may lower it on its own.
-        if by == By::Coordinator && cap > hive.cap {
-            return Err(format!("Raising workers at once ({} \u{2192} {cap}) is your human\u{2019}s: it goes on a card.", hive.cap));
         }
         if cap != hive.cap {
             out.cap = Some(cap);
@@ -253,19 +307,13 @@ pub fn check(hive: &Hive, c: &SettingsChange, by: By, remote_hosts: &[String]) -
     (out.add_hosts, out.remove_hosts) = (added, removed);
 
     if let Some(p) = c.push_after_land {
-        if by != By::Human {
-            return Err("Only your human turns pushing after a land on or off.".to_string());
-        }
         if p != hive.push_after_land {
             out.push_after_land = Some(p);
-            lines.push(format!("Push after land: {}", if p { "on" } else { "off" }));
+            lines.push(format!("Push after land: {}", if p { "on (maiTerm pushes each land to the remote)" } else { "off" }));
         }
     }
 
     if let Some(v) = c.workers_on_phone {
-        if by != By::Human {
-            return Err("Only your human chooses what shows on their phone.".to_string());
-        }
         if v != hive.settings.workers_on_phone {
             out.workers_on_phone = Some(v);
             lines.push(format!("On the phone: {} (workers started from now on)", if v { "the queen and its workers" } else { "the queen only" }));
@@ -273,9 +321,6 @@ pub fn check(hive: &Hive, c: &SettingsChange, by: By, remote_hosts: &[String]) -
     }
 
     if !c.add_sockets.is_empty() || !c.remove_sockets.is_empty() {
-        if by != By::Human {
-            return Err("Only your human chooses which local databases workers may reach.".to_string());
-        }
         let have = &hive.settings.worker_sockets;
         let mut removed: Vec<String> = Vec::new();
         for s in &c.remove_sockets {
@@ -310,9 +355,6 @@ pub fn check(hive: &Hive, c: &SettingsChange, by: By, remote_hosts: &[String]) -
         };
         let mut one = FolderChange { name: f.name.clone(), ..FolderChange::default() };
         if let Some(new) = folder_command(&fc.setup, "setup", &f.name)?.filter(|n| *n != f.setup.clone().unwrap_or_default()) {
-            if by == By::Coordinator {
-                return Err(format!("A folder\u{2019}s setup runs outside any sandbox before each worker starts, so changing {}\u{2019}s goes on a card.", f.name));
-            }
             lines.push(format!("Setup of {} (runs outside the sandbox before each worker starts, from the next one on): {} \u{2192} {}", f.name, shown(&f.setup), shown(&Some(new.clone()))));
             one.setup = Some(new);
         }
@@ -328,9 +370,48 @@ pub fn check(hive: &Hive, c: &SettingsChange, by: By, remote_hosts: &[String]) -
         }
     }
 
-    if lines.is_empty() {
-        return Err("Nothing would change: every setting named is already so.".to_string());
+    if let Some(secs) = c.prompt_timeout_secs {
+        let secs = checkpoints::clamp_timeout(secs);
+        if secs != hive.settings.autonomy.prompt_timeout_secs {
+            out.prompt_timeout_secs = Some(secs);
+            lines.push(format!("Prompt timeout: {} \u{2192} {} min", hive.settings.autonomy.prompt_timeout_secs.div_ceil(60), secs.div_ceil(60)));
+        }
     }
+    if let Some(d) = c.daily_digest {
+        if d != hive.settings.autonomy.daily_digest {
+            out.daily_digest = Some(d);
+            lines.push(format!("Daily digest: {}", if d { "on" } else { "off" }));
+        }
+    }
+
+    if let Some(rq) = &c.run_queue {
+        let rq = super::run::validate_run_queue(hive, rq)?;
+        if rq != hive.settings.run_queue {
+            let cmds = |r: &super::record::RunQueueSettings| {
+                if r.commands.is_empty() { "none".to_string() } else { r.commands.iter().map(|q| format!("`{}` in {}", q.prefix, q.folder)).collect::<Vec<_>>().join(", ") }
+            };
+            let res = |r: &super::record::RunQueueSettings| {
+                if r.resources.is_empty() { "none".to_string() } else { r.resources.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", ") }
+            };
+            lines.push(format!("Run queue: queued commands {} \u{2192} {}; resource limits {} \u{2192} {}", cmds(&hive.settings.run_queue), cmds(&rq), res(&hive.settings.run_queue), res(&rq)));
+            out.run_queue = Some(rq);
+        }
+    }
+
+    if !c.checkpoints.is_empty() {
+        // The human's approval switch: the queen asks for a change of it on a card, always.
+        if by == By::Coordinator {
+            return Err("Changing a checkpoint is your human\u{2019}s: it goes on a card.".to_string());
+        }
+        let before = checkpoints::validate(hive, &BTreeMap::new())?;
+        let after = checkpoints::validate(hive, &c.checkpoints)?;
+        let changed = checkpoints::describe_changes(&before, &after);
+        if !changed.is_empty() {
+            out.checkpoints = c.checkpoints.iter().filter(|(k, v)| before.get(*k) != Some(*v)).map(|(k, v)| (k.clone(), v.clone())).collect();
+            lines.extend(changed.into_iter().map(|l| format!("Checkpoint, {l}")));
+        }
+    }
+
     Ok(Checked { change: out, lines })
 }
 
@@ -396,22 +477,37 @@ pub fn apply_to(hive: &mut Hive, c: &SettingsChange) {
             f.land_check = none_if_empty(s);
         }
     }
+    if let Some(secs) = c.prompt_timeout_secs {
+        hive.settings.autonomy.prompt_timeout_secs = checkpoints::clamp_timeout(secs);
+    }
+    if let Some(d) = c.daily_digest {
+        hive.settings.autonomy.daily_digest = d;
+    }
+    if let Some(rq) = &c.run_queue {
+        hive.settings.run_queue = rq.clone();
+    }
+    if !c.checkpoints.is_empty() {
+        if let Ok(next) = checkpoints::validate(hive, &c.checkpoints) {
+            hive.checkpoints = next;
+        }
+    }
 }
 
 /// Checked against the record as it is under the write lock, then saved and announced. The new
 /// record and the lines that describe what changed.
 /// The Hive's remote hosts (git, and `ssh -G` up to its timeout per alias), read once per request
 /// off the async thread (the regression review).
-async fn remotes_of(hive: &Hive) -> Result<Vec<String>, String> {
+pub(super) async fn remotes_of(hive: &Hive) -> Result<Vec<String>, String> {
     let h = hive.clone();
     super::tools::blocking(move || Ok(super::settings::hive_remote_hosts(&h))).await
 }
 
-fn write<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, c: &SettingsChange, by: By, remotes: &[String]) -> Result<(Hive, Vec<String>), String> {
+/// The core fields only (`SettingsChange::core`); the lines may be empty when none of them differ.
+pub(super) fn write<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, c: &SettingsChange, by: By, remotes: &[String]) -> Result<(Hive, Vec<String>), String> {
     let mut outcome: Result<Vec<String>, String> = Err("This Hive is gone.".to_string());
     // A refused check leaves the record as it was (saved again, unchanged: harmless).
     let hive = super::finish::write_status(ctx, caller, &[STATUS_ACTIVE, STATUS_PAUSED], None, |h| {
-        outcome = check(h, c, by, remotes).map(|ch| {
+        outcome = check_core(h, c, by, remotes).map(|ch| {
             apply_to(h, &ch.change);
             ch.lines
         });
@@ -442,6 +538,11 @@ fn needs_worker_relaunch(c: &SettingsChange) -> bool {
         // A running builder's shell keeps the sockets it launched with, a removed one included.
         || !c.add_sockets.is_empty()
         || !c.remove_sockets.is_empty()
+        // Its MCP servers and network come from the Hive's tools and generator hosts at launch.
+        || !c.add_tools.is_empty()
+        || !c.remove_tools.is_empty()
+        || !c.add_generator_hosts.is_empty()
+        || !c.remove_generator_hosts.is_empty()
 }
 
 /// For a change that reaches workers only at their next launch: which running workers still
@@ -468,7 +569,7 @@ pub(super) fn running_on_old(workers: &[super::worker::WorkerRecord]) -> Option<
 }
 
 /// `relaunch_sentence` from the workers on disk now.
-async fn relaunch_note(caller: &Caller, c: &SettingsChange) -> Option<String> {
+pub(super) async fn relaunch_note(caller: &Caller, c: &SettingsChange) -> Option<String> {
     if !needs_worker_relaunch(c) {
         return None;
     }
@@ -552,36 +653,60 @@ pub fn points_home_blocking(host: &str) -> bool {
 /// The tool's arguments: the change, and the coordinator's reason.
 pub fn parse_args(args: &Value) -> Result<(SettingsChange, Option<String>), String> {
     let mut change: SettingsChange = serde_json::from_value(args.clone()).map_err(|e| format!("The settings don\u{2019}t read: {e}"))?;
-    if change.push_after_land.take().is_some() {
-        return Err("Only your human turns pushing after a land on or off.".to_string());
+    // The tool speaks dollars and minutes; the record keeps cents and seconds.
+    if args.get("budget_cents").is_some() || args.get("prompt_timeout_secs").is_some() {
+        return Err("Name the budget as budget_usd and the prompt timeout as prompt_timeout_minutes.".to_string());
     }
-    if change.workers_on_phone.take().is_some() {
-        return Err("Only your human chooses what shows on their phone.".to_string());
+    if let Some(v) = args.get("budget_usd") {
+        let usd = v.as_f64().filter(|u| u.is_finite() && *u >= 0.0).ok_or("budget_usd is a number of dollars, 0 or more.")?;
+        change.budget_cents = Some((usd * 100.0).round() as u64);
     }
-    if !std::mem::take(&mut change.add_sockets).is_empty() || !std::mem::take(&mut change.remove_sockets).is_empty() {
-        return Err("Only your human chooses which local databases workers may reach: ask them to add its socket in Hive settings.".to_string());
+    if let Some(v) = args.get("prompt_timeout_minutes") {
+        let m = v.as_u64().ok_or("prompt_timeout_minutes is a whole number of minutes.")?;
+        change.prompt_timeout_secs = Some(m.saturating_mul(60));
     }
     let reason = args.get("reason").and_then(Value::as_str).map(str::trim).filter(|r| !r.is_empty()).map(|r| one_line(r, MAX_REASON));
     Ok((change, reason))
+}
+
+/// `run_queue` in the tool's schema (its own `json!`: one would pass the macro's recursion limit).
+fn run_queue_schema() -> Value {
+    let command = json!({ "type": "object", "properties": {
+        "folder": { "type": "string" }, "prefix": { "type": "string" },
+        "needs": { "type": "array", "items": { "type": "string" } },
+        "services": { "type": "array", "items": { "type": "string" } },
+        "env": { "type": "array", "items": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 } },
+        "extra_write": { "type": "array", "items": { "type": "string" } }
+    }, "required": ["folder", "prefix"] });
+    json!({
+        "type": "object",
+        "description": "The whole run queue, replacing it: commands workers run only through hiveRun, and resource limits",
+        "properties": {
+            "commands": { "type": "array", "items": command },
+            "resources": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 1, "maximum": 64 } }
+        }
+    })
 }
 
 pub fn tool_definition(tab_id: &Value) -> Value {
     json!({
         "name": "hiveChangeSettings",
         "description": format!(
-            "Change this Hive\u{2019}s settings: workers at once (cap), the coordinator\u{2019}s or the workers\u{2019} model and effort, \
-             the hosts every builder\u{2019}s sandbox may reach beyond the package registries (an API, its docs), and a git \
-             folder\u{2019}s setup (the install each new worker\u{2019}s copy runs before it starts) and land check (the command a \
-             land must pass) as the project takes shape. Name only what changes. Under the Settings checkpoint\u{2019}s Ask me (see \
-             your brief) this files a card your human approves or denies, and maiTerm tells you which; handed to you, it applies \
-             at once and your human is told. A change reaches each agent at its next launch: a running worker keeps its model and \
-             network until it is relaunched. Raising workers at once and any setup (it runs outside the sandbox) always go on a \
-             card; lowering it doesn\u{2019}t, and never pushing. Hosts are yours whatever the checkpoint: add_hosts or \
-             remove_hosts in a call of their own, with a reason, applies at once, is logged for your human, and answers each open \
-             sandbox blocker it settles. Allow a host only when a worker\u{2019}s task needs it; a repo remote\u{2019}s host, \
-             localhost or a private address is refused for anyone. Models: {}. Efforts: {}.",
+            "Change any of this Hive\u{2019}s settings; name only what changes, and say why. Two checkpoints decide what applies at \
+             once (your human is told, and the decision log keeps it) and what goes on a card your human approves or denies \
+             (maiTerm tells you which): ACCESS covers what workers may use (add_hosts/remove_hosts, add_sockets/remove_sockets, \
+             add_tools/remove_tools, add_generator_hosts/remove_generator_hosts), SETTINGS covers the rest (cap, models and \
+             efforts, folders\u{2019} setup and land check, push_after_land, workers_on_phone, run_queue, budget_usd lowered, \
+             output folders, prompt_timeout_minutes, daily_digest). Your brief says who holds each. A call may mix them: what \
+             its checkpoints hand you applies, the rest goes on one card. Raising budget_usd and any change of checkpoints \
+             always go on a card. When a worker is stuck on a host, a database or a tool, grant it here rather than waiting: \
+             a host answers each open sandbox blocker it settles. A change reaches each agent at its next launch: a running \
+             worker keeps its model, network, sockets and tools until hiveRestartWorker relaunches it. Refused for anyone: a \
+             repo remote\u{2019}s host, localhost or a private address; a socket not named like a database\u{2019}s \
+             (.s.PGSQL.<port>, mysql.sock, redis.sock); a tool not detected on this Mac. Models: {}. Efforts: {}. Checkpoints: {}.",
             MODELS.join(", "),
-            EFFORTS.join(", ")
+            EFFORTS.join(", "),
+            checkpoints::CHECKPOINTS.join(", ")
         ),
         "inputSchema": {
             "type": "object",
@@ -594,6 +719,21 @@ pub fn tool_definition(tab_id: &Value) -> Value {
                 "worker_effort": { "type": "string", "enum": EFFORTS },
                 "add_hosts": { "type": "array", "items": { "type": "string" }, "description": "Bare host names (api.example.com, *.example.com) every builder may reach" },
                 "remove_hosts": { "type": "array", "items": { "type": "string" } },
+                "add_sockets": { "type": "array", "items": { "type": "string" }, "description": "Full paths of local database sockets every builder may connect to (/tmp/.s.PGSQL.5432)" },
+                "remove_sockets": { "type": "array", "items": { "type": "string" } },
+                "add_tools": { "type": "array", "items": { "type": "string" }, "description": "Tool ids detected on this Mac (mcp:<server>, cli:<program>, skill:<name>): workers get the MCP servers and CLIs, and the hosts and output folders they need come with them" },
+                "remove_tools": { "type": "array", "items": { "type": "string" } },
+                "add_generator_hosts": { "type": "array", "items": { "type": "string" }, "description": "Hosts paid generators reach, for media workers" },
+                "remove_generator_hosts": { "type": "array", "items": { "type": "string" } },
+                "add_output_folders": { "type": "array", "items": { "type": "string" }, "description": "Absolute folders galleryAdd may file from" },
+                "remove_output_folders": { "type": "array", "items": { "type": "string" } },
+                "push_after_land": { "type": "boolean", "description": "maiTerm pushes each land to its remote" },
+                "workers_on_phone": { "type": "boolean", "description": "Workers are chats on your human's phone too" },
+                "budget_usd": { "type": "number", "minimum": 0, "description": "The generation budget in dollars; a raise always goes on a card" },
+                "prompt_timeout_minutes": { "type": "integer", "minimum": 1, "maximum": 60, "description": "How long you have to answer a worker's prompt before your human is told" },
+                "daily_digest": { "type": "boolean" },
+                "run_queue": run_queue_schema(),
+                "checkpoints": { "type": "object", "additionalProperties": { "type": "string", "enum": ["coordinator", "ask"] }, "description": "Checkpoint by key: always a card" },
                 "folders": {
                     "type": "array",
                     "description": "Git folders whose setup or land check changes, by name. \"\" clears one; leave a field out to keep it.",
@@ -614,144 +754,19 @@ pub fn tool_definition(tab_id: &Value) -> Value {
     })
 }
 
-/// Whether a change is only the workers' hosts.
-fn hosts_only(c: &SettingsChange) -> bool {
-    (!c.add_hosts.is_empty() || !c.remove_hosts.is_empty()) && *c == SettingsChange { add_hosts: c.add_hosts.clone(), remove_hosts: c.remove_hosts.clone(), ..Default::default() }
-}
-
-/// The queen's host change as the human reads it: the notice and the decision log's answer.
-fn hosts_sentence(c: &SettingsChange, reason: &str) -> String {
-    let mut parts = Vec::new();
-    if !c.add_hosts.is_empty() {
-        parts.push(format!("allowed {} for workers", c.add_hosts.join(", ")));
-    }
-    if !c.remove_hosts.is_empty() {
-        parts.push(format!("stopped workers reaching {}", c.remove_hosts.join(", ")));
-    }
-    format!("The queen {}: {}", parts.join(" and "), one_line(reason, MAX_REASON))
-}
-
-/// A line in the decision log for the queen's own host change: hers, auditable, and undone in
-/// Hive settings → Workers and access.
-pub(crate) fn hosts_decision_line(hive_id: &str, c: &SettingsChange, reason: &str) -> super::decisions::DecisionLine {
-    use super::decisions::{self, DecisionLine};
-    DecisionLine {
-        id: decisions::new_id(),
-        event: decisions::EVENT_ANSWERED.to_string(),
-        hive_id: hive_id.to_string(),
-        category: decisions::CATEGORY_HOSTS.to_string(),
-        source: decisions::SOURCE_SETTINGS.to_string(),
-        question: "Which hosts the workers\u{2019} sandbox may reach".to_string(),
-        answer: Some(hosts_sentence(c, reason)),
-        reason: Some(one_line(reason, MAX_REASON)),
-        by: decisions::BY_COORDINATOR.to_string(),
-        at: crate::commands::workspace::iso_now(),
-        ..DecisionLine::default()
-    }
-}
-
-/// The queen's host change (Darryl, 2026-10-31): applied at once, whoever holds the Settings
-/// checkpoint, within the limits Rust holds for anyone (never a repo remote's host, localhost, a
-/// private address, a port, past `MAX_WORKER_HOSTS`). The human hears of it, and the decision
-/// log and the settings log keep it; each open sandbox blocker it settles is answered as hers.
-async fn coordinator_hosts<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, change: &SettingsChange, reason: &str, remotes: &[String]) -> Result<Value, String> {
-    // What actually changes, normalised: checked again under the write lock by `write`.
-    let current = super::autonomy::current_hive(ctx, caller).ok_or("This Hive is gone.")?;
-    let checked = check(&current, change, By::Coordinator, remotes)?.change;
-    let (hive, lines) = write(ctx, caller, &checked, By::Coordinator, remotes)?;
-    log_line(caller, "coordinator", &lines, Some(reason));
-    let sentence = hosts_sentence(&checked, reason);
-    let line = hosts_decision_line(&hive.id, &checked, reason);
-    let p = caller.paths.clone();
-    let _ = super::tools::blocking(move || {
-        super::decisions::record(&p, &line);
-        Ok(())
-    })
-    .await;
-    ctx.window.decisions_changed(&caller.workspace_id);
-    ctx.window.settings_changed(&caller.workspace_id, &format!("{sentence}. Undo it in Hive settings \u{2192} Workers and access."));
-    let settled = if checked.add_hosts.is_empty() { Vec::new() } else { super::prompts::settle_host_blockers(ctx, caller, &hive, reason).await };
-    ctx.window.poll_waiters(&caller.workspace_id);
-    let relaunch: Vec<Value> = settled.iter().map(|w| json!({ "worker": w.badge, "title": w.title })).collect();
-    let mut note = if relaunch.is_empty() {
-        "Your human was told. A worker reaches a host from its next launch: hiveRestartWorker relaunches a running one (its session resumes)."
-    } else {
-        "Your human was told, and maiTerm answered these workers\u{2019} sandbox blockers as yours. Each reaches the host from its next \
-         launch: relaunch it with hiveRestartWorker when it is at a good point (its session resumes)."
-    }
-    .to_string();
-    if let Some(running) = relaunch_note(caller, &checked).await {
-        note.push(' ');
-        note.push_str(&running);
-    }
-    Ok(json!({ "status": "applied", "changes": lines, "answered_blockers": relaunch, "note": note }))
-}
-
-/// `hiveChangeSettings` (§3.4).
-pub(crate) async fn change_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, args: &Value) -> Result<Value, String> {
-    let (change, reason) = parse_args(args)?;
-    let hive = super::autonomy::current_hive(ctx, caller).ok_or("This Hive is gone.")?;
-    let hosts = !change.add_hosts.is_empty() || !change.remove_hosts.is_empty();
-    if hosts {
-        let Some(reason) = reason.as_deref() else {
-            return Err("A host change needs a reason: your human reads it in the decision log.".to_string());
-        };
-        if !hosts_only(&change) {
-            return Err("Change hosts in a call of their own: they apply at once, and the rest follows the Settings checkpoint.".to_string());
-        }
-        // She grants alone: a name must resolve now, and nowhere home.
-        let remotes = remotes_of(&hive).await?;
-        refuse_private_hosts(&change.add_hosts, true, &ip_remotes(&remotes)).await?;
-        return coordinator_hosts(ctx, caller, &change, reason, &remotes).await;
-    }
-    // The human's limits apply on approval, but a card that can't apply now isn't filed.
-    let remotes = remotes_of(&hive).await?;
-    let checked = check(&hive, &change, By::Approved, &remotes)?;
-    // A raise of the cap, or a setup (it runs outside any sandbox), is the human's whoever holds
-    // the checkpoint: the whole change goes on a card.
-    let raises = change.cap.is_some_and(|c| c > hive.cap);
-    let setup = checked.change.folders.iter().any(|f| f.setup.is_some());
-    if !checkpoints::asks(&hive, SETTINGS) && !raises && !setup {
-        let (_, lines) = write(ctx, caller, &change, By::Coordinator, &remotes)?;
-        log_line(caller,"coordinator", &lines, reason.as_deref());
-        ctx.window.settings_changed(&caller.workspace_id, &format!("The queen changed this Hive\u{2019}s settings: {}.", lines.join("; ")));
-        ctx.window.poll_waiters(&caller.workspace_id);
-        let mut note = "Your human was told. Each agent gets it at its next launch.".to_string();
-        if let Some(running) = relaunch_note(caller, &change).await {
-            note.push(' ');
-            note.push_str(&running);
-        }
-        return Ok(json!({ "status": "applied", "changes": lines, "note": note }));
-    }
-    let mut effects = checked.lines.clone();
-    if !checked.change.add_hosts.is_empty() {
-        effects.push("A host a worker can reach can also receive what it sends: only hosts you trust with this project\u{2019}s code.".to_string());
-    }
-    let req = HiveRequest {
-        tab_id: caller.tab_id.clone(),
-        kind: KIND,
-        args: json!({ "hive_id": hive.id, "change": checked.change }),
-        summary: format!("Change the Hive\u{2019}s settings ({})", one_line(&caller.workstream, 80)),
-        effects,
-        reason,
-        keep: None,
-    };
-    let id = ctx.window.file_request(req)?;
-    log::info!("hive {}: settings change {id} waits for the human: {}", hive.id, checked.lines.join("; "));
-    Ok(json!({
-        "status": "awaiting_approval",
-        "request_id": id,
-        "changes": checked.lines,
-        "note": "Your human approves or denies it on a card; maiTerm tells you which. Carry on meanwhile.",
-    }))
-}
-
-/// Hive settings: the human's own change. The coordinator is told.
+/// Hive settings: the human's own change (the core fields: tools, the gallery and autonomy have
+/// their own commands). The coordinator is told.
 pub(crate) async fn set_by_human<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, change: &SettingsChange) -> Result<Hive, String> {
+    let change = &change.core();
     let remotes = remotes_of(&caller.hive).await?;
     refuse_private_hosts(&change.add_hosts, false, &ip_remotes(&remotes)).await?;
+    // Checked first, so a change with nothing in it is refused before anything is saved.
+    check(&super::autonomy::current_hive(ctx, caller).ok_or("This Hive is gone.")?, change, By::Human, &remotes)?;
     let (hive, lines) = write(ctx, caller, change, By::Human, &remotes)?;
-    log_line(caller,"human", &lines, None);
+    if lines.is_empty() {
+        return Err(NOTHING.to_string());
+    }
+    log_line(caller, "human", &lines, None);
     let running = relaunch_note(caller, change).await.map(|s| format!("\n{s}")).unwrap_or_default();
     tell_coordinator(ctx, caller, format!("[maiTerm] Your human changed this Hive\u{2019}s settings:{}{running}", bulleted(&lines))).await;
     ctx.window.poll_waiters(&caller.workspace_id);
@@ -759,31 +774,32 @@ pub(crate) async fn set_by_human<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Calle
 }
 
 /// The human approved the coordinator's card: applied from the stored arguments, re-checked
-/// against the record as it is now.
-pub(crate) async fn approved_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, request_id: &str, args: &Value) {
+/// against the record as it is now. The record after, when the change moved a checkpoint, so the
+/// caller can hand the prompts it now covers to the human.
+pub(crate) async fn approved_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, request_id: &str, args: &Value) -> Option<(Hive, Vec<String>)> {
     let change: Result<SettingsChange, String> =
         args.get("change").cloned().ok_or_else(|| "it had no change".to_string()).and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()));
     let res = match change {
         Ok(c) => match remotes_of(&caller.hive).await {
-            Ok(remotes) => match refuse_private_hosts(&c.add_hosts, false, &ip_remotes(&remotes)).await {
-                Ok(()) => write(ctx, caller, &c, By::Approved, &remotes).map(|(h, lines)| (h, lines, c)),
-                Err(e) => Err(e),
-            },
+            Ok(remotes) => super::change_plan::commit(ctx, caller, &c, By::Approved, &remotes).await.map(|(h, lines)| (h, lines, c)),
             Err(e) => Err(e),
         },
         Err(e) => Err(e),
     };
     match res {
-        Ok((_, lines, c)) => {
-            log_line(caller,"coordinator, approved by the human", &lines, None);
+        Ok((hive, lines, c)) => {
+            log_line(caller, "coordinator, approved by the human", &lines, None);
             ctx.window.settle_request(request_id, true, format!("applied: {}", lines.join("; ")));
             let running = relaunch_note(caller, &c).await.map(|s| format!("\n{s}")).unwrap_or_default();
             tell_coordinator(ctx, caller, format!("[maiTerm] Your human approved your settings change:{}{running}", bulleted(&lines))).await;
             ctx.window.poll_waiters(&caller.workspace_id);
+            let moved: Vec<String> = lines.iter().filter_map(|l| l.strip_prefix("Checkpoint, ").map(str::to_string)).collect();
+            (!moved.is_empty()).then_some((hive, moved))
         }
         Err(e) => {
             ctx.window.settle_request(request_id, false, e.clone());
             tell_coordinator(ctx, caller, format!("[maiTerm] Your human approved your settings change, but it couldn\u{2019}t apply: {e}")).await;
+            None
         }
     }
 }
@@ -811,7 +827,11 @@ pub fn on_approved(app: &tauri::AppHandle, r: &crate::agent_requests::AgentReque
             return;
         };
         let ctx = super::tools::app_ctx(&state, &app, &caller);
-        approved_in(&ctx, &caller, &r.id, &r.args).await;
+        if let Some((hive, moved)) = approved_in(&ctx, &caller, &r.id, &r.args).await {
+            // As Hive settings → Autonomy does: a prompt the queen holds under a checkpoint now
+            // Ask me becomes the human's, and she is told.
+            super::prompts::checkpoints_changed(&state, &app, &caller.label, &caller.workspace_id, &hive, moved).await;
+        }
     });
 }
 
@@ -883,22 +903,35 @@ mod tests {
     }
 
     #[test]
-    fn the_coordinator_lowers_the_cap_but_never_raises_it_and_never_pushes() {
+    /// Darryl, 2026-11-21: the queen sets anything the checkpoints hand her (`change_plan::route`
+    /// decides what applies at once); `check` keeps only the limits that hold for anyone, and a
+    /// checkpoint change, which is always the human's.
+    fn the_queen_may_set_anything_but_a_checkpoint() {
         let up = SettingsChange { cap: Some(8), ..Default::default() };
-        assert!(check(&hive(), &up, By::Coordinator, &[]).unwrap_err().contains("goes on a card"));
+        assert_eq!(check(&hive(), &up, By::Coordinator, &[]).unwrap().change.cap, Some(8));
         assert_eq!(check(&hive(), &SettingsChange { cap: Some(2), ..Default::default() }, By::Coordinator, &[]).unwrap().change.cap, Some(2));
-        assert_eq!(check(&hive(), &up, By::Approved, &[]).unwrap().change.cap, Some(8), "the human raises it on the card");
-        assert_eq!(check(&hive(), &up, By::Human, &[]).unwrap().change.cap, Some(8));
-        assert!(check(&hive(), &SettingsChange { cap: Some(MAX_CAP + 1), ..Default::default() }, By::Human, &[]).is_err());
+        assert!(check(&hive(), &SettingsChange { cap: Some(MAX_CAP + 1), ..Default::default() }, By::Coordinator, &[]).is_err());
         assert!(check(&hive(), &SettingsChange { cap: Some(0), ..Default::default() }, By::Human, &[]).is_err());
         let push = SettingsChange { push_after_land: Some(true), ..Default::default() };
-        assert!(check(&hive(), &push, By::Coordinator, &[]).is_err());
-        assert!(check(&hive(), &push, By::Approved, &[]).is_err());
-        assert!(check(&hive(), &push, By::Human, &[]).is_ok());
-        let args = json!({ "push_after_land": true, "reason": "ship it" });
-        assert!(parse_args(&args).is_err(), "the tool refuses push outright");
+        for by in [By::Coordinator, By::Approved, By::Human] {
+            assert!(check(&hive(), &push, by, &[]).is_ok());
+        }
+        let args = json!({ "push_after_land": true, "budget_usd": 12.5, "prompt_timeout_minutes": 10, "reason": "ship it" });
+        let (c, reason) = parse_args(&args).unwrap();
+        assert_eq!((c.push_after_land, c.budget_cents, c.prompt_timeout_secs, reason.as_deref()), (Some(true), Some(1250), Some(600), Some("ship it")));
+        assert!(parse_args(&json!({ "budget_cents": 5 })).is_err(), "the tool speaks dollars");
+        let cp = SettingsChange { checkpoints: [("landing".to_string(), "ask".to_string())].into(), ..Default::default() };
+        assert!(check(&hive(), &cp, By::Coordinator, &[]).unwrap_err().contains("card"));
+        let ok = check(&hive(), &cp, By::Approved, &[]).unwrap();
+        assert_eq!(ok.lines, vec!["Checkpoint, landing: Ask me".to_string()]);
+        let mut h = hive();
+        apply_to(&mut h, &ok.change);
+        assert!(checkpoints::asks(&h, "landing"));
+        assert!(check(&hive(), &SettingsChange { checkpoints: [("nope".to_string(), "ask".to_string())].into(), ..Default::default() }, By::Approved, &[]).is_err());
+        let t = SettingsChange { prompt_timeout_secs: Some(5), daily_digest: Some(false), ..Default::default() };
+        let ch = check(&hive(), &t, By::Coordinator, &[]).unwrap();
+        assert_eq!((ch.change.prompt_timeout_secs, ch.change.daily_digest), (Some(60), Some(false)), "clamped to a minute");
         let phone = SettingsChange { workers_on_phone: Some(true), ..Default::default() };
-        assert!(check(&hive(), &phone, By::Approved, &[]).is_err());
         let mut h = hive();
         apply_to(&mut h, &check(&hive(), &phone, By::Human, &[]).unwrap().change);
         assert!(h.settings.workers_on_phone);
@@ -926,9 +959,9 @@ mod tests {
             assert!(check_socket(bad).is_err(), "{bad}");
         }
         let add = SettingsChange { add_sockets: vec![" /tmp/.s.PGSQL.5432 ".into(), "/tmp/.s.PGSQL.5432".into()], ..Default::default() };
-        assert!(check(&hive(), &add, By::Coordinator, &[]).unwrap_err().contains("Only your human"));
-        assert!(check(&hive(), &add, By::Approved, &[]).is_err(), "never through the queen's card");
-        assert!(parse_args(&json!({ "add_sockets": ["/tmp/.s.PGSQL.5432"] })).unwrap_err().contains("Only your human"));
+        // The queen grants one too now (2026-11-21), under the Access checkpoint.
+        assert!(check(&hive(), &add, By::Coordinator, &[]).is_ok());
+        assert_eq!(parse_args(&json!({ "add_sockets": ["/tmp/.s.PGSQL.5432"] })).unwrap().0.add_sockets.len(), 1);
         let ch = check(&hive(), &add, By::Human, &[]).unwrap();
         assert_eq!(ch.change.add_sockets, vec!["/tmp/.s.PGSQL.5432".to_string()], "trimmed, one copy");
         let mut h = hive();
@@ -1010,14 +1043,6 @@ mod tests {
         let mut full = hive();
         full.settings.worker_hosts = (0..MAX_WORKER_HOSTS).map(|i| format!("h{i}.example.com")).collect();
         assert!(check(&full, &add("one-more.example.com"), By::Coordinator, &[]).unwrap_err().contains("at most"));
-        // Hosts alone, so they apply at once while the rest follows the checkpoint.
-        assert!(hosts_only(&add("a.example.com")));
-        assert!(hosts_only(&SettingsChange { remove_hosts: vec!["docs.example.com".into()], ..Default::default() }));
-        assert!(!hosts_only(&SettingsChange { cap: Some(2), ..add("a.example.com") }));
-        assert!(!hosts_only(&SettingsChange::default()));
-        let l = hosts_decision_line("h1", &add("shadcn-svelte.com"), "the components registry");
-        assert_eq!((l.by.as_str(), l.category.as_str(), l.source.as_str()), ("coordinator", "hosts", "settings"));
-        assert_eq!(l.answer.as_deref(), Some("The queen allowed shadcn-svelte.com for workers: the components registry"));
     }
 
     #[test]
@@ -1063,7 +1088,9 @@ mod tests {
         assert!(land.lines[0].contains("`npm test` \u{2192} `cargo test`"), "{:?}", land.lines);
 
         let setup = fc(Some("npm ci"), None);
-        assert!(check(&h, &setup, By::Coordinator, &[]).unwrap_err().contains("goes on a card"));
+        // Under Settings handed to her, the queen sets a setup too (2026-11-21); the card says it
+        // runs outside the sandbox when she asks.
+        assert!(check(&h, &setup, By::Coordinator, &[]).is_ok());
         let ok = check(&h, &setup, By::Approved, &[]).unwrap();
         assert!(ok.lines[0].contains("outside the sandbox") && ok.lines[0].contains("none \u{2192} `npm ci`"), "{:?}", ok.lines);
         apply_to(&mut h, &ok.change);

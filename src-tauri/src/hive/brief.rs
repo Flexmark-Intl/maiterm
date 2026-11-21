@@ -388,6 +388,7 @@ fn ask_me_means(key: &str) -> &'static str {
         "landing" => "each hiveLand waits for your human\u{2019}s approval",
         "finals" => "your human picks the finals in the gallery",
         "interfaces" => "ask your human (a blocker) before adding a dependency or changing a public interface",
+        "access" => "a host, socket or tool you name in hiveChangeSettings goes on a card your human approves; maiTerm tells you the answer",
         "settings" => "hiveChangeSettings files a card your human approves; maiTerm tells you the answer",
         _ => "ask your human",
     }
@@ -401,6 +402,9 @@ fn checkpoint_lines(hive: &Hive) -> String {
         let who = match (super::checkpoints::asks(hive, key), key) {
             (true, _) => format!("**Ask me**: {}", ask_me_means(key)),
             (false, super::checkpoints::SETTINGS) => "**you decide**: hiveChangeSettings applies at once, and your human is told".to_string(),
+            (false, super::checkpoints::ACCESS) => {
+                "**you decide**: grant a worker a host, a local database socket or a tool with hiveChangeSettings the moment it needs one; it applies at once, and your human is told".to_string()
+            }
             (false, _) => "**you decide**".to_string(),
         };
         b.push_str(&format!("- {}: {who}.\n", capitalised(super::checkpoints::label(key))));
@@ -417,7 +421,7 @@ fn checkpoint_lines(hive: &Hive) -> String {
          so. A request no one can grant (a sandbox or Claude setting maiTerm pins) is a refusal with new instructions.\n\nNever \
          yours, whatever the checkpoints: Claude\u{2019}s workspace-trust and plan dialogs; any row that saves a setting or a \
          rule, or changes a mode; the sandbox and reads outside the working folder; spending past the budget, and raising the \
-         budget or the cap; pushing; a land or undo whose diff changes agent or execution config. maiTerm sends those to your \
+         budget or changing a checkpoint (hiveChangeSettings puts those on a card); pushing yourself; a land or undo whose diff changes agent or execution config. maiTerm sends those to your \
          human and tells you.\n"
     ));
     if super::checkpoints::asks(hive, super::checkpoints::PLAN) {
@@ -639,9 +643,10 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths, counts: &PrecedentCounts, config
          isn\u{2019}t allowed. Your grant applies at once, answers the blocker, is logged for your human, and reaches the worker when you relaunch it (hiveRestartWorker resumes its \
          session). A repo remote\u{2019}s host, localhost and private addresses can\u{2019}t be granted by anyone; a worker \
          runs and looks at the app through hiveRun with serve: true, hiveScreenshot and hiveFetch. A local database \
-         (Postgres, MySQL, Redis) is reached through its Unix socket, which only your human grants, in Hive settings \
-         \u{2192} Workers: ask them in a blocker naming the database and why. Raise your own blocker to your human only for \
-         a host you can\u{2019}t judge.\n",
+         (Postgres, MySQL, Redis) is reached through its Unix socket, never TCP: grant it with hiveChangeSettings \
+         {add_sockets: [\"/tmp/.s.PGSQL.5432\"], reason}, its full path (`ls -a /tmp` finds a Postgres one). A tool on this \
+         Mac the Hive lacks (an MCP server, a CLI) is add_tools. Raise your own blocker to your human only for a host you \
+         can\u{2019}t judge.\n",
     );
     b.push_str(
         "- A spawn refused because Claude Code doesn't trust a repo is your human's to fix: put maiTerm's refusal to them \
@@ -905,7 +910,7 @@ pub fn reviewer_brief_md(hive: &Hive, paths: &HivePaths, w: &WorkerRecord, task_
     b
 }
 
-/// A builder's line on the local databases its human opened to it (§6.7): reached by socket only,
+/// A builder's line on the local databases opened to it (§6.7): reached by socket only,
 /// since localhost stays closed. Empty when none.
 fn database_sockets_line(sockets: &[String]) -> String {
     if sockets.is_empty() {
@@ -923,7 +928,7 @@ fn database_sockets_line(sockets: &[String]) -> String {
         })
         .collect();
     format!(
-        "- Local databases your human opened to you, from your shell and your `hiveRun` jobs (land checks too): {}. Connect \
+        "- Local databases open to you, from your shell and your `hiveRun` jobs (land checks too): {}. Connect \
          through the socket, never TCP: `127.0.0.1` and `localhost` stay closed. Use a database of your own, as your \
          coordinator says, never one another worker or your human uses.\n",
         how.join("; ")

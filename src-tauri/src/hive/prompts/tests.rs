@@ -893,11 +893,13 @@ async fn the_queens_host_grant_applies_at_once_and_answers_the_sandbox_blocker()
     rig.route(PromptView::from_blocker(&rig.worker.task_id, &b), 1).await.unwrap();
 
     let ctx = rig.ctx();
-    let no_reason = crate::hive::change::change_tool(&ctx, &rig.caller, &json!({ "add_hosts": [host] })).await.unwrap_err();
+    let no_reason = crate::hive::change_plan::change_tool(&ctx, &rig.caller, &json!({ "add_hosts": [host] })).await.unwrap_err();
     assert!(no_reason.contains("needs a reason"), "{no_reason}");
-    let mixed = crate::hive::change::change_tool(&ctx, &rig.caller, &json!({ "add_hosts": [host], "cap": 1, "reason": "r" })).await.unwrap_err();
-    assert!(mixed.contains("call of their own"), "{mixed}");
-    let out = crate::hive::change::change_tool(&ctx, &rig.caller, &json!({ "add_hosts": [host], "reason": "the component docs" })).await.unwrap();
+    // A part that would fail on the card stops the whole call: nothing applies.
+    let bad = crate::hive::change_plan::change_tool(&ctx, &rig.caller, &json!({ "add_hosts": [host], "cap": 0, "reason": "r" })).await.unwrap_err();
+    assert!(bad.contains("1 to"), "{bad}");
+    assert!(rig.data.read().windows[0].workspaces[0].hive.as_ref().unwrap().settings.worker_hosts.is_empty(), "nothing applied");
+    let out = crate::hive::change_plan::change_tool(&ctx, &rig.caller, &json!({ "add_hosts": [host], "reason": "the component docs" })).await.unwrap();
     assert_eq!(out["status"], "applied", "no card under Ask me: {out}");
     assert_eq!(out["answered_blockers"][0]["worker"], 2);
     let saved = rig.data.read().windows[0].workspaces[0].hive.clone().unwrap();

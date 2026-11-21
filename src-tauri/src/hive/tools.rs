@@ -480,7 +480,7 @@ pub async fn handle(tool: &str, args: &Value, state: &Arc<AppState>, handle: &ta
         "hiveProposePlan" => super::plan::propose_tool(&ctx, &caller, args).await,
         "hiveSetCriteria" => super::finish::set_criteria_tool(&ctx, &caller, args).await,
         "hiveFinish" => super::finish::finish_tool(&ctx, &caller, args).await,
-        "hiveChangeSettings" => super::change::change_tool(&ctx, &caller, args).await,
+        "hiveChangeSettings" => super::change_plan::change_tool(&ctx, &caller, args).await,
         "hiveRequestCapability" => super::tool_setup::request_tool(&ctx, &caller, args).await,
         t =>Err(format!("{t} isn't available in this build of maiTerm yet.")),
     };
