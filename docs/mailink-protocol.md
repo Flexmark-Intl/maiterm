@@ -4,6 +4,18 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.29 changelog** (2026-11-22). Additive: **one phone, several desktops** (§6.3).
+> - **Every push says which desktop rang**: `serverFp` in the APNs custom keys and the FCM
+>   `data`, the same `sha256/…` the phone pinned at pairing. A tap opens the thread on THAT
+>   desktop. Gate on the key, not on a version: a remembered desktop isn't reachable at tap time.
+> - **`POST /push-register` takes `alert_name`**, what the phone calls this desktop. The relay
+>   shows it as the alert's subtitle (APNs) or before the title (FCM). Send it only while the
+>   phone holds several pairings; each register replaces it, and absent or blank clears it.
+> - **`POST /unpair`**: the calling device forgets this desktop. Its record and push token go,
+>   and its bearer stops working. `409` for the dev token.
+> - **The desktop names itself**: the QR `name`, `/pair`'s and the heartbeat's `server_name` are
+>   the computer's name (macOS Computer Name, else the host name), not "maiTerm" on every one.
+>
 > **v0.28 changelog** (2026-11-15). Additive: **a command for another agent's tab** (maiTerm
 > docs/tasks.md §3.1.3). An agent may file an action card whose command is for a peer (a mesh
 > peer or its bridge partner), not for itself.
@@ -1644,14 +1656,15 @@ When an attention event fires (`permission`, or `idle`/done via the Stop hook, o
 question) for a maiLink-native tab **and** no paired device holds a live WS for it:
 
 ```
-desktop ─POST {push_token, platform, env, cap, tab_id, kind, title}─► relay ─┬─APNs─► Apple  ─► iPhone
-                                                                            └─FCM──► Google ─► Android
+desktop ─POST {push_token, platform, env, cap, tab_id, kind, title, server_fp, server_name?}─► relay ─┬─APNs─► Apple  ─► iPhone
+                                                                                                    └─FCM──► Google ─► Android
 ```
 The relay fans out by `platform` (`apns`→JWT/APNs, `fcm`→HTTP-v1/FCM). Same content-light
 payload either way; `cap` is the per-device capability (below).
 
 - **Payload is content-light.** No prompt text, no terminal output, no cwd — only the tab
-  `title` + `kind` (`permission`/`question`/`idle_done`), which is all the alert renders. Apple
+  `title` + `kind` (`permission`/`question`/`idle_done`), which is all the alert renders, plus
+  which desktop rang (its certificate fingerprint, and the name the phone gave it — §6.3). Apple
   and the relay learn *that* an agent wants you and which tab, never the prompt. The phone wakes,
   opens the WS over LAN/WireGuard, and pulls the real content.
 - `tab_id` drives `apns-collapse-id`/`thread-id` so repeated pings for one tab coalesce.
@@ -1726,7 +1739,8 @@ gate (tokens are app-private and only ever travel APNs→phone→pinned-TLS→pa
 
 Relay endpoints (in `update-worker/`):
 - `POST /push-capability` — `{push_token, platform}` → `{cap}`. Open mint (rate-limit later).
-- `POST /push` — `{push_token, platform, env, cap, tab_id, kind, title}`. `403` on a bad cap,
+- `POST /push` — `{push_token, platform, env, cap, tab_id, kind, title}`, plus optional
+  `server_fp` and `server_name` (§6.3). `403` on a bad cap,
   `503` if `CAP_SECRET` unset, else echoes the upstream APNs/FCM verdict.
 - gateway-by-`env`: only `env:"production"`→`api.push.apple.com`, else the sandbox gateway.
 
@@ -1773,6 +1787,34 @@ whatever the device. Like a device mute it filters the push only: the WS frames,
 attention list are unchanged. No field says a chat is muted.
 
 ---
+
+### 6.3 One phone, several desktops (v0.29)
+
+A phone may pair with several maiTerms and keep them all, with one live at a time. Each desktop
+still holds its own device record and the same push token, so every paired desktop rings the
+phone, and the phone has to know which one did.
+
+- **A desktop names itself** with the computer's name (macOS Computer Name, else the host name
+  without `.local`) in the QR `name`, `/pair`'s `server_name` and the heartbeat. That is the
+  default name of a pairing on the phone. It stays on the LAN; the relay never receives it.
+
+- **`serverFp`** rides every push: `aps`-level custom key on APNs, `data.serverFp` on FCM,
+  beside `tabId` and `kind`. It is the desktop's certificate fingerprint (`sha256/…`), exactly
+  as pinned from the QR. On a tap the phone finds the saved pairing with that fingerprint,
+  switches to it if it isn't live, then opens `tabId`. No key means an older desktop or relay:
+  open against the live desktop as before.
+- **`alert_name`** on `POST /push-register` (optional string, trimmed, at most 40 characters) is
+  what the phone calls this desktop. The desktop stores it on the device and sends it to the
+  relay as `server_name`. The relay puts it in `aps.alert.subtitle` on APNs, prefixes the FCM
+  title as `<name> · <title>`, and adds `serverName` to the custom data. **The phone decides
+  whether to show a name**: send it only while it holds more than one pairing, and re-register
+  when that changes (blank or absent clears it). A desktop the phone can't reach keeps the old
+  value until it next registers there.
+- **`POST /unpair`** (no body, bearer = the device) removes the calling device's record, its
+  push token with it, so this desktop stops ringing the phone and that bearer gets `401`
+  afterwards. `{ok:true}`, or `409` for the dev token. Use it from "Forget this desktop" when the
+  desktop is reachable; one that isn't keeps ringing until the human removes the phone in
+  Preferences → maiLink.
 
 ## 7. Security & threat model
 
@@ -2597,6 +2639,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.26` | adds pick-several decisions: `MaitermTask.blocker.pick` (`one` / `many`), `picks` and `pickContext`; a `many` question is served with `options: []` and its choices listed in `context`, so an older client answers it in words; `POST /tasks/{id}/answer` takes `options: number[]` |
 | `0.27` | adds `MaitermTask.blocker.run` (`agent` / `tab` / `null`) and `POST /tasks/{id}/run` |
 | `0.28` | adds `MaitermTask.blocker.runIn` (`{ tabId, tabTitle }` / `null`): the command is for another agent's tab, and `run` describes that tab |
+| `0.29` | adds the push's `serverFp` (and `serverName` when the phone gave an `alert_name`), `alert_name` on `POST /push-register`, and `POST /unpair` (§6.3) |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,

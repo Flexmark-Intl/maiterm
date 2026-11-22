@@ -455,6 +455,7 @@ fn build_router(api: ApiState) -> Router {
         .route("/mailink/v1/ws", get(ws_handler))
         .route("/mailink/v1/pair", post(post_pair))
         .route("/mailink/v1/push-register", post(post_push_register))
+        .route("/mailink/v1/unpair", post(post_unpair))
         .route(
             "/mailink/v1/push-prefs",
             get(get_push_prefs).post(post_push_prefs),
@@ -483,7 +484,7 @@ pub async fn serve(app_state: Arc<AppState>, cfg: MailinkConfig, app_handle: tau
     let api = ApiState {
         app: app_state,
         app_handle: Some(app_handle),
-        server_name: "maiTerm".to_string(),
+        server_name: machine_name(),
         fingerprint: cfg.fingerprint.clone(),
         dev_token: cfg.dev_token.clone(),
     };
@@ -535,7 +536,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.28";
+const PROTOCOL_VERSION: &str = "0.29";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -3145,6 +3146,7 @@ async fn post_pair(
         push_env: None,
         push_cap: None,
         push_mute: Vec::new(),
+        alert_name: None,
         created_at: now_ms() as i64,
         last_seen_at: now_ms() as i64,
     };
@@ -3173,6 +3175,20 @@ struct PushRegBody {
     /// (HMAC over platform:push_token). Required for the multi-tenant doorbell to ring it.
     #[serde(default)]
     cap: Option<String>,
+    /// What the phone calls this desktop, for the alert's subtitle (§6.3). Sent only while the
+    /// phone holds several pairings; absent or blank clears it.
+    #[serde(default)]
+    alert_name: Option<String>,
+}
+
+/// The longest `alert_name` kept, in characters: a subtitle, not a sentence.
+const ALERT_NAME_MAX: usize = 40;
+
+/// Blank → none; otherwise trimmed and cut to [`ALERT_NAME_MAX`] characters.
+fn clean_alert_name(name: Option<String>) -> Option<String> {
+    let name = name?;
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.chars().take(ALERT_NAME_MAX).collect::<String>().trim_end().to_string())
 }
 
 /// POST /push-register — store the device's push token (APNs/FCM) + relay capability so the
@@ -3210,11 +3226,35 @@ async fn post_push_register(
                 d.push_platform = Some(body.platform);
                 d.push_env = body.env;
                 d.push_cap = body.cap;
+                d.alert_name = clean_alert_name(body.alert_name);
                 d.last_seen_at = now_ms() as i64;
             }
             // authed via the dev token (no device record) — push must target a paired device
             None => return Err(StatusCode::CONFLICT),
         }
+        data.clone()
+    };
+    let _ = crate::state::save_state(&data_clone);
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// POST /unpair — the phone forgets this desktop (§6.3): drop the calling device's record, and
+/// with it its push token, so this desktop stops ringing it and its bearer stops working. The
+/// device is its bearer; the dev token has no record, so it gets 409 as `/push-register` does.
+async fn post_unpair(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    let hash = sha256_hex(bearer_token(&headers).as_bytes());
+    let data_clone = {
+        let mut data = s.app.app_data.write();
+        let devices = &mut data.preferences.mailink_devices;
+        let Some(at) = devices.iter().position(|d| d.token_hash == hash) else {
+            return Err(StatusCode::CONFLICT);
+        };
+        let gone = devices.remove(at);
+        log::info!("[maiLink] device {} ({:?}) unpaired itself", gone.id, gone.name);
         data.clone()
     };
     let _ = crate::state::save_state(&data_clone);
@@ -6815,6 +6855,29 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// What this desktop calls itself to a phone: the QR `name`, `/pair`'s and the heartbeat's
+/// `server_name` (§6.3). A phone paired with several desktops names each pairing by this until
+/// the human renames it, so it must tell computers apart — "maiTerm" on every one did not.
+/// macOS's Computer Name ("Darryl's Mac Studio") is what its owner recognises; elsewhere the host
+/// name without a `.local`. LAN-only: the relay never sees it (pushes carry the phone's own name).
+fn machine_name() -> String {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        #[cfg(target_os = "macos")]
+        if let Ok(out) = std::process::Command::new("/usr/sbin/scutil").args(["--get", "ComputerName"]).output() {
+            let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if out.status.success() && !name.is_empty() {
+                return name;
+            }
+        }
+        sysinfo::System::host_name()
+            .map(|h| h.trim().trim_end_matches(".local").to_string())
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| "maiTerm".to_string())
+    })
+    .clone()
+}
+
 /// Mint a one-time pairing code (120s TTL) and build the QR payload the desktop displays for
 /// scanning. Errors if the listener isn't running yet (no fp/port published).
 pub fn create_pairing(app: &Arc<AppState>) -> Result<Value, String> {
@@ -6835,7 +6898,7 @@ pub fn create_pairing(app: &Arc<AppState>) -> Result<Value, String> {
         "port": port,
         "fp": fp,
         "code": code,
-        "name": "maiTerm",
+        "name": machine_name(),
     }))
 }
 
@@ -7055,10 +7118,44 @@ fn waiting_ring_due(last: &mut HashMap<String, u64>, tab: &str, kind: &str, now:
     true
 }
 
+/// One ring's body for the relay. `server_fp` and `server_name` are left out when there is none,
+/// so an older relay and a single-pairing phone see exactly the old shape.
+#[allow(clippy::too_many_arguments)]
+fn ring_body(
+    push_token: &str,
+    platform: &str,
+    env: Option<String>,
+    cap: &str,
+    tab_id: &str,
+    kind: &str,
+    title: &str,
+    server_fp: Option<&str>,
+    server_name: Option<&str>,
+) -> Value {
+    let mut body = json!({
+        "push_token": push_token,
+        "platform": platform,
+        "env": env,
+        "cap": cap,
+        "tab_id": tab_id,
+        "kind": kind,
+        "title": title,
+    });
+    if let Some(fp) = server_fp {
+        body["server_fp"] = json!(fp);
+    }
+    if let Some(name) = server_name {
+        body["server_name"] = json!(name);
+    }
+    body
+}
+
 /// POST the content-free wake to the shared relay, once per paired device that registered BOTH a
 /// push token and a relay capability (without the cap the multi-tenant relay rejects the wake).
-/// Payload carries ONLY {push_token, platform, env, cap, tab_id, kind, title} — never terminal
-/// content (docs §6: content-light boundary; tab title + kind are allowed).
+/// Payload carries ONLY {push_token, platform, env, cap, tab_id, kind, title, server_fp} and,
+/// when the phone gave one, `server_name` — never terminal content (docs §6: content-light
+/// boundary; tab title + kind are allowed). `server_fp` is this desktop's pinned fingerprint, so
+/// a phone paired with several desktops opens the tap on the one that rang (§6.3).
 async fn ring_devices(
     client: &reqwest::Client,
     app: &Arc<AppState>,
@@ -7073,7 +7170,8 @@ async fn ring_devices(
         log::debug!("[maiLink] doorbell: tab {tab_id} is muted, no push ({kind})");
         return;
     }
-    let targets: Vec<(String, String, Option<String>, String)> = app
+    let server_fp = app.mailink_info.read().as_ref().map(|(fp, _)| fp.clone());
+    let targets: Vec<(String, String, Option<String>, String, Option<String>)> = app
         .app_data
         .read()
         .preferences
@@ -7088,21 +7186,14 @@ async fn ring_devices(
                 d.push_platform.clone().unwrap_or_else(|| "apns".to_string()),
                 d.push_env.clone(),
                 cap.clone(),
+                d.alert_name.clone(),
             )),
             _ => None,
         })
         .collect();
 
-    for (push_token, platform, env, cap) in targets {
-        let body = json!({
-            "push_token": push_token,
-            "platform": platform,
-            "env": env,
-            "cap": cap,
-            "tab_id": tab_id,
-            "kind": kind,
-            "title": title,
-        });
+    for (push_token, platform, env, cap, alert_name) in targets {
+        let body = ring_body(&push_token, &platform, env, &cap, tab_id, kind, title, server_fp.as_deref(), alert_name.as_deref());
         match client.post(url).json(&body).send().await {
             Ok(resp) => log::info!(
                 "[maiLink] doorbell → {platform} for tab {tab_id} ({kind}): {}",
@@ -8517,6 +8608,25 @@ mod tests {
         assert_eq!(reply["status"], "unreachable");
         assert!(reply["detail"].as_str().unwrap().contains("attach files once"), "{reply}");
         assert_eq!(app.app_data.read().windows[0].workspaces[0].hive.as_ref().unwrap().status, crate::hive::record::STATUS_DONE, "nothing woke it");
+    }
+
+    #[test]
+    fn a_ring_names_its_desktop_only_with_what_it_has() {
+        let old = ring_body("t", "apns", None, "c", "tab", "ask", "T", None, None);
+        assert!(old.get("server_fp").is_none() && old.get("server_name").is_none(), "{old}");
+        let new = ring_body("t", "apns", None, "c", "tab", "ask", "T", Some("sha256/x"), Some("Studio"));
+        assert_eq!((new["server_fp"].as_str(), new["server_name"].as_str()), (Some("sha256/x"), Some("Studio")));
+        let unnamed = ring_body("t", "apns", None, "c", "tab", "ask", "T", Some("sha256/x"), None);
+        assert!(unnamed.get("server_name").is_none(), "{unnamed}");
+    }
+
+    #[test]
+    fn an_alert_name_is_trimmed_capped_and_blank_clears_it() {
+        assert_eq!(clean_alert_name(None), None);
+        assert_eq!(clean_alert_name(Some("   ".into())), None);
+        assert_eq!(clean_alert_name(Some(" Studio ".into())).as_deref(), Some("Studio"));
+        let long = "é".repeat(ALERT_NAME_MAX + 5);
+        assert_eq!(clean_alert_name(Some(long)).unwrap().chars().count(), ALERT_NAME_MAX);
     }
 
     #[test]

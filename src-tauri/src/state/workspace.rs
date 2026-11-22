@@ -2365,6 +2365,11 @@ pub struct MailinkDevice {
     /// a word one of them doesn't know. Pushes only: the WS `attention` frame is unaffected.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub push_mute: Vec<String>,
+    /// The name this device shows for THIS desktop in a push (docs/mailink-protocol.md §6.3),
+    /// chosen by the phone and sent on /push-register only while it holds several pairings. The
+    /// relay puts it in the alert's subtitle. Replaced on every register; absent clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alert_name: Option<String>,
     pub created_at: i64,
     #[serde(default)]
     pub last_seen_at: i64,
