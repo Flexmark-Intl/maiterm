@@ -28,6 +28,7 @@
   import type { MatchMode } from '$lib/tauri/types';
   import AccountsPane from '$lib/components/accounts/AccountsPane.svelte';
   import McpServersPane from '$lib/components/mcp/McpServersPane.svelte';
+  import AgentDefaultsPane from '$lib/components/agentDefaults/AgentDefaultsPane.svelte';
   import BrowserLinkPane from '$lib/components/browserLink/BrowserLinkPane.svelte';
 
   /** Restore a default trigger to its template values (keeps enabled, workspaces, id). */
@@ -85,7 +86,7 @@
     if (result) preferencesStore.setTriggers(result);
   }
 
-  const sectionIds = ['appearance', 'terminal', 'ui', 'tabs', 'workspace', 'notes', 'files', 'notifications', 'triggers', 'overlord', 'hive', 'claude_code', 'mailink', 'accounts', 'mcp', 'browser', 'deshittify', 'integrations', 'backup', 'updates', 'permissions'] as const;
+  const sectionIds = ['appearance', 'terminal', 'ui', 'tabs', 'workspace', 'notes', 'files', 'notifications', 'triggers', 'overlord', 'hive', 'claude_code', 'mailink', 'accounts', 'mcp', 'browser', 'agent_defaults', 'deshittify', 'integrations', 'backup', 'updates', 'permissions'] as const;
   type SectionId = typeof sectionIds[number];
   const saved = localStorage.getItem('prefs-section');
   let activeSection = $state<SectionId>(
@@ -435,6 +436,7 @@
     { id: 'accounts' as const, label: 'Accounts' },
     { id: 'mcp' as const, label: 'MCP servers' },
     { id: 'browser' as const, label: 'Chrome extension' },
+    { id: 'agent_defaults' as const, label: 'Agent Defaults' },
     { id: 'deshittify' as const, label: 'Deshittification' },
     { id: 'integrations' as const, label: 'Integrations' },
     { id: 'backup' as const, label: 'Backup' },
@@ -2661,6 +2663,9 @@
 
       {:else if activeSection === 'browser'}
         <BrowserLinkPane />
+
+      {:else if activeSection === 'agent_defaults'}
+        <AgentDefaultsPane />
 
       {:else if activeSection === 'deshittify'}
         <h3 class="section-heading">Deshittification</h3>

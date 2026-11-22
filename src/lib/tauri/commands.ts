@@ -2380,6 +2380,63 @@ export async function openFullDiskAccessSettings(): Promise<void> {
   return invoke('open_full_disk_access_settings');
 }
 
+// ─── Agent Defaults (docs/agent-defaults.md) ───────────────────────────────
+// Each agent's own settings file is the state: every value is what is on disk, null where
+// the key is absent (the agent's own default). Mirrors `agent_defaults::Status`.
+
+export interface AgentDefaultsEffortRow {
+  model_id: string;
+  /** "Opus" etc. for the models offered; null for another entry already in the file (read-only). */
+  label: string | null;
+  level: string | null;
+}
+
+export interface AgentDefaultsClaude {
+  installed: boolean;
+  error: string | null;
+  advisor: string | null;
+  /** The advisor's flag bypass is set. */
+  advisor_switch: boolean;
+  /** Telemetry (or similar) is off in Claude's env, so the advisor needs the bypass. */
+  flags_off: boolean;
+  model: string | null;
+  effort: AgentDefaultsEffortRow[];
+  retention_days: string | null;
+}
+
+export interface AgentDefaultsCodex {
+  installed: boolean;
+  error: string | null;
+  model: string | null;
+  effort: string | null;
+  reviewer: string | null;
+}
+
+export interface AgentDefaultsAgy {
+  installed: boolean;
+  error: string | null;
+  agent_mode: string | null;
+  show_thinking: string | null;
+  queued_messages: string | null;
+}
+
+export interface AgentDefaultsStatus {
+  claude: AgentDefaultsClaude;
+  codex: AgentDefaultsCodex;
+  agy: AgentDefaultsAgy;
+}
+
+export type AgentDefaultsRuntime = 'claude' | 'codex' | 'agy';
+
+export async function agentDefaultsStatus(): Promise<AgentDefaultsStatus> {
+  return invoke('agent_defaults_status');
+}
+
+/** Set one default, or clear it with null (the agent's own default). Answers with what is on disk. */
+export async function agentDefaultsSet(runtime: AgentDefaultsRuntime, key: string, value: string | null): Promise<AgentDefaultsStatus> {
+  return invoke('agent_defaults_set', { runtime, key, value });
+}
+
 // ─── Deshittification ──────────────────────────────────────────────────────
 // Rule state lives outside maiTerm's preferences (~/.claude/settings.json, the
 // user's global git config), so every call answers with what is actually on
