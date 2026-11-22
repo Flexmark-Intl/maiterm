@@ -1259,7 +1259,13 @@ none; the queen's says skills are hers alone and their substance goes in a spawn
 queen's brief and every media worker's carry the **capability map** (docs/hive-media.md §10,
 `hive/media/map.rs`) instead of the raw ids: what the Hive can make, with which server (named as
 the reader's own MCP config names it), what it spends and how long its results last, and what
-isn't set up. A code role's brief keeps the "Tools this Hive has" line. Giving
+isn't set up. A code role's brief keeps the "Tools this Hive has" line.
+
+**Workers consult the human's advisor** (Darryl, 2026-11-22). Those same setting sources hide the
+human's `advisorModel`, so each worker and reviewer launch reads it from the launch root's
+`settings.json` (else `~/.claude/settings.json`) and passes `--advisor <model>`
+(`launch::launch_advisor`); none when it is unset. Claude skips an advisor less capable than the
+worker's model with a log line. The coordinator reads it from user settings like any tab. Giving
 workers skills (a copy under their own settings) is open.
 
 **Localhost** is closed by default (measured, spike 10). Two settings open it, and both open

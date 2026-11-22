@@ -77,6 +77,12 @@ pub struct LaunchRecord {
     /// The worker's task; empty for the coordinator.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub task_id: String,
+    /// `--advisor`: the human's own Claude advisor (`advisorModel`), read at each launch of a tab
+    /// whose `--setting-sources` leaves user settings out (`launch_advisor`), so a worker or
+    /// reviewer consults the same model the human's tabs do. Empty passes none: the coordinator
+    /// reads it from user settings itself.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub advisor: String,
 }
 
 pub const WORKER_PERMISSION_MODE: &str = "auto";
@@ -140,6 +146,7 @@ pub fn coordinator_record(hive: &Hive, paths: &HivePaths) -> LaunchRecord {
         permission_mode: None,
         disallowed_tools: Vec::new(),
         task_id: String::new(),
+        advisor: String::new(),
     }
 }
 
@@ -230,6 +237,8 @@ pub fn worker_record(hive: &Hive, paths: &HivePaths, w: &WorkerRecord) -> Launch
         permission_mode: Some(WORKER_PERMISSION_MODE.to_string()),
         disallowed_tools: disallowed,
         task_id: w.task_id.clone(),
+        // Read at each launch (`prepare_worker`), never stored as the Hive's choice.
+        advisor: String::new(),
     }
 }
 
@@ -333,6 +342,10 @@ pub fn hive_launch_args(record: &LaunchRecord, resume: Option<&str>) -> Vec<Stri
         a.push("--effort".to_string());
         a.push(record.effort.clone());
     }
+    if !record.advisor.is_empty() {
+        a.push("--advisor".to_string());
+        a.push(record.advisor.clone());
+    }
     if let Some(mode) = record.permission_mode.as_deref().filter(|m| !m.is_empty()) {
         a.push("--permission-mode".to_string());
         a.push(mode.to_string());
@@ -396,6 +409,26 @@ pub(crate) fn config_root_for(prefs: &crate::state::Preferences, users_own: Opti
         .find(|(rt, _)| *rt == crate::accounts::Runtime::Claude)
         .and_then(|(rt, id)| crate::accounts::account_root(rt, &id))
         .or_else(|| users_own.map(Path::to_path_buf))
+}
+
+/// The human's Claude advisor (`advisorModel`) for a worker or reviewer launch. They run with
+/// `--setting-sources` that leave user settings out, so Claude never reads it for them: it comes
+/// from the launch root's `settings.json` (an account root symlinks the user's own), else
+/// `~/.claude/settings.json`. Empty when unset or not a plain model name. Claude itself skips an
+/// advisor less capable than the main model, with a log line.
+pub(crate) fn launch_advisor(root: Option<&Path>) -> String {
+    let home = dirs::home_dir().map(|h| h.join(".claude"));
+    advisor_from([root.map(Path::to_path_buf), home].into_iter().flatten().map(|d| d.join("settings.json")))
+}
+
+/// The first `settings.json` that reads, as `launch_advisor` takes its advisor from it.
+fn advisor_from(files: impl IntoIterator<Item = PathBuf>) -> String {
+    let Some(v) = files.into_iter().find_map(|f| fs::read(f).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())) else {
+        return String::new();
+    };
+    let model = v.get("advisorModel").and_then(|m| m.as_str()).unwrap_or("").trim();
+    let plain = !model.starts_with('-') && model.len() <= 100 && model.chars().all(|c| c.is_ascii_alphanumeric() || "-._[]:/@".contains(c));
+    if plain { model.to_string() } else { String::new() }
 }
 
 /// Whose trust the launch root holds, as the human knows it (`config_root_for`'s three cases),
@@ -939,11 +972,12 @@ fn prepare_worker(hive: &Hive, paths: &HivePaths, tab_id: &str, tasks: &[crate::
         })?;
     }
 
-    let record = worker_record(hive, paths, &w);
+    let root = launch_config_root(prefs);
+    let mut record = worker_record(hive, paths, &w);
+    record.advisor = launch_advisor(root.as_deref());
     if record != existing {
         write_record(&task, &record)?;
     }
-    let root = launch_config_root(prefs);
     let launch_json = claude_json_for(root.as_deref()).ok_or("Couldn't find the home folder")?;
     check_worker_trust(&trust_homes(&launch_json)?, &launch_json, &trust_root(prefs), paths, &w)?;
 
@@ -1077,6 +1111,29 @@ pub(crate) mod tests {
         assert!(r.settings_path.starts_with(&s(&p.coordinator_task())));
         let text = serde_json::to_string(&r).unwrap();
         assert!(!text.to_lowercase().contains("token") && !text.contains("ANTHROPIC"), "never a credential");
+    }
+
+    #[test]
+    fn a_worker_gets_the_humans_advisor_from_the_first_settings_file_that_reads() {
+        let t = scratch("advisor");
+        let (account, home) = (t.join("account.json"), t.join("home.json"));
+        fs::write(&home, r#"{"advisorModel":"fable"}"#).unwrap();
+        assert_eq!(advisor_from([t.join("missing.json"), home.clone()]), "fable", "an account root without the file falls back");
+        fs::write(&account, r#"{"model":"opus"}"#).unwrap();
+        assert_eq!(advisor_from([account.clone(), home.clone()]), "", "the account's own file decides, even with no advisor");
+        for bad in [r#"{"advisorModel":"--dangerously-skip-permissions"}"#, r#"{"advisorModel":"a b"}"#, r#"{"advisorModel":7}"#] {
+            fs::write(&account, bad).unwrap();
+            assert_eq!(advisor_from([account.clone()]), "", "{bad}");
+        }
+        assert_eq!(advisor_from([t.join("none.json")]), "");
+
+        let mut r = worker_record(&sample_hive(), &sample_paths(), &WorkerRecord { task_id: "t1".into(), ..WorkerRecord::default() });
+        assert!(flag_values(&hive_launch_args(&r, None), "--advisor").is_empty(), "none when unset");
+        r.advisor = "fable".into();
+        for resume in [None, Some("sid-1")] {
+            assert_eq!(flag_values(&hive_launch_args(&r, resume), "--advisor"), vec!["fable"]);
+        }
+        let _ = fs::remove_dir_all(&t);
     }
 
     #[test]
