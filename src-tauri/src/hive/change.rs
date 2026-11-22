@@ -304,7 +304,17 @@ pub fn check_core(hive: &Hive, c: &SettingsChange, by: By, remote_hosts: &[Strin
     (out.coordinator_model, out.coordinator_effort, out.worker_model, out.worker_effort) = (cm, ce, wm, we);
 
     let was = advisor_choice(&hive.settings.worker_advisor).to_string();
-    if let Some(a) = pick(&c.worker_advisor, &ADVISORS, "The workers\u{2019} advisor")?.filter(|a| *a != was) {
+    let advisor = pick(&c.worker_advisor, &ADVISORS, "The workers\u{2019} advisor")?.filter(|a| *a != was);
+    // Claude skips an advisor less capable than the model it advises, with only a log line: a
+    // named advisor below the workers' model would be a setting that silently does nothing.
+    let rank = |m: &str| ["haiku", "sonnet", "opus", "fable"].iter().position(|x| *x == m);
+    let (a, w) = (advisor.clone().unwrap_or_else(|| was.clone()), out.worker_model.clone().unwrap_or_else(|| hive.models.worker.model.clone()));
+    if (advisor.is_some() || out.worker_model.is_some()) && rank(&a).zip(rank(&w)).is_some_and(|(ra, rw)| ra < rw) {
+        return Err(format!(
+            "Claude {a} can\u{2019}t advise workers on Claude {w}: an advisor must be at least as capable as the model it advises, or Claude skips it. Choose a stronger advisor, follow, or off."
+        ));
+    }
+    if let Some(a) = advisor {
         lines.push(format!("Workers\u{2019} advisor (each from its next launch): {} \u{2192} {}", describe_advisor(&was), describe_advisor(&a)));
         out.worker_advisor = Some(a);
     }
@@ -1150,6 +1160,14 @@ mod tests {
         let ch = check(&h, &set("follow"), By::Human, &[]).unwrap();
         apply_to(&mut h, &ch.change);
         assert_eq!(h.settings.worker_advisor, "", "follow is stored as the default");
+
+        // Workers are on sonnet: a sonnet advisor is fine, and opus workers would outrank it.
+        let ch = check(&h, &set("sonnet"), By::Human, &[]).unwrap();
+        apply_to(&mut h, &ch.change);
+        let opus = SettingsChange { worker_model: Some("opus".into()), ..Default::default() };
+        assert!(check(&h, &opus, By::Coordinator, &[]).unwrap_err().contains("can\u{2019}t advise"), "an advisor that would be skipped");
+        let both = SettingsChange { worker_model: Some("opus".into()), worker_advisor: Some("fable".into()), ..Default::default() };
+        assert!(check(&h, &both, By::Coordinator, &[]).is_ok());
     }
 
     /// §3.6: the queen sets a new project's commands as it grows. A land check follows the

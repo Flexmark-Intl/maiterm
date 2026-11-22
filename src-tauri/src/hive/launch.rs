@@ -440,24 +440,23 @@ pub(crate) fn worker_advisor(hive: &Hive, root: Option<&Path>) -> Advisor {
 /// Claude 2.1.330 turns the advisor tool on only under a server feature flag, which it doesn't
 /// fetch while `DISABLE_TELEMETRY`, `DO_NOT_TRACK` or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`
 /// is set (Deshittify sets the first), so `--advisor` alone silently does nothing there. This
-/// variable bypasses the flag (docs/agent-defaults.md §3.1). The human's own tabs have it only
-/// when their settings' `env` sets it, which a worker's setting sources leave out, so a worker
-/// carries it exactly then (`advisor_from`).
+/// variable bypasses the flag (docs/agent-defaults.md §3.1). Following the human, a worker carries
+/// it exactly when their settings' `env` sets it (`advisor_from`), since its setting sources leave
+/// that `env` out; an advisor the Hive names always carries it (`worker_advisor`).
 pub const ADVISOR_TOOL_ENV: &str = "CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL";
 
 /// What stops Claude fetching the advisor's feature flag, set in a settings `env`.
 const FLAG_FETCH_OFF_ENV: [&str; 3] = ["DISABLE_TELEMETRY", "DO_NOT_TRACK", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"];
 
-/// A worker's advisor as the human's tabs have it: the model, and whether their settings' `env`
-/// turns the advisor tool's switch on.
+/// A worker's advisor: the model, and whether its launch line turns the advisor tool's switch on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Advisor {
     pub model: String,
     pub switch: bool,
 }
 
-/// A worker launch's advisor: `--advisor` and, when the human's settings set it, `ADVISOR_TOOL_ENV`
-/// on the launch line.
+/// A worker launch's advisor: `--advisor` and, when `advisor.switch`, `ADVISOR_TOOL_ENV` on the
+/// launch line.
 pub(crate) fn set_advisor(record: &mut LaunchRecord, advisor: Advisor) {
     record.env.retain(|(k, _)| k != ADVISOR_TOOL_ENV);
     if !advisor.model.is_empty() && advisor.switch {
@@ -487,8 +486,17 @@ fn advisor_from(files: impl IntoIterator<Item = PathBuf>) -> Advisor {
         Some(serde_json::Value::Number(n)) => n.as_f64() == Some(1.0),
         _ => false,
     };
+    // DISABLE_TELEMETRY and CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC stop the fetch whenever they
+    // hold anything (2.1.330 tests `if(process.env.DISABLE_TELEMETRY)`, so "0" stops it too); only
+    // DO_NOT_TRACK and the switch read 1/true/yes/on (found by Agent Defaults' review).
+    let present = |k: &str| match v.get("env").and_then(|e| e.get(k)) {
+        Some(serde_json::Value::String(s)) => !s.is_empty(),
+        Some(serde_json::Value::Bool(_) | serde_json::Value::Number(_)) => true,
+        _ => false,
+    };
+    let fetch_off = |k: &&str| if *k == "DO_NOT_TRACK" { on(k) } else { present(k) };
     let switch = on(ADVISOR_TOOL_ENV);
-    if !switch && FLAG_FETCH_OFF_ENV.iter().any(|k| on(k)) {
+    if !switch && FLAG_FETCH_OFF_ENV.iter().any(fetch_off) {
         return Advisor::default();
     }
     Advisor { model: model.to_string(), switch }
@@ -1217,7 +1225,9 @@ pub(crate) mod tests {
         fs::write(&home, r#"{"advisorModel":"fable","env":{"DISABLE_TELEMETRY":"1"}}"#).unwrap();
         assert_eq!(advisor_from([home.clone()]), Advisor::default(), "telemetry off without the switch: the human's tabs have no advisor, so none here");
         fs::write(&home, r#"{"advisorModel":"fable","env":{"DISABLE_TELEMETRY":"0"}}"#).unwrap();
-        assert_eq!(advisor_from([home.clone()]), fable(false));
+        assert_eq!(advisor_from([home.clone()]), Advisor::default(), "any value of DISABLE_TELEMETRY stops the fetch, \"0\" included");
+        fs::write(&home, r#"{"advisorModel":"fable","env":{"DO_NOT_TRACK":"0","DISABLE_TELEMETRY":""}}"#).unwrap();
+        assert_eq!(advisor_from([home.clone()]), fable(false), "DO_NOT_TRACK reads 1/true/yes/on; an empty DISABLE_TELEMETRY is unset");
         fs::write(&account, r#"{"model":"opus"}"#).unwrap();
         assert_eq!(advisor_from([account.clone()]), Advisor::default(), "no advisorModel, no advisor");
         assert_eq!(launch_advisor(Some(&t.join("own-config-dir"))), Advisor::default(), "a root without settings.json gives the human's tabs no advisor, so none here");
