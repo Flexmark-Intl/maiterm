@@ -61,8 +61,10 @@ export async function proposeHive(tab: Tab, args: Record<string, unknown>): Prom
     await hiveCheckBriefFiles(parsed.briefFiles);
     // The grants as Create will check them (no repo remote's host, nothing home, only a database's
     // socket, the limits): refused to the agent now, never left for an approved card to fail on.
-    // The kept, normalised forms are what the card names.
-    if (parsed.workerHosts?.length || parsed.workerSockets?.length) {
+    // The kept, normalised forms are what the card names. A New goal for a Done Hive applies no
+    // grant (they're its settings), so it isn't refused over one.
+    const goesToNewGoal = proposalTarget(parsed.folders, workspacesStore.workspaces.flatMap((w) => (w.hive ? [{ workspaceId: w.id, name: w.name, hive: w.hive }] : []))).kind === 'new_goal';
+    if (!goesToNewGoal && (parsed.workerHosts?.length || parsed.workerSockets?.length)) {
       const [hosts, sockets] = await hiveCheckWorkerGrants(parsed.folders, parsed.workerHosts ?? [], parsed.workerSockets ?? []);
       parsed.workerHosts = hosts;
       parsed.workerSockets = sockets;
