@@ -415,10 +415,10 @@ pub(crate) fn config_root_for(prefs: &crate::state::Preferences, users_own: Opti
 /// `--setting-sources` that leave user settings out, so Claude never reads it for them: it comes
 /// from the one `settings.json` the human's own tabs read, the launch root's (an account root
 /// symlinks the user's own), or `~/.claude`'s when there is no root. Never `~/.claude`'s beside a
-/// root: a user's own `CLAUDE_CONFIG_DIR` without the file gives their tabs no advisor. Empty when
-/// unset or not a plain model name. Claude itself skips an advisor less capable than the main
-/// model, with a log line.
-pub(crate) fn launch_advisor(root: Option<&Path>) -> String {
+/// root: a user's own `CLAUDE_CONFIG_DIR` without the file gives their tabs no advisor. None when
+/// unset, not a plain model name, or switched off for the human's tabs (`advisor_from`). Claude
+/// itself skips an advisor less capable than the main model, with a log line.
+pub(crate) fn launch_advisor(root: Option<&Path>) -> Advisor {
     let dir = root.map(Path::to_path_buf).or_else(|| dirs::home_dir().map(|h| h.join(".claude")));
     advisor_from(dir.map(|d| d.join("settings.json")))
 }
@@ -426,27 +426,58 @@ pub(crate) fn launch_advisor(root: Option<&Path>) -> String {
 /// Claude 2.1.330 turns the advisor tool on only under a server feature flag, which it doesn't
 /// fetch while `DISABLE_TELEMETRY`, `DO_NOT_TRACK` or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`
 /// is set (Deshittify sets the first), so `--advisor` alone silently does nothing there. This
-/// variable bypasses the flag (docs/agent-defaults.md §3.1); the human's own tabs get it from
-/// their settings' `env`, which a worker's setting sources leave out.
+/// variable bypasses the flag (docs/agent-defaults.md §3.1). The human's own tabs have it only
+/// when their settings' `env` sets it, which a worker's setting sources leave out, so a worker
+/// carries it exactly then (`advisor_from`).
 pub const ADVISOR_TOOL_ENV: &str = "CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL";
 
-/// A worker launch's advisor: `--advisor` and, with it, `ADVISOR_TOOL_ENV` on the launch line.
-pub(crate) fn set_advisor(record: &mut LaunchRecord, model: String) {
-    record.env.retain(|(k, _)| k != ADVISOR_TOOL_ENV);
-    if !model.is_empty() {
-        record.env.push((ADVISOR_TOOL_ENV.to_string(), "1".to_string()));
-    }
-    record.advisor = model;
+/// What stops Claude fetching the advisor's feature flag, set in a settings `env`.
+const FLAG_FETCH_OFF_ENV: [&str; 3] = ["DISABLE_TELEMETRY", "DO_NOT_TRACK", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"];
+
+/// A worker's advisor as the human's tabs have it: the model, and whether their settings' `env`
+/// turns the advisor tool's switch on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Advisor {
+    pub model: String,
+    pub switch: bool,
 }
 
-/// The advisor in the `settings.json` given, as `launch_advisor` takes it.
-fn advisor_from(files: impl IntoIterator<Item = PathBuf>) -> String {
+/// A worker launch's advisor: `--advisor` and, when the human's settings set it, `ADVISOR_TOOL_ENV`
+/// on the launch line.
+pub(crate) fn set_advisor(record: &mut LaunchRecord, advisor: Advisor) {
+    record.env.retain(|(k, _)| k != ADVISOR_TOOL_ENV);
+    if !advisor.model.is_empty() && advisor.switch {
+        record.env.push((ADVISOR_TOOL_ENV.to_string(), "1".to_string()));
+    }
+    record.advisor = advisor.model;
+}
+
+/// The advisor in the `settings.json` given, as `launch_advisor` takes it. A worker never reads
+/// that file's `env`, so it carries what its human's tabs get from it: the switch when it is set;
+/// and no advisor when the `env` stops the flag fetch without the switch, which leaves the human's
+/// tabs without one while a worker, fetching the flag, would consult it on every task.
+fn advisor_from(files: impl IntoIterator<Item = PathBuf>) -> Advisor {
     let Some(v) = files.into_iter().find_map(|f| fs::read(f).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())) else {
-        return String::new();
+        return Advisor::default();
     };
     let model = v.get("advisorModel").and_then(|m| m.as_str()).unwrap_or("").trim();
     let plain = !model.starts_with('-') && model.len() <= 100 && model.chars().all(|c| c.is_ascii_alphanumeric() || "-._[]:/@".contains(c));
-    if plain { model.to_string() } else { String::new() }
+    if model.is_empty() || !plain {
+        return Advisor::default();
+    }
+    // Read as Claude's own `isEnvTruthy` is understood to: 1, true, yes or on (not re-verified
+    // per variable; settings `env` values are strings, a number or bool is taken as written).
+    let on = |k: &str| match v.get("env").and_then(|e| e.get(k)) {
+        Some(serde_json::Value::String(s)) => matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::Number(n)) => n.as_f64() == Some(1.0),
+        _ => false,
+    };
+    let switch = on(ADVISOR_TOOL_ENV);
+    if !switch && FLAG_FETCH_OFF_ENV.iter().any(|k| on(k)) {
+        return Advisor::default();
+    }
+    Advisor { model: model.to_string(), switch }
 }
 
 /// Whose trust the launch root holds, as the human knows it (`config_root_for`'s three cases),
@@ -1135,23 +1166,32 @@ pub(crate) mod tests {
     fn a_worker_gets_the_humans_advisor_from_the_first_settings_file_that_reads() {
         let t = scratch("advisor");
         let (account, home) = (t.join("account.json"), t.join("home.json"));
+        let fable = |switch| Advisor { model: "fable".into(), switch };
         fs::write(&home, r#"{"advisorModel":"fable"}"#).unwrap();
-        assert_eq!(advisor_from([home.clone()]), "fable");
+        assert_eq!(advisor_from([home.clone()]), fable(false), "the flag fetch is on: the advisor, no switch");
+        fs::write(&home, r#"{"advisorModel":"fable","env":{"CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL":"1","DISABLE_TELEMETRY":"1"}}"#).unwrap();
+        assert_eq!(advisor_from([home.clone()]), fable(true), "the switch the human's tabs have");
+        fs::write(&home, r#"{"advisorModel":"fable","env":{"DISABLE_TELEMETRY":"1"}}"#).unwrap();
+        assert_eq!(advisor_from([home.clone()]), Advisor::default(), "telemetry off without the switch: the human's tabs have no advisor, so none here");
+        fs::write(&home, r#"{"advisorModel":"fable","env":{"DISABLE_TELEMETRY":"0"}}"#).unwrap();
+        assert_eq!(advisor_from([home.clone()]), fable(false));
         fs::write(&account, r#"{"model":"opus"}"#).unwrap();
-        assert_eq!(advisor_from([account.clone()]), "", "no advisorModel, no advisor");
-        assert_eq!(launch_advisor(Some(&t.join("own-config-dir"))), "", "a root without settings.json gives the human's tabs no advisor, so none here");
+        assert_eq!(advisor_from([account.clone()]), Advisor::default(), "no advisorModel, no advisor");
+        assert_eq!(launch_advisor(Some(&t.join("own-config-dir"))), Advisor::default(), "a root without settings.json gives the human's tabs no advisor, so none here");
         for bad in [r#"{"advisorModel":"--dangerously-skip-permissions"}"#, r#"{"advisorModel":"a b"}"#, r#"{"advisorModel":7}"#] {
             fs::write(&account, bad).unwrap();
-            assert_eq!(advisor_from([account.clone()]), "", "{bad}");
+            assert_eq!(advisor_from([account.clone()]), Advisor::default(), "{bad}");
         }
-        assert_eq!(advisor_from([t.join("none.json")]), "");
+        assert_eq!(advisor_from([t.join("none.json")]), Advisor::default());
 
         let mut r = worker_record(&sample_hive(), &sample_paths(), &WorkerRecord { task_id: "t1".into(), ..WorkerRecord::default() });
-        set_advisor(&mut r, String::new());
+        set_advisor(&mut r, Advisor::default());
         assert!(flag_values(&hive_launch_args(&r, None), "--advisor").is_empty(), "none when unset");
         assert!(!r.env.iter().any(|(k, _)| k == ADVISOR_TOOL_ENV), "nor the tool's switch");
-        set_advisor(&mut r, "fable".into());
-        set_advisor(&mut r, "fable".into());
+        set_advisor(&mut r, fable(false));
+        assert!(!r.env.iter().any(|(k, _)| k == ADVISOR_TOOL_ENV), "no switch the human's tabs don't have");
+        set_advisor(&mut r, fable(true));
+        set_advisor(&mut r, fable(true));
         assert_eq!(r.env.iter().filter(|(k, v)| k == ADVISOR_TOOL_ENV && v == "1").count(), 1, "the switch on the launch line, once");
         for resume in [None, Some("sid-1")] {
             assert_eq!(flag_values(&hive_launch_args(&r, resume), "--advisor"), vec!["fable"]);

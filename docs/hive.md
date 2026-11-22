@@ -1265,11 +1265,14 @@ isn't set up. A code role's brief keeps the "Tools this Hive has" line.
 human's `advisorModel`, so each worker and reviewer launch reads it from the `settings.json` the
 human's own tabs read (the launch root's, or `~/.claude`'s with no root) and passes `--advisor <model>`
 (`launch::launch_advisor`); none when it is unset. Claude skips an advisor less capable than the
-worker's model with a log line. With it goes `CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1` on
-the launch line: Claude 2.1.330 enables the tool only under a server flag it never fetches with
-telemetry off (Deshittify's `DISABLE_TELEMETRY`), and `--advisor` alone then does nothing
-(measured 2026-11-22, `--setting-sources project`, `--debug-file`: no `[AdvisorTool]` line without
-it, "Server-side tool enabled with claude-fable-5-2" with it). The coordinator reads both from
+worker's model with a log line. Claude 2.1.330 enables the tool only under a server flag it never
+fetches with telemetry off (Deshittify's `DISABLE_TELEMETRY`), and `--advisor` alone then does
+nothing (measured 2026-11-22, `--setting-sources project`, `--debug-file`: no `[AdvisorTool]` line
+without `CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1`, "Server-side tool enabled with
+claude-fable-5-2" with it). A worker never reads that file's `env`, so it carries what the human's
+tabs get from it (`launch::advisor_from`): the switch on the launch line only when their `env` sets
+it, and no advisor at all when their `env` turns telemetry off without it, since their tabs then
+have none and a worker, fetching the flag itself, would consult one on every task. The coordinator reads both from
 user settings like any tab. Giving
 workers skills (a copy under their own settings) is open.
 
