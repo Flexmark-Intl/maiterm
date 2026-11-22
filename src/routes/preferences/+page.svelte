@@ -200,7 +200,16 @@
     try {
       const payload = await mailinkCreatePairing();
       const qr = qrcode(0, 'M');
-      qr.addData(JSON.stringify(payload));
+      // ASCII only: qrcode-generator's byte mode keeps each UTF-16 unit's low byte, so the
+      // computer's name ("Darryl’s Mac", U+2019) would become a control character and the
+      // phone's JSON parse of the scan would fail. As \uXXXX escapes the JSON is the same value
+      // whatever charset the phone's decoder assumes.
+      qr.addData(
+        JSON.stringify(payload).replace(
+          /[\u0080-\uffff]/g,
+          (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'),
+        ),
+      );
       qr.make();
       pairingQrSvg = qr.createSvgTag({ cellSize: 6, margin: 2, scalable: true });
       pairing = payload;
