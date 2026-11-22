@@ -674,123 +674,119 @@ fn command_hook_is_ours_to_sweep(
 /// We identify our entries by matching the hook URL, so we don't clobber user hooks.
 fn write_hook_settings(port: u16, auth: &str) -> Result<(), String> {
     let path = claude_user_settings_path().ok_or("Could not determine home directory")?;
-
-    let mut settings: serde_json::Value = if path.exists() {
-        let raw = fs::read_to_string(&path).map_err(|e| format!("Cannot read settings: {}", e))?;
-        serde_json::from_str(&raw).unwrap_or(serde_json::json!({}))
-    } else {
-        serde_json::json!({})
-    };
-
     let hooks_url = hook_url_marker(port);
     let our_hooks = build_our_hooks(port, auth);
-
-    // Sweep: remove any maiTerm hook entries whose port has no live lockfile.
-    // This catches orphans from crashes where cleanup never ran.
+    // Read before the write lock is taken: liveness probes a tunnel port over TCP, and nothing
+    // else should wait on that.
     let live_ports = collect_live_lockfile_ports();
-    if let Some(hooks_map) = settings.get_mut("hooks").and_then(|v| v.as_object_mut()) {
-        for (_event, entries) in hooks_map.iter_mut() {
-            if let Some(arr) = entries.as_array_mut() {
-                let before = arr.len();
-                arr.retain(|entry| {
-                    // Only filter maiTerm hook entries (contain 127.0.0.1:{port}/hooks)
-                    match extract_hook_port(entry) {
-                        Some(p) => live_ports.contains(&p) || p == port,
-                        None => true, // Not an maiTerm hook — keep it
-                    }
-                });
-                if arr.len() != before {
-                    log::info!("Swept {} orphaned hook entries from event '{}'", before - arr.len(), _event);
-                }
-            }
-        }
-        hooks_map.retain(|_, v| v.as_array().map(|a| !a.is_empty()).unwrap_or(true));
-    }
-
-    // Also sweep stale allowedHttpHookUrls
-    if let Some(arr) = settings.get_mut("allowedHttpHookUrls").and_then(|v| v.as_array_mut()) {
-        arr.retain(|v| {
-            let url = v.as_str().unwrap_or("");
-            match extract_port_from_url(url) {
-                Some(p) => live_ports.contains(&p) || p == port,
-                None => true,
-            }
-        });
-        if arr.is_empty() {
-            settings.as_object_mut().unwrap().remove("allowedHttpHookUrls");
-        }
-    }
-
-    // Merge our hooks with existing user hooks (don't clobber)
     let local_instance_ports = collect_local_instance_ports();
-    let hooks_obj = settings
-        .as_object_mut()
-        .ok_or("settings.json is not an object")?
-        .entry("hooks")
-        .or_insert(serde_json::json!({}));
 
-    if let Some(hooks_map) = hooks_obj.as_object_mut() {
-        if let Some(our_map) = our_hooks.as_object() {
-            for (event_name, our_entries) in our_map {
-                let event_array = hooks_map
-                    .entry(event_name)
-                    .or_insert(serde_json::json!([]));
+    // Inside the shared write lock, redone if the file changes meanwhile (Agent Defaults,
+    // Deshittify and the `claude` CLI write it too). A file that doesn't parse is refused, never
+    // read as `{}`: one trailing comma would otherwise replace every setting the user has with
+    // our hooks.
+    crate::util::json_file::edit_json_object(&path, true, |settings| {
+        let before = settings.clone();
 
-                if let Some(arr) = event_array.as_array_mut() {
-                    // Remove existing maiTerm hook entries before re-adding ours: HTTP
-                    // hooks matching our URL, PLUS every maiTerm SessionStart *command*
-                    // hook that is ours to manage (see command_hook_is_ours_to_sweep —
-                    // a live dev/prod sibling's hook is left alone). The command hook
-                    // carries no URL, so URL-matching alone let a fresh copy pile up on
-                    // every re-assert; matching it by signature also sweeps stale
-                    // pre-rename AITERM_ command hooks that gate on a zombie tunnel
-                    // port the liveness sweep can't catch (and that source ~/.aiterm to
-                    // emit a phantom tab id into the agent's context).
+        // Sweep: remove any maiTerm hook entries whose port has no live lockfile.
+        // This catches orphans from crashes where cleanup never ran.
+        if let Some(hooks_map) = settings.get_mut("hooks").and_then(|v| v.as_object_mut()) {
+            for (_event, entries) in hooks_map.iter_mut() {
+                if let Some(arr) = entries.as_array_mut() {
+                    let before = arr.len();
                     arr.retain(|entry| {
-                        !entry_matches_url(entry, &hooks_url)
-                            && !command_hook_is_ours_to_sweep(entry, port, &local_instance_ports)
+                        // Only filter maiTerm hook entries (contain 127.0.0.1:{port}/hooks)
+                        match extract_hook_port(entry) {
+                            Some(p) => live_ports.contains(&p) || p == port,
+                            None => true, // Not an maiTerm hook — keep it
+                        }
                     });
-                    // Add our entries
-                    if let Some(our_arr) = our_entries.as_array() {
-                        arr.extend(our_arr.iter().cloned());
+                    if arr.len() != before {
+                        log::info!("Swept {} orphaned hook entries from event '{}'", before - arr.len(), _event);
+                    }
+                }
+            }
+            hooks_map.retain(|_, v| v.as_array().map(|a| !a.is_empty()).unwrap_or(true));
+        }
+
+        // Also sweep stale allowedHttpHookUrls
+        if let Some(arr) = settings.get_mut("allowedHttpHookUrls").and_then(|v| v.as_array_mut()) {
+            arr.retain(|v| {
+                let url = v.as_str().unwrap_or("");
+                match extract_port_from_url(url) {
+                    Some(p) => live_ports.contains(&p) || p == port,
+                    None => true,
+                }
+            });
+            if arr.is_empty() {
+                settings.as_object_mut().unwrap().remove("allowedHttpHookUrls");
+            }
+        }
+
+        // Merge our hooks with existing user hooks (don't clobber)
+        let hooks_obj = settings
+            .as_object_mut()
+            .ok_or("settings.json is not an object")?
+            .entry("hooks")
+            .or_insert(serde_json::json!({}));
+
+        if let Some(hooks_map) = hooks_obj.as_object_mut() {
+            if let Some(our_map) = our_hooks.as_object() {
+                for (event_name, our_entries) in our_map {
+                    let event_array = hooks_map
+                        .entry(event_name)
+                        .or_insert(serde_json::json!([]));
+
+                    if let Some(arr) = event_array.as_array_mut() {
+                        // Remove existing maiTerm hook entries before re-adding ours: HTTP
+                        // hooks matching our URL, PLUS every maiTerm SessionStart *command*
+                        // hook that is ours to manage (see command_hook_is_ours_to_sweep —
+                        // a live dev/prod sibling's hook is left alone). The command hook
+                        // carries no URL, so URL-matching alone let a fresh copy pile up on
+                        // every re-assert; matching it by signature also sweeps stale
+                        // pre-rename AITERM_ command hooks that gate on a zombie tunnel
+                        // port the liveness sweep can't catch (and that source ~/.aiterm to
+                        // emit a phantom tab id into the agent's context).
+                        arr.retain(|entry| {
+                            !entry_matches_url(entry, &hooks_url)
+                                && !command_hook_is_ours_to_sweep(entry, port, &local_instance_ports)
+                        });
+                        // Add our entries
+                        if let Some(our_arr) = our_entries.as_array() {
+                            arr.extend(our_arr.iter().cloned());
+                        }
+                    }
+                }
+            }
+            // A newer event we no longer register (the installed Claude doesn't know it): take our
+            // entry out, or the dialog it causes outlives the decision to leave it out.
+            for event in NEWER_HOOK_EVENTS {
+                if our_hooks.get(*event).is_some() {
+                    continue;
+                }
+                if let Some(arr) = hooks_map.get_mut(*event).and_then(|v| v.as_array_mut()) {
+                    arr.retain(|entry| !entry_matches_url(entry, &hooks_url));
+                    if arr.is_empty() {
+                        hooks_map.remove(*event);
                     }
                 }
             }
         }
-        // A newer event we no longer register (the installed Claude doesn't know it): take our
-        // entry out, or the dialog it causes outlives the decision to leave it out.
-        for event in NEWER_HOOK_EVENTS {
-            if our_hooks.get(*event).is_some() {
-                continue;
-            }
-            if let Some(arr) = hooks_map.get_mut(*event).and_then(|v| v.as_array_mut()) {
-                arr.retain(|entry| !entry_matches_url(entry, &hooks_url));
-                if arr.is_empty() {
-                    hooks_map.remove(*event);
-                }
+
+        // Also register our hooks URL in allowedHttpHookUrls
+        let allowed = settings
+            .as_object_mut()
+            .unwrap()
+            .entry("allowedHttpHookUrls")
+            .or_insert(serde_json::json!([]));
+        if let Some(arr) = allowed.as_array_mut() {
+            let pattern = format!("http://127.0.0.1:{}/*", port);
+            if !arr.iter().any(|v| v.as_str() == Some(&pattern)) {
+                arr.push(serde_json::Value::String(pattern));
             }
         }
-    }
 
-    // Also register our hooks URL in allowedHttpHookUrls
-    let allowed = settings
-        .as_object_mut()
-        .unwrap()
-        .entry("allowedHttpHookUrls")
-        .or_insert(serde_json::json!([]));
-    if let Some(arr) = allowed.as_array_mut() {
-        let pattern = format!("http://127.0.0.1:{}/*", port);
-        if !arr.iter().any(|v| v.as_str() == Some(&pattern)) {
-            arr.push(serde_json::Value::String(pattern));
-        }
-    }
-
-    let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    let tmp = path.with_extension("json.aiterm-tmp");
-    fs::write(&tmp, &json).map_err(|e| format!("Cannot write settings tmp: {}", e))?;
-    fs::rename(&tmp, &path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("Cannot update settings: {}", e)
+        Ok(*settings != before)
     })?;
 
     log::info!("Registered Claude Code hooks in ~/.claude/settings.json (port {})", port);
@@ -1057,67 +1053,54 @@ fn entry_matches_url(entry: &serde_json::Value, url_pattern: &str) -> bool {
 /// Remove our hook entries from ~/.claude/settings.json on shutdown.
 fn remove_hook_settings(port: u16, auth: &str) -> Result<(), String> {
     let path = claude_user_settings_path().ok_or("Could not determine home directory")?;
-    if !path.exists() {
-        return Ok(());
-    }
+    // In the shared write lock; an unparseable file is left alone (see `write_hook_settings`).
+    let wrote = crate::util::json_file::edit_json_object(&path, false, |settings| {
+        let mut changed = false;
 
-    let raw = fs::read_to_string(&path).map_err(|e| format!("Cannot read settings: {}", e))?;
-    let mut settings: serde_json::Value =
-        serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
-
-    let mut changed = false;
-
-    // Remove hook entries that contain our auth token (identifies our server instance)
-    if let Some(hooks_map) = settings.get_mut("hooks").and_then(|v| v.as_object_mut()) {
-        for (_event, entries) in hooks_map.iter_mut() {
-            if let Some(arr) = entries.as_array_mut() {
-                let before = arr.len();
-                arr.retain(|entry| !entry_contains_auth(entry, auth));
-                if arr.len() != before {
-                    changed = true;
+        // Remove hook entries that contain our auth token (identifies our server instance)
+        if let Some(hooks_map) = settings.get_mut("hooks").and_then(|v| v.as_object_mut()) {
+            for (_event, entries) in hooks_map.iter_mut() {
+                if let Some(arr) = entries.as_array_mut() {
+                    let before = arr.len();
+                    arr.retain(|entry| !entry_contains_auth(entry, auth));
+                    if arr.len() != before {
+                        changed = true;
+                    }
                 }
             }
+            // Clean up empty event arrays
+            hooks_map.retain(|_, v| {
+                v.as_array().map(|a| !a.is_empty()).unwrap_or(true)
+            });
         }
-        // Clean up empty event arrays
-        hooks_map.retain(|_, v| {
-            v.as_array().map(|a| !a.is_empty()).unwrap_or(true)
-        });
-    }
 
-    // Clean up empty hooks object
-    if let Some(hooks) = settings.get("hooks").and_then(|v| v.as_object()) {
-        if hooks.is_empty() {
-            settings.as_object_mut().unwrap().remove("hooks");
-            changed = true;
+        // Clean up empty hooks object
+        if let Some(hooks) = settings.get("hooks").and_then(|v| v.as_object()) {
+            if hooks.is_empty() {
+                settings.as_object_mut().unwrap().remove("hooks");
+                changed = true;
+            }
         }
-    }
 
-    // Clean up our port-specific allowedHttpHookUrls entry
-    let our_url_pattern = format!("http://127.0.0.1:{}/*", port);
-    if let Some(arr) = settings.get_mut("allowedHttpHookUrls").and_then(|v| v.as_array_mut()) {
-        let before = arr.len();
-        arr.retain(|v| v.as_str() != Some(&our_url_pattern));
-        if arr.len() != before {
-            changed = true;
+        // Clean up our port-specific allowedHttpHookUrls entry
+        let our_url_pattern = format!("http://127.0.0.1:{}/*", port);
+        if let Some(arr) = settings.get_mut("allowedHttpHookUrls").and_then(|v| v.as_array_mut()) {
+            let before = arr.len();
+            arr.retain(|v| v.as_str() != Some(&our_url_pattern));
+            if arr.len() != before {
+                changed = true;
+            }
+            if arr.is_empty() {
+                settings.as_object_mut().unwrap().remove("allowedHttpHookUrls");
+            }
         }
-        if arr.is_empty() {
-            settings.as_object_mut().unwrap().remove("allowedHttpHookUrls");
-        }
-    }
 
-    if !changed {
-        return Ok(());
-    }
-
-    let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    let tmp = path.with_extension("json.aiterm-tmp");
-    fs::write(&tmp, &json).map_err(|e| format!("Cannot write settings tmp: {}", e))?;
-    fs::rename(&tmp, &path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("Cannot update settings: {}", e)
+        Ok(changed)
     })?;
 
-    log::info!("Removed Claude Code hooks from ~/.claude/settings.json");
+    if wrote {
+        log::info!("Removed Claude Code hooks from ~/.claude/settings.json");
+    }
     Ok(())
 }
 
@@ -1318,66 +1301,53 @@ pub fn cleanup_stale_lockfiles() {
 /// Remove hook entries and allowedHttpHookUrls for a list of dead (port, auth) pairs.
 fn cleanup_stale_hooks(stale_ports: &[(u16, String)]) -> Result<(), String> {
     let path = claude_user_settings_path().ok_or("Could not determine home directory")?;
-    if !path.exists() {
-        return Ok(());
-    }
-
-    let raw = fs::read_to_string(&path).map_err(|e| format!("Cannot read settings: {}", e))?;
-    let mut settings: serde_json::Value =
-        serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
+    // In the shared write lock; an unparseable file is left alone (see `write_hook_settings`).
+    let wrote = crate::util::json_file::edit_json_object(&path, false, |settings| {
     let mut changed = false;
 
     // Remove hook entries by auth token
-    if let Some(hooks_map) = settings.get_mut("hooks").and_then(|v| v.as_object_mut()) {
-        for (_event, entries) in hooks_map.iter_mut() {
-            if let Some(arr) = entries.as_array_mut() {
-                let before = arr.len();
-                arr.retain(|entry| {
-                    !stale_ports.iter().any(|(_, auth)| entry_contains_auth(entry, auth))
-                });
-                if arr.len() != before {
-                    changed = true;
+        if let Some(hooks_map) = settings.get_mut("hooks").and_then(|v| v.as_object_mut()) {
+            for (_event, entries) in hooks_map.iter_mut() {
+                if let Some(arr) = entries.as_array_mut() {
+                    let before = arr.len();
+                    arr.retain(|entry| {
+                        !stale_ports.iter().any(|(_, auth)| entry_contains_auth(entry, auth))
+                    });
+                    if arr.len() != before {
+                        changed = true;
+                    }
                 }
             }
+            hooks_map.retain(|_, v| v.as_array().map(|a| !a.is_empty()).unwrap_or(true));
         }
-        hooks_map.retain(|_, v| v.as_array().map(|a| !a.is_empty()).unwrap_or(true));
-    }
 
-    // Clean up empty hooks object
-    if settings.get("hooks").and_then(|v| v.as_object()).map(|h| h.is_empty()).unwrap_or(false) {
-        settings.as_object_mut().unwrap().remove("hooks");
-        changed = true;
-    }
-
-    // Remove allowedHttpHookUrls entries for dead ports
-    if let Some(arr) = settings.get_mut("allowedHttpHookUrls").and_then(|v| v.as_array_mut()) {
-        let before = arr.len();
-        arr.retain(|v| {
-            let url = v.as_str().unwrap_or("");
-            !stale_ports.iter().any(|(port, _)| url == format!("http://127.0.0.1:{}/*", port))
-        });
-        if arr.len() != before {
+        // Clean up empty hooks object
+        if settings.get("hooks").and_then(|v| v.as_object()).map(|h| h.is_empty()).unwrap_or(false) {
+            settings.as_object_mut().unwrap().remove("hooks");
             changed = true;
         }
-        if arr.is_empty() {
-            settings.as_object_mut().unwrap().remove("allowedHttpHookUrls");
+
+        // Remove allowedHttpHookUrls entries for dead ports
+        if let Some(arr) = settings.get_mut("allowedHttpHookUrls").and_then(|v| v.as_array_mut()) {
+            let before = arr.len();
+            arr.retain(|v| {
+                let url = v.as_str().unwrap_or("");
+                !stale_ports.iter().any(|(port, _)| url == format!("http://127.0.0.1:{}/*", port))
+            });
+            if arr.len() != before {
+                changed = true;
+            }
+            if arr.is_empty() {
+                settings.as_object_mut().unwrap().remove("allowedHttpHookUrls");
+            }
         }
-    }
 
-    if !changed {
-        return Ok(());
-    }
-
-    let removed_count: usize = stale_ports.len();
-    let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    let tmp = path.with_extension("json.aiterm-tmp");
-    fs::write(&tmp, &json).map_err(|e| format!("Cannot write settings tmp: {}", e))?;
-    fs::rename(&tmp, &path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("Cannot update settings: {}", e)
+        Ok(changed)
     })?;
 
-    log::info!("Cleaned {} stale hook entries from ~/.claude/settings.json", removed_count);
+    if wrote {
+        log::info!("Cleaned {} stale hook entries from ~/.claude/settings.json", stale_ports.len());
+    }
     Ok(())
 }
 

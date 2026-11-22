@@ -81,19 +81,11 @@ impl Registrar for CodexRegistrar {
 
         // 1. MCP server entry in ~/.codex/config.toml (format-preserving).
         let config_path = codex_dir.join("config.toml");
-        match read_document(&config_path) {
-            Ok(mut doc) => {
-                // A refusal (a non-table `mcp_servers`) must not be followed by a write:
-                // the point of refusing is to leave the user's file exactly as it was.
-                if put_codex_mcp_entry(&mut doc, name, port, auth) {
-                    if let Err(e) = atomic_write(&config_path, &doc.to_string()) {
-                        log::warn!("Codex install: failed to write {:?}: {}", config_path, e);
-                    } else {
-                        wrote_mcp = true;
-                    }
-                }
-            }
-            Err(e) => log::warn!("Codex install: failed to read {:?}: {}", config_path, e),
+        // A refusal (a non-table `mcp_servers`) must not be followed by a write: the point of
+        // refusing is to leave the user's file exactly as it was.
+        match edit_document(&config_path, true, |doc| put_codex_mcp_entry(doc, name, port, auth)) {
+            Ok(wrote) => wrote_mcp = wrote,
+            Err(e) => log::warn!("Codex install: failed to update {:?}: {}", config_path, e),
         }
 
         // 2 + 3. Hooks: the shim and the hooks.json entries, gated on the preference. The OFF
@@ -114,22 +106,10 @@ impl Registrar for CodexRegistrar {
             }
 
             let shim_str = shim_path.to_string_lossy().to_string();
-            match read_json(&hooks_path) {
-                Ok(existing) => {
-                    // Local install: no baked port — the shim uses the per-process
-                    // $MAITERM_PORT (each tab spawned by the owning maiTerm instance).
-                    let merged = build_hooks_json(existing, &shim_str, None);
-                    match serde_json::to_string_pretty(&merged) {
-                        Ok(json) => {
-                            if let Err(e) = atomic_write(&hooks_path, &json) {
-                                log::warn!("Codex install: failed to write {:?}: {}", hooks_path, e);
-                            } else {
-                                wrote_hooks = true;
-                            }
-                        }
-                        Err(e) => log::warn!("Codex install: failed to serialize hooks.json: {}", e),
-                    }
-                }
+            // Local install: no baked port — the shim uses the per-process $MAITERM_PORT (each
+            // tab spawned by the owning maiTerm instance).
+            match edit_hooks_json(&hooks_path, true, |existing| Some(build_hooks_json(existing, &shim_str, None))) {
+                Ok(_) => wrote_hooks = true,
                 // Loud: an unparseable hooks.json means Codex reports nothing to maiTerm for
                 // the rest of the session, and we deliberately will not repair it by clobbering.
                 Err(e) => log::error!("Codex install: not writing hooks — {}", e),
@@ -196,29 +176,14 @@ impl Registrar for CodexRegistrar {
             log::info!("Codex reassert: restored {:?}", shim_path);
         }
 
-        let existing = match read_json(&hooks_path) {
-            Ok(v) => v,
-            // Unparseable: the same rule as install — never repair by clobbering.
-            Err(e) => {
-                log::error!("Codex reassert: not touching hooks — {}", e);
-                return;
-            }
-        };
         let shim_str = shim_path.to_string_lossy().to_string();
-        let merged = build_hooks_json(existing.clone(), &shim_str, None);
-        // Idempotent merge ⇒ equal means nothing drifted. No write, no trust churn.
-        if existing.as_ref() == Some(&merged) {
-            return;
-        }
-        match serde_json::to_string_pretty(&merged) {
-            Ok(json) => {
-                if let Err(e) = atomic_write(&hooks_path, &json) {
-                    log::warn!("Codex reassert: failed to write {:?}: {}", hooks_path, e);
-                } else {
-                    log::info!("Codex reassert: repaired maiTerm hooks in {:?}", hooks_path);
-                }
-            }
-            Err(e) => log::warn!("Codex reassert: failed to serialize hooks.json: {}", e),
+        // Idempotent merge ⇒ equal means nothing drifted: no write, no trust churn
+        // (`edit_hooks_json` writes only a changed value). Unparseable: the same rule as
+        // install — never repair by clobbering.
+        match edit_hooks_json(&hooks_path, true, |existing| Some(build_hooks_json(existing, &shim_str, None))) {
+            Ok(true) => log::info!("Codex reassert: repaired maiTerm hooks in {:?}", hooks_path),
+            Ok(false) => {}
+            Err(e) => log::error!("Codex reassert: not touching hooks — {}", e),
         }
     }
 
@@ -232,17 +197,8 @@ impl Registrar for CodexRegistrar {
 
         // 1. Remove the [mcp_servers.<name>] table from config.toml (preserve the rest).
         let config_path = codex_dir.join("config.toml");
-        if config_path.exists() {
-            match read_document(&config_path) {
-                Ok(mut doc) => {
-                    if remove_codex_mcp_entry(&mut doc, name) {
-                        if let Err(e) = atomic_write(&config_path, &doc.to_string()) {
-                            log::warn!("Codex unregister: failed to write {:?}: {}", config_path, e);
-                        }
-                    }
-                }
-                Err(e) => log::warn!("Codex unregister: failed to read {:?}: {}", config_path, e),
-            }
+        if let Err(e) = edit_document(&config_path, false, |doc| remove_codex_mcp_entry(doc, name)) {
+            log::warn!("Codex unregister: failed to update {:?}: {}", config_path, e);
         }
 
         // 2 + 3. Our hooks and the shim they point at — but ONLY if no sibling maiTerm is
@@ -281,26 +237,10 @@ impl Registrar for CodexRegistrar {
 /// preference off has to stop Codex reporting, not just stop refreshing the entries.
 #[allow(dead_code)]
 fn remove_our_hooks(hooks_path: &Path, shim_path: &Path) {
-    if hooks_path.exists() {
-        match read_json(hooks_path) {
-            Ok(Some(existing)) => {
-                let cleaned = strip_maiterm_hooks(existing.clone());
-                // Only rewrite if we actually removed something of ours — never reformat a
-                // user's hooks.json that maiTerm never wrote to.
-                if cleaned != existing {
-                    match serde_json::to_string_pretty(&cleaned) {
-                        Ok(json) => {
-                            if let Err(e) = atomic_write(hooks_path, &json) {
-                                log::warn!("Codex: failed to write {:?}: {}", hooks_path, e);
-                            }
-                        }
-                        Err(e) => log::warn!("Codex: failed to serialize hooks.json: {}", e),
-                    }
-                }
-            }
-            Ok(None) => {}
-            Err(e) => log::warn!("Codex: failed to read {:?}: {}", hooks_path, e),
-        }
+    // Rewritten only if we actually removed something of ours — never reformat a user's
+    // hooks.json that maiTerm never wrote to (`edit_hooks_json` writes only a changed value).
+    if let Err(e) = edit_hooks_json(hooks_path, false, |existing| existing.map(strip_maiterm_hooks)) {
+        log::warn!("Codex: failed to update {:?}: {}", hooks_path, e);
     }
     if shim_path.exists() {
         if let Err(e) = fs::remove_file(shim_path) {
@@ -615,7 +555,48 @@ fn read_json(path: &Path) -> Result<Option<serde_json::Value>, String> {
         .map_err(|e| format!("parse {:?}: {} (leaving the file untouched)", path, e))
 }
 
-/// Atomic write: write to a temp file, then rename over the target.
+/// Edit `config.toml` inside maiTerm's shared write lock (`util::json_file::edit_text`): Agent
+/// Defaults, the MCP proxy's entries and Codex itself write the same file, and a rename from a
+/// copy read before another's write drops it. `f` returns false to write nothing (a refusal, or
+/// nothing to do); an unchanged document isn't written either. A file that doesn't parse is
+/// refused. Through a symlink to its target.
+pub(crate) fn edit_document(path: &Path, create_if_absent: bool, mut f: impl FnMut(&mut DocumentMut) -> bool) -> Result<bool, String> {
+    crate::util::json_file::edit_text(path, create_if_absent, |raw| {
+        let raw = raw.unwrap_or("");
+        let mut doc = raw.parse::<DocumentMut>().map_err(|e| format!("parse {:?}: {}", path, e))?;
+        if !f(&mut doc) {
+            return Ok(None);
+        }
+        let out = doc.to_string();
+        Ok((out != raw).then_some(out))
+    })
+}
+
+/// Edit `hooks.json` the same way. `f` gets the parsed file (None: absent) and returns the new
+/// value, or None to write nothing; a value equal to the file's is not written. Malformed JSON
+/// is an error and the file is left untouched (`read_json`).
+fn edit_hooks_json(
+    path: &Path,
+    create_if_absent: bool,
+    mut f: impl FnMut(Option<serde_json::Value>) -> Option<serde_json::Value>,
+) -> Result<bool, String> {
+    crate::util::json_file::edit_text(path, create_if_absent, |raw| {
+        let existing = match raw {
+            None => None,
+            Some(r) => Some(
+                serde_json::from_str::<serde_json::Value>(r)
+                    .map_err(|e| format!("parse {:?}: {} (leaving the file untouched)", path, e))?,
+            ),
+        };
+        let Some(new) = f(existing.clone()) else { return Ok(None) };
+        if existing.as_ref() == Some(&new) {
+            return Ok(None);
+        }
+        serde_json::to_string_pretty(&new).map(Some).map_err(|e| e.to_string())
+    })
+}
+
+/// Atomic write of a file only maiTerm writes (its prompt): a temp file renamed over the target.
 #[allow(dead_code)]
 fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
     let tmp = path.with_extension("maiterm-tmp");

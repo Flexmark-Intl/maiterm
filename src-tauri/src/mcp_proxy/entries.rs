@@ -332,18 +332,20 @@ pub fn sync(port: u16, auth: &str, prefs: &Preferences) -> Collisions {
         };
         // No Codex here and nothing to write: don't create its config.
         if path.exists() || !wanted.is_empty() && home.join(".codex").exists() {
-            match crate::claude_code::codex::read_document(&path) {
-                Ok(mut doc) => {
-                    let a = apply_codex(&mut doc, &wanted);
-                    if a.changed {
-                        match write_toml(&path, &doc.to_string()) {
-                            Ok(()) => log::info!("[mcp-proxy] wrote {} entr{} into ~/.codex/config.toml", wanted.len(), if wanted.len() == 1 { "y" } else { "ies" }),
-                            Err(e) => log::warn!("[mcp-proxy] ~/.codex/config.toml: {e}"),
-                        }
-                    }
-                    found.codex = a.collisions;
-                }
+            // In the shared write lock (`codex::edit_document`): the Codex registrar and Agent
+            // Defaults write this file too.
+            let mut collisions = None;
+            match crate::claude_code::codex::edit_document(&path, true, |doc| {
+                let a = apply_codex(doc, &wanted);
+                collisions = Some(a.collisions);
+                a.changed
+            }) {
+                Ok(true) => log::info!("[mcp-proxy] wrote {} entr{} into ~/.codex/config.toml", wanted.len(), if wanted.len() == 1 { "y" } else { "ies" }),
+                Ok(false) => {}
                 Err(e) => log::warn!("[mcp-proxy] ~/.codex/config.toml: {e}"),
+            }
+            if let Some(c) = collisions {
+                found.codex = c;
             }
         }
     }
@@ -515,12 +517,8 @@ pub fn remove_all() {
     }
     if let Some(home) = dirs::home_dir() {
         let path = home.join(".codex").join("config.toml");
-        if path.exists() {
-            if let Ok(mut doc) = crate::claude_code::codex::read_document(&path) {
-                if apply_codex(&mut doc, &[]).changed {
-                    let _ = write_toml(&path, &doc.to_string());
-                }
-            }
+        if let Err(e) = crate::claude_code::codex::edit_document(&path, false, |doc| apply_codex(doc, &[]).changed) {
+            log::warn!("[mcp-proxy] ~/.codex/config.toml: {e}");
         }
     }
     if let Some(path) = crate::claude_code::agy::mcp_config_path() {
@@ -573,18 +571,6 @@ fn edit_json(path: &Path, mut f: impl FnMut(&mut Value) -> Applied) -> Result<Ap
         }
     }
     Err("it kept changing while being updated".to_string())
-}
-
-/// Atomic write of `config.toml` through a temp file of our own: the Codex registrar writes the
-/// same file through `config.maiterm-tmp`, and two writers sharing one temp name can rename each
-/// other's half-written file into place.
-fn write_toml(path: &Path, contents: &str) -> Result<(), String> {
-    let tmp = path.with_extension(format!("maiterm-proxy-tmp-{}", std::process::id()));
-    std::fs::write(&tmp, contents).map_err(|e| format!("cannot write: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("cannot write: {e}")
-    })
 }
 
 // ─── Native installs of the same server ───────────────────────────────────
@@ -709,9 +695,9 @@ pub fn adopt_native(id: &str, url: &str) -> Result<Vec<String>, String> {
     }
     if let Some(home) = dirs::home_dir() {
         let path = home.join(".codex").join("config.toml");
-        if path.exists() {
-            let mut doc = crate::claude_code::codex::read_document(&path)?;
-            let mut gone = Vec::new();
+        let mut gone = Vec::new();
+        crate::claude_code::codex::edit_document(&path, false, |doc| {
+            gone.clear();
             if let Some(servers) = doc.get_mut("mcp_servers").and_then(|s| s.as_table_like_mut()) {
                 let doomed: Vec<String> = servers
                     .iter()
@@ -726,11 +712,9 @@ pub fn adopt_native(id: &str, url: &str) -> Result<Vec<String>, String> {
                     gone.push(format!("Codex: {n}"));
                 }
             }
-            if !gone.is_empty() {
-                write_toml(&path, &doc.to_string())?;
-            }
-            removed.extend(gone);
-        }
+            !gone.is_empty()
+        })?;
+        removed.extend(gone);
     }
     if let Some(path) = crate::claude_code::agy::mcp_config_path() {
         if path.exists() {

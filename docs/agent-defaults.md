@@ -54,12 +54,13 @@ share the mechanics: §2.
   never replaced.
 - **An unreadable file blocks its runtime's part** with the parse error shown, and is never
   overwritten (the rule `read_settings_at` states and why).
-- **Writes take `util::json_file`'s `write_lock` and a change-detecting replace**, like
-  `claude_code/agy.rs`: live agents write the same files. **Not yet true of maiTerm's other
-  writers of them** (2026-11-22 review): the hook installer (`lockfile.rs` `write_hook_settings`,
-  also on its reassert timer), Deshittify's `write_claude_settings`, the Codex registrar
-  (`codex.rs` `atomic_write`) and the MCP proxy's `write_toml` read, edit and rename without the
-  lock, so one of them can overwrite a value set here in the same instant. On the board.
+- **Writes take `util::json_file`'s `write_lock` and a change-detecting replace**
+  (`util::json_file::edit_text` / `edit_json_object`): live agents write the same files. Since
+  2026-11-22 every maiTerm writer of them goes through the same helper — the hook installer
+  (`lockfile.rs`, also on its reassert timer), Deshittify, the Codex registrar (`codex.rs`
+  `edit_document` / `edit_hooks_json`), the MCP proxy's Codex entries and Antigravity's — so none
+  can overwrite a value set here in the same instant, a link is written through to its target,
+  and a file that doesn't parse is refused by all of them.
 - **JSON keys come back sorted** (serde_json without `preserve_order`), as from every other
   maiTerm JSON writer; values and the keys we don't own are kept. TOML is kept as written.
 - **An isolated instance makes no writes** (`instance::global_write_refusal`).

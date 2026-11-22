@@ -129,19 +129,21 @@ fn read_settings_at(path: &std::path::Path) -> Result<serde_json::Value, String>
     })
 }
 
-/// Write settings back atomically, preserving everything we didn't touch.
-fn write_claude_settings(settings: &serde_json::Value) -> Result<(), String> {
+/// Edit `~/.claude/settings.json` in place: read, `f`, and write back only when `f` changed
+/// something, everything we didn't touch kept. Inside maiTerm's shared write lock and redone when
+/// the file changed meanwhile (`util::json_file::edit_json_object`), because the hook installer,
+/// Agent Defaults and live agents rewrite the same file; through a symlink to its target. A file
+/// that doesn't parse is refused, never read as `{}` (`read_settings_at`).
+fn edit_claude_settings(
+    mut f: impl FnMut(&mut serde_json::Map<String, serde_json::Value>) -> Result<(), String>,
+) -> Result<(), String> {
     let path = claude_user_settings_path().ok_or("Could not determine home directory")?;
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {}", dir.display(), e))?;
-    }
-    let json = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
-    let tmp = path.with_extension("json.aiterm-tmp");
-    fs::write(&tmp, &json).map_err(|e| format!("Cannot write settings tmp: {}", e))?;
-    fs::rename(&tmp, &path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("Cannot update settings: {}", e)
+    crate::util::json_file::edit_json_object(&path, true, |settings| {
+        let before = settings.clone();
+        f(settings.as_object_mut().ok_or("~/.claude/settings.json is not a JSON object")?)?;
+        Ok(*settings != before)
     })
+    .map(|_| ())
 }
 
 /// `env[key]` read the way Claude Code reads a boolean env var: "1"/"true"/"yes"/"on"
@@ -174,32 +176,29 @@ fn env_rule_applied(settings: &serde_json::Value, vars: &[(&str, &str)]) -> bool
 }
 
 fn set_env_vars(enabled: bool, vars: &[(&str, &str)]) -> Result<(), String> {
-    let mut settings = read_claude_settings()?;
-    let obj = settings
-        .as_object_mut()
-        .ok_or("~/.claude/settings.json is not a JSON object")?;
-
-    if enabled {
-        let env = obj.entry("env").or_insert_with(|| serde_json::json!({}));
-        let env = env
-            .as_object_mut()
-            .ok_or("\"env\" in ~/.claude/settings.json is not an object")?;
-        for (key, value) in vars {
-            env.insert((*key).to_string(), serde_json::Value::String((*value).into()));
-        }
-    } else {
-        // Only ever runs on a rule that reads as applied, so removing our keys
-        // can't discard a value the user deliberately set to something else.
-        if let Some(env) = obj.get_mut("env").and_then(|v| v.as_object_mut()) {
-            for (key, _) in vars {
-                env.remove(*key);
+    edit_claude_settings(|obj| {
+        if enabled {
+            let env = obj.entry("env").or_insert_with(|| serde_json::json!({}));
+            let env = env
+                .as_object_mut()
+                .ok_or("\"env\" in ~/.claude/settings.json is not an object")?;
+            for (key, value) in vars {
+                env.insert((*key).to_string(), serde_json::Value::String((*value).into()));
             }
-            if env.is_empty() {
-                obj.remove("env");
+        } else {
+            // Only ever runs on a rule that reads as applied, so removing our keys
+            // can't discard a value the user deliberately set to something else.
+            if let Some(env) = obj.get_mut("env").and_then(|v| v.as_object_mut()) {
+                for (key, _) in vars {
+                    env.remove(*key);
+                }
+                if env.is_empty() {
+                    obj.remove("env");
+                }
             }
         }
-    }
-    write_claude_settings(&settings)
+        Ok(())
+    })
 }
 
 fn co_authored_applied(settings: &serde_json::Value) -> bool {
@@ -207,17 +206,15 @@ fn co_authored_applied(settings: &serde_json::Value) -> bool {
 }
 
 fn set_co_authored(enabled: bool) -> Result<(), String> {
-    let mut settings = read_claude_settings()?;
-    let obj = settings
-        .as_object_mut()
-        .ok_or("~/.claude/settings.json is not a JSON object")?;
-    if enabled {
-        obj.insert("includeCoAuthoredBy".into(), serde_json::Value::Bool(false));
-    } else {
-        // Absent means Claude Code's default (true) — no need to write it back.
-        obj.remove("includeCoAuthoredBy");
-    }
-    write_claude_settings(&settings)
+    edit_claude_settings(|obj| {
+        if enabled {
+            obj.insert("includeCoAuthoredBy".into(), serde_json::Value::Bool(false));
+        } else {
+            // Absent means Claude Code's default (true) — no need to write it back.
+            obj.remove("includeCoAuthoredBy");
+        }
+        Ok(())
+    })
 }
 
 /// True when the user has set one of an env rule's vars to the opposite of the
@@ -257,25 +254,23 @@ fn remote_control_applied(settings: &serde_json::Value) -> bool {
 /// in-session command), `remoteControlAtStartup: false` overrides the auto-start
 /// an org or rollout default can switch on even where the feature stays allowed.
 fn set_remote_control(enabled: bool) -> Result<(), String> {
-    let mut settings = read_claude_settings()?;
-    let obj = settings
-        .as_object_mut()
-        .ok_or("~/.claude/settings.json is not a JSON object")?;
-    if enabled {
-        obj.insert("disableRemoteControl".into(), serde_json::Value::Bool(true));
-        obj.insert("remoteControlAtStartup".into(), serde_json::Value::Bool(false));
-    } else {
-        // Absent is Claude Code's default for both. Remove only our values: a
-        // `remoteControlAtStartup: true` is the user's, and dropping it would
-        // silently switch their auto-start off.
-        if obj.get("disableRemoteControl") == Some(&serde_json::Value::Bool(true)) {
-            obj.remove("disableRemoteControl");
+    edit_claude_settings(|obj| {
+        if enabled {
+            obj.insert("disableRemoteControl".into(), serde_json::Value::Bool(true));
+            obj.insert("remoteControlAtStartup".into(), serde_json::Value::Bool(false));
+        } else {
+            // Absent is Claude Code's default for both. Remove only our values: a
+            // `remoteControlAtStartup: true` is the user's, and dropping it would
+            // silently switch their auto-start off.
+            if obj.get("disableRemoteControl") == Some(&serde_json::Value::Bool(true)) {
+                obj.remove("disableRemoteControl");
+            }
+            if obj.get("remoteControlAtStartup") == Some(&serde_json::Value::Bool(false)) {
+                obj.remove("remoteControlAtStartup");
+            }
         }
-        if obj.get("remoteControlAtStartup") == Some(&serde_json::Value::Bool(false)) {
-            obj.remove("remoteControlAtStartup");
-        }
-    }
-    write_claude_settings(&settings)
+        Ok(())
+    })
 }
 
 // ─── Auto-memory writes ────────────────────────────────────────────────────
@@ -590,7 +585,7 @@ fn memory_writes_status(settings: &serde_json::Value, settings_err: &Option<Stri
 /// row reads as off and the toggle reinstalls it), and settings are re-read right
 /// before acting rather than trusted from the caller's earlier read.
 fn refresh_memory_writes(path: &PathBuf) -> Result<bool, String> {
-    let mut settings = read_claude_settings()?;
+    let settings = read_claude_settings()?;
     if !memory_hook_registered(&settings) || !path.exists() {
         return Ok(false);
     }
@@ -600,11 +595,7 @@ fn refresh_memory_writes(path: &PathBuf) -> Result<bool, String> {
         changed = true;
     }
     if !memory_hook_entry_is_current(&settings) {
-        let obj = settings
-            .as_object_mut()
-            .ok_or("~/.claude/settings.json is not a JSON object")?;
-        edit_memory_hook_entry(obj, true)?;
-        write_claude_settings(&settings)?;
+        edit_claude_settings(|obj| edit_memory_hook_entry(obj, true))?;
         changed = true;
     }
     Ok(changed)
@@ -612,21 +603,15 @@ fn refresh_memory_writes(path: &PathBuf) -> Result<bool, String> {
 
 fn set_memory_writes(enabled: bool) -> Result<(), String> {
     let path = memory_hook_path().ok_or("Could not determine home directory")?;
-    let mut settings = read_claude_settings()?;
-    let current = memory_hook_entry_is_current(&settings);
-    let obj = settings
-        .as_object_mut()
-        .ok_or("~/.claude/settings.json is not a JSON object")?;
+    let current = memory_hook_entry_is_current(&read_claude_settings()?);
     if enabled {
         // Script first: settings must never name a hook that isn't there.
         install_memory_hook(&path)?;
         if !current {
-            edit_memory_hook_entry(obj, true)?;
-            write_claude_settings(&settings)?;
+            edit_claude_settings(|obj| edit_memory_hook_entry(obj, true))?;
         }
     } else {
-        edit_memory_hook_entry(obj, false)?;
-        write_claude_settings(&settings)?;
+        edit_claude_settings(|obj| edit_memory_hook_entry(obj, false))?;
         match fs::remove_file(&path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

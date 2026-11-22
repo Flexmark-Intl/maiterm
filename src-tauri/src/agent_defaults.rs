@@ -9,11 +9,9 @@
 //!   runtime's current default, so a later upstream change of default reaches the user.
 //! - **Only our keys are touched**, everything else is kept (TOML through `toml_edit`).
 //! - **An unreadable file is never overwritten**: its runtime's part shows the error instead.
-//! - **Writes take maiTerm's config write lock** (`util::json_file`) and are redone when the
-//!   file changed under them: live agents rewrite these files too. Not every other maiTerm
-//!   writer of these files takes that lock yet (the hook installer, Deshittify, the Codex
-//!   registrar and the MCP proxy's Codex entries), so one of them can still overwrite a value
-//!   written here in the same instant.
+//! - **Writes take maiTerm's config write lock** (`util::json_file::edit_text`, shared by every
+//!   maiTerm writer of these files) and are redone when the file changed under them: live
+//!   agents rewrite these files too.
 //!
 //! Every function takes the file's path, so tests run on scratch files and never on the
 //! human's own config. Keys and values were checked against Claude Code 2.1.330, Codex 0.166.0
@@ -114,39 +112,10 @@ fn claude_settings_in(home: &Path, managed_account: bool, users_own: Option<&Pat
     }
 }
 
-/// Read-edit-replace `path` under maiTerm's config write lock, creating it (and its folder)
-/// when absent. `edit` gets the current text (None: no file) and returns the new text, or None
-/// for "nothing to change". Redone when the file changed while it was being edited. Through a
-/// symlink to the file it names.
-fn edit_text(path: &Path, mut edit: impl FnMut(Option<&str>) -> Result<Option<String>, String>) -> Result<bool, String> {
-    let _serial = crate::util::json_file::write_lock();
-    let target = match fs::canonicalize(path) {
-        Ok(t) => t,
-        // A link whose target is gone (a dotfiles checkout not there yet): writing would put a
-        // plain file where the user's link was, and Claude would stop reading their real one.
-        Err(_) if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) => {
-            return Err(format!("{} is a link to a file that isn't there. maiTerm won't replace the link.", path.display()));
-        }
-        Err(_) => path.to_path_buf(),
-    };
-    for _ in 0..5 {
-        let before = crate::util::json_file::stamp(&target);
-        let raw = match fs::read_to_string(&target) {
-            Ok(r) => Some(r),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(format!("Cannot read {}: {e}", target.display())),
-        };
-        let Some(out) = edit(raw.as_deref())? else { return Ok(false) };
-        if let Some(dir) = target.parent() {
-            fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
-        }
-        if crate::util::json_file::replace_if_unchanged(&target, before, out.as_bytes())
-            .map_err(|e| format!("Cannot write {}: {e}", target.display()))?
-        {
-            return Ok(true);
-        }
-    }
-    Err(format!("{} kept changing while being updated", target.display()))
+/// Read-edit-replace `path` under maiTerm's config write lock, creating it when absent
+/// (`util::json_file::edit_text`, shared by every maiTerm writer of these files).
+fn edit_text(path: &Path, edit: impl FnMut(Option<&str>) -> Result<Option<String>, String>) -> Result<bool, String> {
+    crate::util::json_file::edit_text(path, true, edit)
 }
 
 /// A JSON settings object, `{}` for no file or an empty one. An unparseable or non-object file

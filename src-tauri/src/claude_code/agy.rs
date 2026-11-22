@@ -404,45 +404,9 @@ pub fn build_hooks_json(baked_port: Option<u16>) -> Value {
 fn edit_json_object(
     path: &Path,
     create_if_absent: bool,
-    mut f: impl FnMut(&mut Value) -> Result<bool, String>,
+    f: impl FnMut(&mut Value) -> Result<bool, String>,
 ) -> Result<bool, String> {
-    let _serial = crate::util::json_file::write_lock();
-    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    for _ in 0..5 {
-        let before = crate::util::json_file::stamp(&target);
-        let raw = match fs::read_to_string(&target) {
-            Ok(r) => Some(r),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(format!("read {}: {e}", target.display())),
-        };
-        let mut doc: Value = match &raw {
-            Some(r) if r.trim().is_empty() => json!({}),
-            Some(r) => {
-                let parsed: Value = serde_json::from_str(r)
-                    .map_err(|e| format!("refusing to overwrite unparseable {}: {e}", target.display()))?;
-                if !parsed.is_object() {
-                    return Err(format!("refusing to overwrite non-object {}", target.display()));
-                }
-                parsed
-            }
-            None if create_if_absent => json!({}),
-            None => return Ok(false),
-        };
-        if !f(&mut doc)? {
-            return Ok(false);
-        }
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-        }
-        let rendered = serde_json::to_string_pretty(&doc)
-            .map_err(|e| format!("serialize {}: {e}", target.display()))?;
-        if crate::util::json_file::replace_if_unchanged(&target, before, rendered.as_bytes())
-            .map_err(|e| format!("write {}: {e}", target.display()))?
-        {
-            return Ok(true);
-        }
-    }
-    Err(format!("{} kept changing while being updated", target.display()))
+    crate::util::json_file::edit_json_object(path, create_if_absent, f)
 }
 
 /// Merge our `mcpServers.maiterm` entry into `~/.gemini/config/mcp_config.json`.

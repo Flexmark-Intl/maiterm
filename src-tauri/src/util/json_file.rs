@@ -88,6 +88,79 @@ pub fn update_json(p: &Path, mut edit: impl FnMut(&mut Value) -> bool) -> std::i
     })
 }
 
+/// Read-edit-replace `path` under `write_lock`, for every maiTerm writer of an agent's settings
+/// file (`~/.claude/settings.json`, `~/.codex/config.toml`, `hooks.json`…): live agents, the
+/// hook installer's reassert timer, Agent Defaults and Deshittify all rewrite the same files, and
+/// a rename from a copy read before another's write drops that write.
+///
+/// `edit` gets the current text (None: no file) and returns the new text, or None for "nothing to
+/// change"; it runs again when the file changed while it was being edited. With
+/// `create_if_absent` false a missing file is left missing (`Ok(false)`, `edit` not called);
+/// otherwise it is created with its folder. Through a symlink to the file it names, and a link
+/// whose file is gone is refused: writing would put a plain file where the user's dotfiles link
+/// was, and the agent would stop reading their real one. The file's mode is kept.
+pub fn edit_text(
+    path: &Path,
+    create_if_absent: bool,
+    mut edit: impl FnMut(Option<&str>) -> Result<Option<String>, String>,
+) -> Result<bool, String> {
+    let _serial = write_lock();
+    let target = match fs::canonicalize(path) {
+        Ok(t) => t,
+        Err(_) if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) => {
+            return Err(format!("{} is a link to a file that isn't there. maiTerm won't replace the link.", path.display()));
+        }
+        Err(_) if !create_if_absent => return Ok(false),
+        Err(_) => path.to_path_buf(),
+    };
+    for _ in 0..5 {
+        let before = stamp(&target);
+        let raw = match fs::read_to_string(&target) {
+            Ok(r) => Some(r),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if !create_if_absent {
+                    return Ok(false);
+                }
+                None
+            }
+            Err(e) => return Err(format!("Cannot read {}: {e}", target.display())),
+        };
+        let Some(out) = edit(raw.as_deref())? else { return Ok(false) };
+        if let Some(dir) = target.parent() {
+            fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
+        }
+        if replace_if_unchanged(&target, before, out.as_bytes()).map_err(|e| format!("Cannot write {}: {e}", target.display()))? {
+            return Ok(true);
+        }
+    }
+    Err(format!("{} kept changing while being updated", target.display()))
+}
+
+/// `edit_text` for a JSON settings object: `{}` for no file or an empty one; a file that doesn't
+/// parse, or isn't an object, is an error and is never written (treating it as `{}` would replace
+/// the user's whole file with ours). `f` returns whether it changed anything.
+pub fn edit_json_object(
+    path: &Path,
+    create_if_absent: bool,
+    mut f: impl FnMut(&mut Value) -> Result<bool, String>,
+) -> Result<bool, String> {
+    edit_text(path, create_if_absent, |raw| {
+        let mut doc: Value = match raw.filter(|r| !r.trim().is_empty()) {
+            None => serde_json::json!({}),
+            Some(r) => serde_json::from_str(r).map_err(|e| {
+                format!("{} could not be parsed ({e}). maiTerm won't overwrite settings it can't read.", path.display())
+            })?,
+        };
+        if !doc.is_object() {
+            return Err(format!("{} is not a JSON object. maiTerm won't overwrite it.", path.display()));
+        }
+        if !f(&mut doc)? {
+            return Ok(None);
+        }
+        serde_json::to_string_pretty(&doc).map(|s| Some(s + "\n")).map_err(|e| e.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,4 +191,71 @@ mod tests {
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "no temp file left");
         let _ = fs::remove_dir_all(&dir);
     }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("json-file-{tag}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// One trailing comma must not cost the user every setting they have: the file is refused,
+    /// not read as `{}` and written over (the hook installer did that until 2026-11-22).
+    #[test]
+    fn an_unparseable_settings_file_is_never_written() {
+        let d = scratch_dir("bad");
+        let f = d.join("settings.json");
+        fs::write(&f, "{\n  \"model\": \"opus\",\n}\n").unwrap();
+        let err = edit_json_object(&f, true, |v| {
+            v["hooks"] = serde_json::json!({});
+            Ok(true)
+        })
+        .unwrap_err();
+        assert!(err.contains("could not be parsed"), "{err}");
+        assert_eq!(fs::read_to_string(&f).unwrap(), "{\n  \"model\": \"opus\",\n}\n");
+        fs::write(&f, "[1]").unwrap();
+        assert!(edit_json_object(&f, true, |_| Ok(true)).is_err(), "not an object");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_missing_file_is_created_only_when_asked() {
+        let d = scratch_dir("missing");
+        let f = d.join("sub").join("settings.json");
+        assert!(!edit_json_object(&f, false, |_| Ok(true)).unwrap());
+        assert!(!f.exists());
+        assert!(edit_json_object(&f, true, |v| {
+            v["a"] = serde_json::json!(1);
+            Ok(true)
+        })
+        .unwrap());
+        assert_eq!(serde_json::from_str::<Value>(&fs::read_to_string(&f).unwrap()).unwrap()["a"], 1);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_stays_a_link_a_dangling_one_is_refused_and_the_mode_is_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch_dir("link");
+        let real = d.join("dotfiles").join("config.toml");
+        fs::create_dir_all(real.parent().unwrap()).unwrap();
+        fs::write(&real, "a = 1\n").unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = d.join("config.toml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(edit_text(&link, true, |raw| Ok(Some(format!("{}b = 2\n", raw.unwrap())))).unwrap());
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&real).unwrap(), "a = 1\nb = 2\n");
+        assert_eq!(fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
+
+        let dangling = d.join("gone.json");
+        std::os::unix::fs::symlink(d.join("nowhere.json"), &dangling).unwrap();
+        for create in [true, false] {
+            assert!(edit_json_object(&dangling, create, |_| Ok(true)).is_err());
+        }
+        assert!(fs::symlink_metadata(&dangling).unwrap().file_type().is_symlink());
+        assert!(!d.join("nowhere.json").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
 }
