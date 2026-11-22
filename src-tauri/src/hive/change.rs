@@ -5,9 +5,9 @@
 //! default) that files a card only the human approves (an agent request of kind `hive_settings`,
 //! carried out here from its stored arguments); handed to the coordinator, it applies at once and
 //! the human is told. All three go through `check`, against the record as it is when they apply.
-//! The workers' hosts are the exception (Darryl, 2026-10-31): the queen grants and removes them at
-//! once, whatever the checkpoint, with a reason the decision log keeps (`coordinator_hosts`), so a
-//! worker's refused host goes to her rather than to the human.
+//! What workers may use (hosts, sockets, tools, generator hosts) is under the Access checkpoint
+//! instead, the queen's by default (`change_plan::route`), so a worker's refused host goes to her
+//! rather than to the human; each grant keeps its reason in the decision log.
 //!
 //! A change reaches an agent at its next launch, which rewrites its settings (§11.1): a running
 //! worker keeps its model and its network until it is relaunched, and a cap lowered under the
