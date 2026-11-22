@@ -580,7 +580,10 @@ Verified live on dev 2026-10-08 through `answer_tab_prompt_as_human`:
 
 **Prompts maiTerm sends go to the mod too** (`mod_inbox.rs`, 2026-10-08; no wire change). An
 interactive session's mod keeps one long-poll open on `GET /hooks/inbox?tab_id=`, started from
-`session.start` (only when `isInteractive`: a `claude -p` an agent runs inherits the tab's env). It
+`session.start` (only when `isInteractive`: a `claude -p` an agent runs inherits the tab's env). Such
+a child doesn't link at all (`load()`: an inherited `MAITERM_MOD_SESSION` naming another session AND
+no surface): linked, its SessionStart repointed the tab's `claudeSessionId`, and a restart resumed
+the throwaway run instead of the tab's chat (2026-11-22). It
 acks each offer (`&ack=<id>`: 204 go, 410 retracted) and then calls `$.prompt.submit({ text,
 asUser: true })`. Delivery is take-or-retract with that ack, so a prompt is submitted exactly when
 `deliver` reported the mod has it.

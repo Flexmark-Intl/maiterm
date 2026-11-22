@@ -37,6 +37,16 @@ async function load($: EngineInterface): Promise<Link | null> {
   if (!tab || !port || !auth) return null
   const { version } = await $.session.version()
   if (!isAtLeast(version, MIN_VERSION)) return null
+  // A `claude -p` the tab's agent runs (a probe, a script) inherits the tab's environment, this
+  // mod included, but it is not the tab's agent. Linked, its SessionStart told maiTerm the tab
+  // now runs ITS session, and the tab's auto-resume came back as that throwaway run (2026-11-22:
+  // an agent's `claude -p "reply with just: ok" --model haiku` probes replaced two tabs' chats).
+  // The evidence is the agent's own: its session id, which it leaves in MAITERM_MOD_SESSION for
+  // its children, names another session, and nothing draws this one. Both, because a REPL whose
+  // mod reloaded and then ran /clear also holds a stale id there for a moment, and it draws.
+  // MAITERM_VIA_MOD, inherited too, keeps the settings command hooks beneath quiet as well.
+  const owner = await $.env.get('MAITERM_MOD_SESSION')
+  if (owner && owner !== (await $.session.id()) && (await $.session.surfaces()).length === 0) return null
   // Tells maiTerm's SessionStart/SessionEnd command hooks, which run beneath this mod and
   // inherit this process's environment, that this mod speaks for the tab.
   await $.env.set('MAITERM_VIA_MOD', '1')

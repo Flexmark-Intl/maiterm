@@ -70,10 +70,12 @@ test('a claude -p run inside the tab is never asked about or blocked', async ($,
   const urls: string[] = []
   const beneath = { runs: 0 }
   tab(on, urls, BLOCK, beneath, 'the-tabs-own-session')
+  on('session.surfaces', () => ({ value: [] }))
   const result = await $.classic.PreCompact({ trigger: 'auto', custom_instructions: null })
   expect(result.block).toBeUndefined()
-  expect(urls.length).toBeGreaterThan(0)
-  expect(urls.some(u => u.includes('prepare'))).toBe(false)
+  // It does not speak for the tab at all (nested-session.test.ts), so maiTerm hears nothing.
+  expect(urls).toEqual([])
+  expect(beneath.runs).toBe(1)
 })
 
 test('a subagent compacting its own conversation is never asked about or blocked', async ($, on) => {
