@@ -5661,19 +5661,27 @@ async fn hooks_handler(
     // of the session going deaf for as long as it was remembered (it was an hour, by session).
     const MOD_COPY_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
     let via_mod = params.get("via").map(String::as_str) == Some("mod");
-    if runtime == crate::state::AgentRuntime::Claude && !session_id.is_empty() {
-        let key = format!("{session_id}\u{0}{hook_event_name}");
+    // A `claude -p` a tab's agent ran (the mod's `load`) announces itself as `MaitermChildRun`,
+    // naming the event it stands for, so a maiTerm too old to know the name ignores it rather
+    // than pool a tab-less SessionStart. Recorded under that event only so the settings hooks'
+    // tab-less copy of it is dropped rather than pooled for an initSession to claim; it is no
+    // tab's agent, so nothing else is done with it.
+    let child_run = via_mod && hook_event_name == "MaitermChildRun";
+    let dedup_event = if child_run {
+        event.get("child_of_event").and_then(|v| v.as_str()).unwrap_or("")
+    } else {
+        hook_event_name
+    };
+    if runtime == crate::state::AgentRuntime::Claude && !session_id.is_empty() && !dedup_event.is_empty() {
+        let key = format!("{session_id}\u{0}{dedup_event}");
         if via_mod {
             let now = std::time::Instant::now();
             let mut sent = srv.state.mod_agent_sessions.write();
             sent.retain(|_, at| now.duration_since(*at) < MOD_COPY_WINDOW * 6);
             sent.insert(key, now);
-            // A `claude -p` a tab's agent ran (the mod's `load`): recorded above only so the
-            // settings hooks' tab-less copy of this event is dropped rather than pooled for an
-            // initSession to claim. It is no tab's agent, so nothing else is done with it.
-            if params.get("nested").map(String::as_str) == Some("1") {
+            if child_run {
                 log::debug!("Claude hook: '{}' session={} is a child run inside a tab, not its agent",
-                    hook_event_name, &session_id[..session_id.len().min(8)]);
+                    dedup_event, &session_id[..session_id.len().min(8)]);
                 return StatusCode::OK.into_response();
             }
         } else if srv.state.mod_agent_sessions.read().get(&key).is_some_and(|at| at.elapsed() < MOD_COPY_WINDOW) {

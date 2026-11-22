@@ -276,7 +276,13 @@ export const register: Register = on => {
       // A child run says only that it is one, with no tab: its settings http hook beneath sends
       // the same SessionStart with no tab either, which maiTerm would otherwise pool for the next
       // `initSession` without a session id to claim (claim_pending_index) — the takeover again.
-      if (nested) await send($, { ...nested, tab: '' }, e, '&nested=1')
+      // Under a name of its own, so a maiTerm too old to know it ignores it (an unknown event)
+      // instead of pooling a tab-less SessionStart: one per-account mod folder on an ssh host
+      // serves every maiTerm build that connects there.
+      if (nested) {
+        const announce = { ...e, hook_event_name: 'MaitermChildRun', child_of_event: 'SessionStart' }
+        await send($, { ...nested, tab: '' }, announce, '&nested=1')
+      }
       return next(e)
     }
     // A /clear starts a new session in this process (and no `session.start`): the loop runs on.
