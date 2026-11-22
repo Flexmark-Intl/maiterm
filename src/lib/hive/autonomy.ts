@@ -31,19 +31,23 @@ export const NEVER_DELEGATED: readonly string[] = [
   "Claude's workspace-trust dialog and the plan dialog",
   'Any prompt option that saves a setting or a rule, or changes a mode',
   'Pushing',
-  'A land, or an undo, that changes agent or execution config',
   'Delivering into anything but a Hive plain folder, and overwriting anything',
 ];
 
 export const TIMEOUT_MIN_MINUTES = 1;
 export const TIMEOUT_MAX_MINUTES = 60;
 const DEFAULT_TIMEOUT_SECS = 300;
+/** The worker check (hive/health.rs): `DEFAULT_MINUTES` and `MAX_MINUTES` there. */
+export const CHECK_DEFAULT_MINUTES = 15;
+export const CHECK_MAX_MINUTES = 240;
 
 export interface AutonomyForm {
   values: Record<string, CheckpointValue>;
   /** The prompt timeout, in whole minutes. */
   minutes: number;
   digest: boolean;
+  /** How often the queen is shown workers that may be stalled; 0 is off. */
+  checkMinutes: number;
 }
 
 type HiveFields = Pick<Hive, 'landing_mode' | 'checkpoints' | 'settings'>;
@@ -52,7 +56,12 @@ export function formFor(hive: HiveFields): AutonomyForm {
   const values: Record<string, CheckpointValue> = {};
   for (const r of CHECKPOINT_ROWS) values[r.key] = checkpointAsks(hive, r.key) ? 'ask' : 'coordinator';
   const secs = hive.settings?.autonomy?.prompt_timeout_secs ?? DEFAULT_TIMEOUT_SECS;
-  return { values, minutes: Math.max(TIMEOUT_MIN_MINUTES, Math.round(secs / 60)), digest: hive.settings?.autonomy?.daily_digest ?? true };
+  return {
+    values,
+    minutes: Math.max(TIMEOUT_MIN_MINUTES, Math.round(secs / 60)),
+    digest: hive.settings?.autonomy?.daily_digest ?? true,
+    checkMinutes: hive.settings?.autonomy?.health_check_minutes ?? CHECK_DEFAULT_MINUTES,
+  };
 }
 
 /** The first thing stopping Save, in a sentence, or null. */
@@ -64,6 +73,9 @@ export function validateForm(hive: Pick<Hive, 'landing_mode'>, form: AutonomyFor
   if (!Number.isInteger(form.minutes) || form.minutes < TIMEOUT_MIN_MINUTES || form.minutes > TIMEOUT_MAX_MINUTES) {
     return `The prompt timeout is a whole number of minutes, ${TIMEOUT_MIN_MINUTES} to ${TIMEOUT_MAX_MINUTES}.`;
   }
+  if (!Number.isInteger(form.checkMinutes) || form.checkMinutes < 0 || form.checkMinutes > CHECK_MAX_MINUTES) {
+    return `The worker check is a whole number of minutes, 1 to ${CHECK_MAX_MINUTES}, or 0 for never.`;
+  }
   return null;
 }
 
@@ -71,7 +83,10 @@ export function validateForm(hive: Pick<Hive, 'landing_mode'>, form: AutonomyFor
 export function toSave(hive: HiveFields, form: AutonomyForm): { checkpoints: Record<string, string>; autonomy: AutonomySettings } {
   const checkpoints: Record<string, string> = {};
   for (const r of CHECKPOINT_ROWS) checkpoints[r.key] = form.values[r.key];
-  return { checkpoints, autonomy: { ...(hive.settings?.autonomy ?? {}), prompt_timeout_secs: form.minutes * 60, daily_digest: form.digest } };
+  return {
+    checkpoints,
+    autonomy: { ...(hive.settings?.autonomy ?? {}), prompt_timeout_secs: form.minutes * 60, daily_digest: form.digest, health_check_minutes: form.checkMinutes },
+  };
 }
 
 /** How many checkpoints come to the human. */

@@ -7,7 +7,7 @@
   import type { Hive } from '$lib/tauri/types';
   import { hiveSetAutonomy } from '$lib/tauri/commands';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
-  import { CHECKPOINT_ROWS, formFor, NEVER_DELEGATED, TIMEOUT_MAX_MINUTES, TIMEOUT_MIN_MINUTES, toSave, validateForm, type AutonomyForm, type CheckpointValue } from '$lib/hive/autonomy';
+  import { CHECK_MAX_MINUTES, CHECKPOINT_ROWS, formFor, NEVER_DELEGATED, TIMEOUT_MAX_MINUTES, TIMEOUT_MIN_MINUTES, toSave, validateForm, type AutonomyForm, type CheckpointValue } from '$lib/hive/autonomy';
   import { modLabel } from '$lib/utils/platform';
   import { error as logError } from '@tauri-apps/plugin-log';
 
@@ -24,6 +24,7 @@
   let values = $state<Record<string, CheckpointValue>>(seed.values);
   let minutes = $state(seed.minutes);
   let digest = $state(seed.digest);
+  let checkMinutes = $state(seed.checkMinutes);
   let saving = $state(false);
   let refusal = $state<string | null>(null);
   let panelEl = $state<HTMLDivElement | null>(null);
@@ -33,7 +34,7 @@
     return () => cancelAnimationFrame(id);
   });
 
-  const form = $derived<AutonomyForm>({ values, minutes: Number(minutes), digest });
+  const form = $derived<AutonomyForm>({ values, minutes: Number(minutes), digest, checkMinutes: Number(checkMinutes) });
   const problem = $derived(validateForm(hive, form));
   const canSave = $derived(!saving && problem === null);
 
@@ -115,6 +116,10 @@
         <label class="field">
           <span class="label">Prompt timeout <span class="opt">minutes, {TIMEOUT_MIN_MINUTES}–{TIMEOUT_MAX_MINUTES}: a prompt the queen hasn't answered by then is yours too, and you're told once</span></span>
           <input class="text-input num" type="number" min={TIMEOUT_MIN_MINUTES} max={TIMEOUT_MAX_MINUTES} step="1" bind:value={minutes} />
+        </label>
+        <label class="field">
+          <span class="label">Worker check <span class="opt">minutes, 0 for never: the queen is shown any worker that may be stalled (failed, a prompt or blocker waiting, or nothing done in that time) and unblocks it; nothing is sent while every worker is busy</span></span>
+          <input class="text-input num" type="number" min="0" max={CHECK_MAX_MINUTES} step="1" bind:value={checkMinutes} />
         </label>
         <label class="check">
           <input type="checkbox" bind:checked={digest} />

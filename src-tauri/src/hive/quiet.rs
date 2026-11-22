@@ -50,6 +50,13 @@ fn bump(tab: &str) -> u64 {
     *n
 }
 
+/// Worker tab → when its agent last did something (ms), for the regular check (`health`).
+static LAST_ACTIVE: LazyLock<Mutex<HashMap<String, i64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub fn last_active(tab: &str) -> Option<i64> {
+    LAST_ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).get(tab).copied()
+}
+
 fn generation(tab: &str) -> u64 {
     GENERATIONS.lock().unwrap_or_else(|e| e.into_inner()).get(tab).copied().unwrap_or(0)
 }
@@ -161,6 +168,7 @@ pub fn seen(state: &Arc<AppState>, handle: &AppHandle, tab_id: &str, event_name:
     if !is_worker {
         return;
     }
+    LAST_ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).insert(tab_id.to_string(), super::fuses::now_ms());
     let armed = bump(tab_id);
     if !arms(event_name) || wakes_itself(event) {
         return;

@@ -281,13 +281,15 @@ pub struct AutonomySettings {
     pub prompt_timeout_secs: u64,
     /// A daily summary of what the coordinator decided alone, in its chat.
     pub daily_digest: bool,
+    /// How often the queen is shown the workers that may be stalled (`hive::health`); 0 is off.
+    pub health_check_minutes: u32,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
 
 impl Default for AutonomySettings {
     fn default() -> Self {
-        Self { prompt_timeout_secs: PROMPT_TIMEOUT_DEFAULT_SECS, daily_digest: true, extra: Map::new() }
+        Self { prompt_timeout_secs: PROMPT_TIMEOUT_DEFAULT_SECS, daily_digest: true, health_check_minutes: super::health::DEFAULT_MINUTES, extra: Map::new() }
     }
 }
 

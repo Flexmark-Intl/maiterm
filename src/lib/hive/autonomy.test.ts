@@ -38,7 +38,16 @@ describe('the Autonomy form', () => {
     const out = toSave(h, f);
     expect(out.checkpoints.questions).toBe('ask');
     expect(Object.keys(out.checkpoints)).toHaveLength(8);
-    expect(out.autonomy).toEqual({ prompt_timeout_secs: 900, daily_digest: false, later: 7 });
+    expect(out.autonomy).toEqual({ prompt_timeout_secs: 900, daily_digest: false, health_check_minutes: 15, later: 7 });
+  });
+
+  it('reads and checks the worker check interval, 0 for never', () => {
+    expect(formFor(hive({ settings: { autonomy: { prompt_timeout_secs: 300, daily_digest: true, health_check_minutes: 0 } } as never })).checkMinutes).toBe(0);
+    const f = formFor(hive());
+    expect(f.checkMinutes).toBe(15);
+    expect(validateForm(hive(), { ...f, checkMinutes: 0 })).toBeNull();
+    expect(validateForm(hive(), { ...f, checkMinutes: 241 })).toContain('worker check');
+    expect(validateForm(hive(), { ...f, checkMinutes: 2.5 })).toContain('worker check');
   });
 
   it('labels the header button by how many ask the human', () => {

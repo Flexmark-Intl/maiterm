@@ -797,6 +797,9 @@ export interface AutonomySettings {
   prompt_timeout_secs: number;
   /** A daily summary of what the coordinator decided alone, in its chat. */
   daily_digest: boolean;
+  /** How often the queen is shown workers that may be stalled (hive/health.rs); 0 is off. Absent
+   *  on a record an older build saved: Rust reads it as 15. */
+  health_check_minutes?: number;
 }
 
 /** hive/prompts.rs `RouteView`: who holds one of a worker's open prompts (docs/hive.md §7.4). */

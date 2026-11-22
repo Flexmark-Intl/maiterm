@@ -776,6 +776,7 @@ pub fn run() {
             // Each Hive's daily digest of what its coordinator decided alone, checked hourly
             // (docs/hive.md §7.6).
             hive::autonomy::start_digest_timer(app_state.clone(), app.handle().clone());
+            hive::health::start_timer(app_state.clone(), app.handle().clone());
             // Gallery thumbnails are made from here on, each gallery's waiting ones as it opens.
             hive::gallery::thumbs::install(app.handle().clone());
 
