@@ -446,7 +446,10 @@ pub(crate) fn worker_advisor(hive: &Hive, root: Option<&Path>) -> Advisor {
 pub const ADVISOR_TOOL_ENV: &str = "CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL";
 
 /// What stops Claude fetching the advisor's feature flag, set in a settings `env`.
-const FLAG_FETCH_OFF_ENV: [&str; 3] = ["DISABLE_TELEMETRY", "DO_NOT_TRACK", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"];
+/// Those that stop it whenever they hold anything (2.1.330 tests them for truthiness, "0" included).
+const FLAG_FETCH_OFF_WHEN_SET: [&str; 2] = ["DISABLE_TELEMETRY", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"];
+/// Those that stop it when they read 1/true/yes/on (Agent Defaults read 2.1.330's `featureFlags` check).
+const FLAG_FETCH_OFF_WHEN_ON: [&str; 3] = ["DO_NOT_TRACK", "CLAUDE_CODE_DISABLE_FEATURE_FLAGS", "DISABLE_GROWTHBOOK"];
 
 /// A worker's advisor: the model, and whether its launch line turns the advisor tool's switch on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -486,17 +489,15 @@ fn advisor_from(files: impl IntoIterator<Item = PathBuf>) -> Advisor {
         Some(serde_json::Value::Number(n)) => n.as_f64() == Some(1.0),
         _ => false,
     };
-    // DISABLE_TELEMETRY and CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC stop the fetch whenever they
-    // hold anything (2.1.330 tests `if(process.env.DISABLE_TELEMETRY)`, so "0" stops it too); only
-    // DO_NOT_TRACK and the switch read 1/true/yes/on (found by Agent Defaults' review).
+    // Claude stringifies settings `env` values, so a number or bool counts as set and "" as unset.
     let present = |k: &str| match v.get("env").and_then(|e| e.get(k)) {
         Some(serde_json::Value::String(s)) => !s.is_empty(),
         Some(serde_json::Value::Bool(_) | serde_json::Value::Number(_)) => true,
         _ => false,
     };
-    let fetch_off = |k: &&str| if *k == "DO_NOT_TRACK" { on(k) } else { present(k) };
     let switch = on(ADVISOR_TOOL_ENV);
-    if !switch && FLAG_FETCH_OFF_ENV.iter().any(fetch_off) {
+    let fetch_off = FLAG_FETCH_OFF_WHEN_SET.iter().any(|k| present(k)) || FLAG_FETCH_OFF_WHEN_ON.iter().any(|k| on(k));
+    if !switch && fetch_off {
         return Advisor::default();
     }
     Advisor { model: model.to_string(), switch }
@@ -1228,6 +1229,10 @@ pub(crate) mod tests {
         assert_eq!(advisor_from([home.clone()]), Advisor::default(), "any value of DISABLE_TELEMETRY stops the fetch, \"0\" included");
         fs::write(&home, r#"{"advisorModel":"fable","env":{"DO_NOT_TRACK":"0","DISABLE_TELEMETRY":""}}"#).unwrap();
         assert_eq!(advisor_from([home.clone()]), fable(false), "DO_NOT_TRACK reads 1/true/yes/on; an empty DISABLE_TELEMETRY is unset");
+        for (k, val, off) in [("DISABLE_GROWTHBOOK", "1", true), ("CLAUDE_CODE_DISABLE_FEATURE_FLAGS", "on", true), ("DISABLE_GROWTHBOOK", "0", false)] {
+            fs::write(&home, format!(r#"{{"advisorModel":"fable","env":{{"{k}":"{val}"}}}}"#)).unwrap();
+            assert_eq!(advisor_from([home.clone()]) == Advisor::default(), off, "{k}={val}");
+        }
         fs::write(&account, r#"{"model":"opus"}"#).unwrap();
         assert_eq!(advisor_from([account.clone()]), Advisor::default(), "no advisorModel, no advisor");
         assert_eq!(launch_advisor(Some(&t.join("own-config-dir"))), Advisor::default(), "a root without settings.json gives the human's tabs no advisor, so none here");
