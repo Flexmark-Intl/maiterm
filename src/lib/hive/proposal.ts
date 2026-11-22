@@ -7,6 +7,8 @@
 import { MAX_BRIEF, MAX_BRIEF_FILES } from './model';
 import { MAX_CAP } from './change';
 import { HIVE_EFFORTS, HIVE_MODELS } from './defaults';
+import { isSetupOnly } from './media';
+import type { HiveDetectedTool } from '$lib/tauri/types';
 
 /** What the sheet starts from when it opens on a proposal instead of a blank wizard. */
 export interface HiveProposal {
@@ -26,6 +28,19 @@ export interface HiveProposal {
    *  can make" with these rows open (docs/hive-media.md §8). Checked by Rust before it is set
    *  (`hive_media_check_requested`); `parseProposal` leaves it as asked. Read with `?? []`. */
   media?: string[];
+  /** The coordinator's model and effort, when the agent suggested them; else the human's defaults.
+   *  Read with `?? null`. */
+  coordinatorModel?: string | null;
+  coordinatorEffort?: string | null;
+  /** Tool ids (`mcp:<server>`, `cli:<program>`, `skill:<name>`) ADDED to the human's default picks,
+   *  never replacing them. `proposeHive` keeps only ids detected on this Mac (`checkProposedTools`).
+   *  Read with `?? []`. */
+  tools?: string[];
+  /** Hosts every worker's sandbox may reach, and local database sockets workers may connect to: a
+   *  grant the human sees on the sheet or the card before Create. Shape only here; Rust checks each
+   *  at Create (`check_worker_grants`). Read with `?? []`. */
+  workerHosts?: string[];
+  workerSockets?: string[];
   /** What Review offers: a new Hive, or a New goal (§11.5) for a Done or paused Hive that already
    *  works in the proposal's primary folder, rather than a second Hive on the same repo. */
   target: ProposalTarget;
@@ -110,8 +125,22 @@ export function parseProposal(
   if (workerModel && typeof workerModel === 'object') return workerModel.error;
   const workerEffort = pick(args.worker_effort, HIVE_EFFORTS, 'worker_effort');
   if (workerEffort && typeof workerEffort === 'object') return workerEffort.error;
+  const coordinatorModel = pick(args.coordinator_model, HIVE_MODELS, 'coordinator_model');
+  if (coordinatorModel && typeof coordinatorModel === 'object') return coordinatorModel.error;
+  const coordinatorEffort = pick(args.coordinator_effort, HIVE_EFFORTS, 'coordinator_effort');
+  if (coordinatorEffort && typeof coordinatorEffort === 'object') return coordinatorEffort.error;
   const media = strings(args.media, 'media');
   if (typeof media === 'string') return media.replace('a list of paths', 'a list of capability ids');
+  const tools = strings(args.tools, 'tools');
+  if (typeof tools === 'string') return tools.replace('a list of paths', 'a list of tool ids (mcp:<server>, cli:<program>, skill:<name>)');
+  const workerHosts = strings(args.worker_hosts, 'worker_hosts');
+  if (typeof workerHosts === 'string') return workerHosts.replace('a list of paths', 'a list of host names');
+  const badHost = workerHosts.find((h) => /\s/.test(h));
+  if (badHost) return `worker_hosts are bare host names (api.example.com, *.example.com): “${badHost}” isn't one.`;
+  const workerSockets = strings(args.worker_sockets, 'worker_sockets');
+  if (typeof workerSockets === 'string') return workerSockets.replace('a list of paths', 'a list of socket paths');
+  const badSocket = workerSockets.find((s) => !s.startsWith('/'));
+  if (badSocket) return `worker_sockets are full paths of local database sockets, such as /tmp/.s.PGSQL.5432: ${badSocket} isn't.`;
   const name = typeof args.name === 'string' && args.name.trim() ? args.name.trim().slice(0, NAME_MAX) : nameFromGoal(goal);
   return {
     fromTabId: from.tabId,
@@ -125,6 +154,30 @@ export function parseProposal(
     workerModel: workerModel as string | null,
     workerEffort: workerEffort as string | null,
     media,
+    coordinatorModel: coordinatorModel as string | null,
+    coordinatorEffort: coordinatorEffort as string | null,
+    tools,
+    workerHosts,
+    workerSockets,
     target: { kind: 'new' },
   };
+}
+
+/** A proposal's tool ids against this Mac's detection: those detected, in the proposal's order,
+ *  and the rest, named back to the agent. A setup-only program (`cli:brew`) is never a worker's
+ *  tool, so it is dropped as well. */
+export function checkProposedTools(ids: readonly string[], detected: readonly Pick<HiveDetectedTool, 'id'>[]): { kept: string[]; dropped: string[] } {
+  const have = new Set(detected.map((t) => t.id));
+  const kept: string[] = [];
+  const dropped: string[] = [];
+  for (const id of ids) (have.has(id) && !isSetupOnly(id) ? kept : dropped).push(id);
+  return { kept, dropped };
+}
+
+/** The tools a new Hive gets from a proposal: the human's default ids (already narrowed to this
+ *  Mac) with the proposal's detected ids added, sorted; and which of them the proposal added. */
+export function proposedToolPicks(defaults: readonly string[], proposed: readonly string[], detected: readonly Pick<HiveDetectedTool, 'id'>[]): { tools: string[]; added: string[] } {
+  const base = new Set(defaults);
+  const added = checkProposedTools(proposed, detected).kept.filter((id) => !base.has(id));
+  return { tools: [...new Set([...defaults, ...added])].sort(), added: [...new Set(added)].sort() };
 }

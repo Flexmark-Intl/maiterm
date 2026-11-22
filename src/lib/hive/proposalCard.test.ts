@@ -95,5 +95,26 @@ describe('a proposal card', () => {
     const spec = specFromPlan(proposal, plan);
     expect(spec.folders.map((f) => [f.name, f.base, f.setup, f.primary])).toEqual([['site', 'main', 'npm ci', true], ['assets', null, null, false]]);
     expect(spec).toMatchObject({ cap: 4, landing_mode: 'base', stack: [], budget_cents: 1000, keep_off_phone: false, workers_on_phone: false, tools: ['b', 'a'] });
+    expect(spec).toMatchObject({ worker_hosts: [], worker_sockets: [] });
+  });
+
+  it('names the tools the agent added, and the hosts and sockets workers get, and creates them', () => {
+    const p: HiveProposal = { ...proposal, coordinatorModel: 'sonnet', tools: ['skill:review'], workerHosts: ['api.example.com'], workerSockets: ['/tmp/.s.PGSQL.5432'] };
+    const withAdded: NewHivePlan = { ...plan, coordModel: 'sonnet', tools: ['a', 'b', 'skill:review'], toolLabels: ['ffmpeg', 'Figma', 'review'], addedTools: ['skill:review'], addedToolLabels: ['review'] };
+    const fx = proposalEffects(p, withAdded);
+    expect(fx).toContain('Added to your default tools by the agent: review. A skill reaches the queen only: workers have no skills.');
+    expect(fx.some((l) => l.startsWith('Workers may also reach: api.example.com.'))).toBe(true);
+    expect(fx).toContain('Workers may also connect to: /tmp/.s.PGSQL.5432, a local database’s socket.');
+    expect(fx.some((l) => l.includes('the queen is Sonnet'))).toBe(true);
+    // Nothing added, nothing granted: no such lines.
+    expect(proposalEffects(proposal, plan).some((l) => /Added to your default|Workers may also/.test(l))).toBe(false);
+    const spec = specFromPlan(p, withAdded);
+    expect(spec).toMatchObject({ tools: ['a', 'b', 'skill:review'], worker_hosts: ['api.example.com'], worker_sockets: ['/tmp/.s.PGSQL.5432'] });
+    expect(spec.models.coordinator.model).toBe('sonnet');
+  });
+
+  it('tells a new goal the access the agent suggested is not applied', () => {
+    const g: NewGoalPlan = { kind: 'new_goal', workspaceId: 'w', hiveId: 'h', hiveName: 'Site', reasons: [], unlanded: 0, liveWorkers: [], instructions: '', nextChapter: 1, missingFolders: [] };
+    expect(proposalEffects({ ...proposal, workerHosts: ['api.example.com'] }, g).some((l) => l.includes('tools, hosts or sockets the agent suggested are not applied'))).toBe(true);
   });
 });

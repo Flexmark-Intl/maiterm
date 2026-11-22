@@ -27,7 +27,7 @@ import { defaultToolIds, FALLBACK_CAP, wizardStart } from './defaults';
 import { capabilityLabels, pickerTools } from './media';
 import { folderName, validateSpec } from './model';
 import { newGoalOffered } from './newGoal';
-import { proposalTarget, type HiveCandidate, type HiveProposal } from './proposal';
+import { proposalTarget, proposedToolPicks, type HiveCandidate, type HiveProposal } from './proposal';
 import { createHive } from './create';
 import {
   proposalEffects,
@@ -87,15 +87,17 @@ async function newHivePlan(p: HiveProposal, workspaceId: string): Promise<NewHiv
   if (!pre.platform_ok) throw new Error("A Hive needs Claude's sandbox, which native Windows doesn't have.");
   if (!pre.claude_ok) throw new Error(pre.claude_detail ?? 'Claude Code 2.1.295 or newer is needed for a Hive.');
   const detected = pickerTools(await hiveDetectTools().catch(() => []));
-  const tools = defaultToolIds(d, detected).sort();
+  // The human's defaults, with the tools the proposal added (never in place of them): an id this
+  // Mac no longer has is left out, as the sheet leaves it out.
+  const { tools, added } = proposedToolPicks(defaultToolIds(d, detected), p.tools ?? [], detected);
   const label = new Map(detected.map((t) => [t.id, t.label]));
   const media = p.media ?? [];
   return {
     kind: 'new',
     folders,
     cap: p.cap ?? d.cap ?? pre.default_cap ?? FALLBACK_CAP,
-    coordModel: d.coordModel,
-    coordEffort: d.coordEffort,
+    coordModel: p.coordinatorModel ?? d.coordModel,
+    coordEffort: p.coordinatorEffort ?? d.coordEffort,
     workerModel: p.workerModel ?? d.workerModel,
     workerEffort: p.workerEffort ?? d.workerEffort,
     budgetCents: Math.round(d.budgetDollars * 100),
@@ -105,6 +107,9 @@ async function newHivePlan(p: HiveProposal, workspaceId: string): Promise<NewHiv
     rules: d.rules,
     tools,
     toolLabels: tools.map((id) => label.get(id) ?? id),
+    // Present only when the proposal added a tool, so a plan without it compares equal to one
+    // stored without it.
+    ...(added.length ? { addedTools: added, addedToolLabels: added.map((id) => label.get(id) ?? id) } : {}),
     trustAccount: pre.trust_account ?? null,
     // The media rows as the sheet names them, for the card's line. Present only when media was
     // asked for, so a plan without it compares equal to one stored without it.

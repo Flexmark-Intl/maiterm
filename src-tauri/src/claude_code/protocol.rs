@@ -1408,8 +1408,14 @@ fn propose_hive_tool() -> Value {
              goal instead. Nothing happens until they answer, and you are told what they did. Put the plan in brief (at most {MAX_BRIEF} characters) \
              and/or attach your plan documents as brief_files (absolute paths, at most {MAX_BRIEF_FILES} files of 5 MB): \
              they're copied into the coordinator's own folder at Create, and the coordinator alone reads them. folders are \
-             the project folders the Hive works in (default: your own folder). Only for a local agent tab. A second call \
-             replaces your earlier proposal."
+             the project folders the Hive works in (default: your own folder). What the Hive may use: tools are ADDED to \
+             your human's default tool picks (Preferences \u{2192} Hive), never replacing them; ids not detected on this Mac \
+             are dropped and named back as tools_dropped. Skills reach the coordinator only: workers launch without user \
+             settings and have no skills, so give workers MCP servers and CLIs. worker_hosts and worker_sockets are grants \
+             to every worker's sandbox, which your human sees on the Create sheet or the card before anything is created; \
+             maiTerm refuses a repo remote's host, localhost or a private address, and a socket not named like a \
+             database's (.s.PGSQL.<port>, mysql.sock, redis.sock). Only for a local agent tab. A second call replaces \
+             your earlier proposal."
         ),
         "inputSchema": {
             "type": "object",
@@ -1423,7 +1429,12 @@ fn propose_hive_tool() -> Value {
                 "cap": { "type": "integer", "description": "Workers at once (default: your human's Hive default)" },
                 "media": { "type": "array", "items": { "type": "string" }, "description": media_description },
                 "worker_model": { "type": "string", "enum": ["opus", "sonnet", "haiku"], "description": "Workers' model (default: your human's Hive default)" },
-                "worker_effort": { "type": "string", "enum": crate::hive::tools::EFFORTS, "description": "Workers' effort (default: your human's Hive default)" }
+                "worker_effort": { "type": "string", "enum": crate::hive::tools::EFFORTS, "description": "Workers' effort (default: your human's Hive default)" },
+                "coordinator_model": { "type": "string", "enum": ["opus", "sonnet", "haiku"], "description": "The coordinator's model (default: your human's Hive default)" },
+                "coordinator_effort": { "type": "string", "enum": crate::hive::tools::EFFORTS, "description": "The coordinator's effort (default: your human's Hive default)" },
+                "tools": { "type": "array", "items": { "type": "string" }, "description": "Tool ids as maiTerm detects them on this Mac (mcp:<server>, cli:<program>, skill:<name>), added to your human's default picks. Skills help only the coordinator: workers have none" },
+                "worker_hosts": { "type": "array", "items": { "type": "string" }, "description": "Bare host names every worker's sandbox may reach beyond the package registries (api.example.com, *.example.com): a grant your human sees before Create" },
+                "worker_sockets": { "type": "array", "items": { "type": "string" }, "description": "Full paths of local database sockets workers may connect to (/tmp/.s.PGSQL.5432, a mysql.sock or redis.sock): a grant your human sees before Create" }
             },
             "required": ["goal"]
         }
@@ -1759,6 +1770,20 @@ mod tests {
             assert!(description.contains(&c.id), "the description names {}", c.id);
         }
         assert!(description.contains("Unknown ids are dropped"), "the agent is told what happens to a wrong id");
+    }
+
+    #[test]
+    fn propose_hive_takes_optional_access_fields_and_says_what_they_do() {
+        let tool = propose_hive_tool();
+        let props = &tool["inputSchema"]["properties"];
+        for k in ["tools", "worker_hosts", "worker_sockets", "coordinator_model", "coordinator_effort"] {
+            assert!(props.get(k).is_some(), "{k} is in the schema");
+            assert!(!tool["inputSchema"]["required"].as_array().unwrap().iter().any(|r| r == k), "{k} is optional");
+        }
+        let d = tool["description"].as_str().unwrap();
+        assert!(d.contains("ADDED to") && d.contains("tools_dropped"), "tools add to the defaults");
+        assert!(d.contains("no skills"), "the agent is told workers have no skills");
+        assert!(d.contains("before anything is created"), "hosts and sockets are grants the human sees");
     }
 
     const FILES: [&str; 3] = ["revealInTree", "getTreeSelection", "getAgentFileActivity"];

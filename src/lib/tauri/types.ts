@@ -922,6 +922,11 @@ export interface HiveSpec {
   keep_off_phone: boolean;
   /** Workers are chats on the phone as well as the coordinator. */
   workers_on_phone: boolean;
+  /** Host names every worker's sandbox may reach (`HiveSettings.worker_hosts`), from an agent's
+   *  proposal, shown before Create. Rust checks each as Hive settings does (`check_worker_grants`). */
+  worker_hosts: string[];
+  /** Full paths of local database sockets workers may connect to (`HiveSettings.worker_sockets`). */
+  worker_sockets: string[];
 }
 
 /** hive/tool_change.rs `ToolsPreview`: what a Hive settings → Tools change would do. */

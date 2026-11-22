@@ -7,14 +7,14 @@
  */
 
 import type { Tab } from '$lib/tauri/types';
-import { followUpRemoteHome, hiveCheckBriefFiles, hiveMediaCheckRequested } from '$lib/tauri/commands';
+import { followUpRemoteHome, hiveCheckBriefFiles, hiveDetectTools, hiveMediaCheckRequested } from '$lib/tauri/commands';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
 import { isWindows } from '$lib/utils/platform';
 import { createDrafts, newGoalProposals } from './createDraft';
 import { newGoalOffered } from './newGoal';
-import { parseProposal, proposalTarget, type HiveCandidate, type HiveProposal } from './proposal';
+import { checkProposedTools, parseProposal, proposalTarget, type HiveCandidate, type HiveProposal } from './proposal';
 import { info as logInfo, warn as logWarn } from '@tauri-apps/plugin-log';
 
 /** A new Hive: a workspace made for it, with the Create sheet seeded. Also the New goal sheet's
@@ -79,8 +79,24 @@ export async function proposeHive(tab: Tab, args: Record<string, unknown>): Prom
       mediaUnchecked = true;
     }
   }
+  // The tool ids against this Mac's detection: one not detected (or setup plumbing) is dropped and
+  // named. Detection that can't be asked is not a reason to refuse the plan: the tools are left
+  // out, and the answer says so.
+  let tools: string[] = [];
+  let toolsDropped: string[] = [];
+  let toolsUnchecked = false;
+  if (parsed.tools?.length) {
+    try {
+      const checked = checkProposedTools(parsed.tools, await hiveDetectTools());
+      tools = checked.kept;
+      toolsDropped = checked.dropped;
+    } catch (e) {
+      logWarn(`hive: couldn't detect tools for a proposal: ${e}`);
+      toolsUnchecked = true;
+    }
+  }
   const candidates: HiveCandidate[] = workspacesStore.workspaces.flatMap((w) => (w.hive ? [{ workspaceId: w.id, name: w.name, hive: w.hive }] : []));
-  const p: HiveProposal = { ...parsed, media, target: proposalTarget(parsed.folders, candidates) };
+  const p: HiveProposal = { ...parsed, media, tools, target: proposalTarget(parsed.folders, candidates) };
   const t = p.target;
   // A request card (lib/hive/proposalRequest.ts): the Loom and the phone show it. One proposal per
   // agent: Rust ends the tab's older pending one.
@@ -106,5 +122,13 @@ export async function proposeHive(tab: Tab, args: Record<string, unknown>): Prom
     ...(media.length ? { media } : {}),
     ...(mediaUnchecked ? { media_note: "The media list couldn't be checked against the catalogue, so it was not applied; your human can still open “What it can make” in the sheet." } : {}),
     ...(dropped.length ? { media_dropped: dropped, media_note: `Not media capabilities, so left out: ${dropped.join(', ')}.` } : {}),
+    ...(tools.length ? { tools } : {}),
+    ...(toolsUnchecked ? { tools_note: "This Mac's tools couldn't be detected, so the tools list was not applied; your human's default tools still apply, and they can pick more on the sheet." } : {}),
+    ...(toolsDropped.length ? { tools_dropped: toolsDropped, tools_note: `Not detected on this Mac, so left out: ${toolsDropped.join(', ')}.` } : {}),
+    ...(p.workerHosts?.length ? { worker_hosts: p.workerHosts } : {}),
+    ...(p.workerSockets?.length ? { worker_sockets: p.workerSockets } : {}),
+    ...(p.target.kind === 'new_goal' && (tools.length || p.workerHosts?.length || p.workerSockets?.length || p.coordinatorModel || p.coordinatorEffort)
+      ? { settings_note: "A new goal keeps the Hive's own settings: the tools, hosts, sockets and coordinator model you suggested are not applied." }
+      : {}),
   };
 }

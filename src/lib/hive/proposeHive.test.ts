@@ -2,11 +2,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const check = vi.hoisted(() => vi.fn());
 const filed = vi.hoisted(() => vi.fn());
+const detect = vi.hoisted(() => vi.fn());
 
 vi.mock('$lib/tauri/commands', () => ({
   followUpRemoteHome: vi.fn(async () => ({ host: null })),
   hiveCheckBriefFiles: vi.fn(async () => undefined),
   hiveMediaCheckRequested: check,
+  hiveDetectTools: detect,
 }));
 vi.mock('$lib/stores/workspaces.svelte', () => ({ workspacesStore: { workspaces: [] } }));
 vi.mock('$lib/stores/terminals.svelte', () => ({ terminalsStore: { getOsc: () => ({ cwd: '/Users/me/app' }) } }));
@@ -21,6 +23,7 @@ const tab = { id: 't1', name: 'planner' } as unknown as Tab;
 
 beforeEach(() => {
   check.mockReset();
+  detect.mockReset();
   filed.mockReset();
   filed.mockImplementation(async () => ({ requestId: 'r1' }));
 });
@@ -63,5 +66,31 @@ describe('proposeHive media', () => {
     expect(res).not.toHaveProperty('media_dropped');
     expect(String(res.media_note)).toMatch(/couldn't be checked.*not applied/);
     expect(JSON.stringify(res)).not.toContain(long);
+  });
+});
+
+describe('proposeHive tools', () => {
+  it('files the detected tool ids and names the dropped ones', async () => {
+    detect.mockResolvedValue([{ id: 'mcp:figma' }, { id: 'cli:brew' }]);
+    const res = await proposeHive(tab, { goal: 'Ship', tools: ['mcp:figma', 'mcp:gone', 'cli:brew'] });
+    expect(filed.mock.calls[0][1].tools).toEqual(['mcp:figma']);
+    expect(res.tools).toEqual(['mcp:figma']);
+    expect(res.tools_dropped).toEqual(['mcp:gone', 'cli:brew']);
+    expect(res.tools_note).toBe('Not detected on this Mac, so left out: mcp:gone, cli:brew.');
+  });
+
+  it('still files the proposal when detection fails, with no tools and a note', async () => {
+    detect.mockRejectedValue(new Error('no'));
+    const res = await proposeHive(tab, { goal: 'Ship', tools: ['mcp:figma'] });
+    expect(filed).toHaveBeenCalledTimes(1);
+    expect(filed.mock.calls[0][1].tools).toEqual([]);
+    expect(res).not.toHaveProperty('tools');
+    expect(String(res.tools_note)).toMatch(/couldn't be detected.*not applied/);
+  });
+
+  it('files the hosts and sockets as given and echoes them', async () => {
+    const res = await proposeHive(tab, { goal: 'Ship', worker_hosts: ['api.example.com'], worker_sockets: ['/tmp/.s.PGSQL.5432'] });
+    expect(filed.mock.calls[0][1]).toMatchObject({ workerHosts: ['api.example.com'], workerSockets: ['/tmp/.s.PGSQL.5432'] });
+    expect(res).toMatchObject({ worker_hosts: ['api.example.com'], worker_sockets: ['/tmp/.s.PGSQL.5432'] });
   });
 });

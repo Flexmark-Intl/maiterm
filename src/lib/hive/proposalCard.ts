@@ -5,7 +5,8 @@
  *
  * The phone's Approve stands in for the Create sheet's Create (or the New goal sheet's Start), so
  * the plan is everything the sheet would have filled in, taken when the request is filed: the
- * detected folders, the human's Hive defaults, the tools those name, an empty stack. Every word on
+ * detected folders, the human's Hive defaults, the tools those name plus any the agent added, the
+ * hosts and sockets it asked workers be given, an empty stack. Every word on
  * the card is maiTerm's and says what the approval does, the trust and the first commit it makes
  * included. The agent's words (goal, brief) go in `reason`, shown as a quote.
  */
@@ -46,6 +47,10 @@ export interface NewHivePlan {
   /** Sorted ids, and their labels in the same order. */
   tools: string[];
   toolLabels: string[];
+  /** The ids among `tools` the proposal added to the human's defaults, sorted, and their labels in
+   *  the same order; absent when it added none, so such a plan compares equal to one stored before. */
+  addedTools?: string[];
+  addedToolLabels?: string[];
   /** The proposal's media capabilities by the label the sheet shows, in the proposal's order;
    *  absent when none was asked for. */
   mediaLabels?: string[];
@@ -132,6 +137,9 @@ export function proposalEffects(p: HiveProposal, plan: ProposalPlan): string[] {
       "The Hive's own settings stay: its folders, workers at once, models and rules.",
       ...(plan.missingFolders.length ? [`Not added: ${listed(plan.missingFolders)}, which the Hive doesn't work in.`] : []),
       ...(p.cap || p.workerModel || p.workerEffort ? ['The worker settings the agent suggested are not applied: a new goal keeps the Hive’s.'] : []),
+      ...(p.coordinatorModel || p.coordinatorEffort || p.tools?.length || p.workerHosts?.length || p.workerSockets?.length
+        ? ['The queen’s model, tools, hosts or sockets the agent suggested are not applied either: change them in the Hive’s settings.']
+        : []),
       'From the phone, Approve starts it as shown. On the desktop, Open shows it in the New goal sheet to change first.',
     ];
   }
@@ -155,6 +163,11 @@ export function proposalEffects(p: HiveProposal, plan: ProposalPlan): string[] {
     ...setups,
     `Up to ${plural(plan.cap, `${MODEL(plan.workerModel)} worker`)} at once (${plan.workerEffort} effort); the queen is ${MODEL(plan.coordModel)} (${plan.coordEffort} effort).`,
     plan.toolLabels.length ? `Tools: ${listed(plan.toolLabels)}.` : 'No tools beyond the agents’ own.',
+    ...(plan.addedTools?.length
+      ? [`Added to your default tools by the agent: ${listed(plan.addedToolLabels?.length === plan.addedTools.length ? plan.addedToolLabels : plan.addedTools, 6)}.${plan.addedTools.some((id) => id.startsWith('skill:')) ? ' A skill reaches the queen only: workers have no skills.' : ''}`]
+      : []),
+    ...((p.workerHosts ?? []).length ? [`Workers may also reach: ${(p.workerHosts ?? []).join(', ')}. Every worker’s sandbox lets it connect there, beyond the package registries.`] : []),
+    ...((p.workerSockets ?? []).length ? [`Workers may also connect to: ${(p.workerSockets ?? []).join(', ')}, a local database’s socket${(p.workerSockets ?? []).length === 1 ? '' : 's'}.`] : []),
     ...(p.media?.length ? [`Media the agent expects to need: ${listed(plan.mediaLabels?.length === p.media.length ? plan.mediaLabels : p.media)}. Approving from the phone sets none up; on the desktop the Create sheet opens “What it can make” and tags them “Asked for”.`] : []),
     `Budget $${(plan.budgetCents / 100).toFixed(plan.budgetCents % 100 ? 2 : 0)}. Work lands on Base${plan.pushAfterLand ? ' and is pushed' : ', not pushed'}.`,
     ...files,
@@ -195,5 +208,8 @@ export function specFromPlan(p: HiveProposal, plan: NewHivePlan): HiveSpec {
     stack: [],
     keep_off_phone: plan.phone === 'none',
     workers_on_phone: plan.phone === 'all',
+    // The grants the card named, as the agent proposed them: Rust checks each at Create.
+    worker_hosts: p.workerHosts ?? [],
+    worker_sockets: p.workerSockets ?? [],
   };
 }

@@ -863,6 +863,13 @@ pub struct HiveSpec {
     pub keep_off_phone: bool,
     /// Workers are chats on the phone as well as the coordinator.
     pub workers_on_phone: bool,
+    /// Host names every worker's sandbox may reach (`HiveSettings.worker_hosts`), from an agent's
+    /// proposal and shown on the sheet before Create. Checked as Hive settings checks the human's
+    /// (`check_worker_grants`, then `change::refuse_private_hosts`).
+    pub worker_hosts: Vec<String>,
+    /// Full paths of local database sockets workers may connect to (`HiveSettings.worker_sockets`),
+    /// each checked by `change::check_socket`.
+    pub worker_sockets: Vec<String>,
 }
 
 impl Default for HiveSpec {
@@ -883,8 +890,44 @@ impl Default for HiveSpec {
             stack: Vec::new(),
             keep_off_phone: false,
             workers_on_phone: false,
+            worker_hosts: Vec::new(),
+            worker_sockets: Vec::new(),
         }
     }
+}
+
+/// A new Hive's worker hosts and sockets as they're stored, or why Create is refused: each host
+/// normalised (`normalize_host`, which refuses localhost and the public loopback names) and kept
+/// off the repos' remotes (`reaches_remote`), each socket by `change::check_socket`, within the
+/// limits Hive settings keeps. Repeats count once. Exactly the human's checks in Hive settings;
+/// the DNS half (`change::refuse_private_hosts`) is async and run by `hive_create`.
+pub fn check_worker_grants(hosts: &[String], sockets: &[String], remote_hosts: &[String]) -> Result<(Vec<String>, Vec<String>), String> {
+    use super::change::{check_socket, MAX_WORKER_HOSTS, MAX_WORKER_SOCKETS};
+    use super::gallery::budget::{normalize_host, reaches_remote};
+    let mut out_hosts: Vec<String> = Vec::new();
+    for raw in hosts {
+        let h = normalize_host(raw).map_err(|e| format!("A host workers may reach: {e}"))?;
+        if let Some(r) = reaches_remote(&h, remote_hosts) {
+            return Err(format!("{h} reaches {r}, where this Hive\u{2019}s repos push: no worker may reach it. Take it out of the hosts workers may reach."));
+        }
+        if !out_hosts.contains(&h) {
+            out_hosts.push(h);
+        }
+    }
+    if out_hosts.len() > MAX_WORKER_HOSTS {
+        return Err(format!("Workers may reach at most {MAX_WORKER_HOSTS} hosts beyond the package registries."));
+    }
+    let mut out_sockets: Vec<String> = Vec::new();
+    for raw in sockets {
+        let s = check_socket(raw)?;
+        if !out_sockets.contains(&s) {
+            out_sockets.push(s);
+        }
+    }
+    if out_sockets.len() > MAX_WORKER_SOCKETS {
+        return Err(format!("Workers may reach at most {MAX_WORKER_SOCKETS} local database sockets."));
+    }
+    Ok((out_hosts, out_sockets))
 }
 
 /// The running service in another workspace whose command and folder this one repeats, and
@@ -1335,6 +1378,9 @@ pub async fn hive_create(
     crate::instance::hive_refusal()?;
     let label = window.label().to_string();
     validate_spec(&spec)?;
+    // The grants' shape first, before anything is made on disk; the remotes are read once the
+    // folders are, below.
+    check_worker_grants(&spec.worker_hosts, &spec.worker_sockets, &[])?;
     let (replaceable, prefs, stack) = {
         let data = state.app_data.read();
         let ws = data.window(&label).and_then(|w| w.workspaces.iter().find(|w| w.id == workspace_id)).ok_or("Workspace not found")?;
@@ -1346,22 +1392,40 @@ pub async fn hive_create(
     let app = state.inner().clone();
     let spec_for_disk = spec.clone();
     let shell = replaceable.as_ref().map(|r| r.tab_id.clone());
-    let (hive, root) = tauri::async_runtime::spawn_blocking(move || -> Result<(Hive, PathBuf), String> {
+    let prefs_for_folders = prefs.clone();
+    // The folders made ready and read, and the Hive built from them, before anything of its own is
+    // laid out: a grant refused against its remotes leaves no Hive folder behind.
+    let (mut hive, remotes, empty, roots) = tauri::async_runtime::spawn_blocking(move || -> Result<(Hive, Vec<String>, Vec<PathBuf>, Vec<PathBuf>), String> {
         if let Some(t) = &shell {
             shell_check(&app, t)?;
         }
         // A coordinator that can't start is a broken Hive: refuse here rather than at launch.
         launch::claude_new_enough()?;
-        let roots = trust_roots(&prefs);
+        let roots = trust_roots(&prefs_for_folders);
         let empty = start_new_repos(&spec_for_disk.folders, app_data_dir().as_deref())?;
         let folders = resolve_folders(&spec_for_disk.folders, &roots, app_data_dir().as_deref())?;
         let mut hive = build_hive(&spec_for_disk, uuid::Uuid::new_v4().to_string(), folders);
+        let remotes = super::settings::hive_remote_hosts(&hive);
+        // The hosts and sockets the human approved on the sheet or card, held to Hive settings' rules.
+        let (hosts, sockets) = check_worker_grants(&spec_for_disk.worker_hosts, &spec_for_disk.worker_sockets, &remotes)?;
+        hive.settings.worker_hosts = hosts;
+        hive.settings.worker_sockets = sockets;
+        Ok((hive, remotes, empty, roots))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    // A host that answers this computer, its network or a remote given as an IP (§6.7), as for
+    // the human in Hive settings: a name that doesn't resolve yet passes.
+    super::change::refuse_private_hosts(&hive.settings.worker_hosts, false, &super::change::ip_remotes(&remotes)).await?;
+
+    let spec_for_disk = spec.clone();
+    let (hive, root) = tauri::async_runtime::spawn_blocking(move || -> Result<(Hive, PathBuf), String> {
         // The queued commands it starts with, read from the folders (§6.8); edited in settings.
         hive.settings.run_queue = super::queue::detect_commands(&hive.folders);
         // Its generators' hosts, fixed here and edited by the human, never re-derived at launch: a
         // server added to a config file later must not widen a sandbox on its own (plan D2).
         let detected = detect_tools(&prefs);
-        hive.settings.gallery.generator_hosts = generator_hosts(&detected, &hive.tools, &super::settings::hive_remote_hosts(&hive));
+        hive.settings.gallery.generator_hosts = generator_hosts(&detected, &hive.tools, &remotes);
         // A local server's output folder joins the human's output folders: picking the tool is
         // their edit, as its hosts are (docs/hive-media.md §12.1).
         hive.settings.gallery.output_folders = tool_output_folders(&detected, &hive.tools);
@@ -1552,6 +1616,45 @@ mod tests {
         // A Create sheet from before the options sends no field: both off.
         let old: HiveSpec = serde_json::from_value(serde_json::json!({ "name": "x" })).unwrap();
         assert!(!old.keep_off_phone && !old.workers_on_phone);
+    }
+
+    /// A proposal's worker hosts and sockets are held to Hive settings' rules at Create: a caller
+    /// from before them sends none, good ones are kept normalised once each, and a bad one refuses
+    /// Create with a sentence naming it.
+    #[test]
+    fn worker_grants_are_checked_as_hive_settings_checks_them() {
+        let old: HiveSpec = serde_json::from_value(serde_json::json!({ "name": "x" })).unwrap();
+        assert!(old.worker_hosts.is_empty() && old.worker_sockets.is_empty());
+        let spec: HiveSpec = serde_json::from_value(serde_json::json!({
+            "name": "x",
+            "worker_hosts": ["API.example.com.", "*.docs.example.org", "api.example.com"],
+            "worker_sockets": ["/tmp/.s.PGSQL.5432", " /tmp/.s.PGSQL.5432 ", "/opt/homebrew/var/mysql/mysql.sock"]
+        }))
+        .unwrap();
+        let remotes = vec!["github.com".to_string()];
+        let (hosts, sockets) = check_worker_grants(&spec.worker_hosts, &spec.worker_sockets, &remotes).unwrap();
+        assert_eq!(hosts, vec!["api.example.com".to_string(), "*.docs.example.org".to_string()]);
+        assert_eq!(sockets, vec!["/tmp/.s.PGSQL.5432".to_string(), "/opt/homebrew/var/mysql/mysql.sock".to_string()]);
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+
+        // A socket that isn't a database's, or isn't a full path.
+        let e = check_worker_grants(&[], &s(&["/var/run/docker.sock"]), &[]).unwrap_err();
+        assert!(e.contains("named like a database"), "{e}");
+        assert!(check_worker_grants(&[], &s(&["tmp/.s.PGSQL.5432"]), &[]).unwrap_err().contains("full path"));
+        // A repo remote's host, a name under it and another name of its domain.
+        for h in ["github.com", "api.github.com", "*.github.com", "ssh.github.com"] {
+            let e = check_worker_grants(&s(&[h]), &[], &remotes).unwrap_err();
+            assert!(e.contains("where this Hive\u{2019}s repos push"), "{h}: {e}");
+        }
+        // Loopback, by name and by a public name for 127.0.0.1; an IP and a URL aren't host names.
+        for h in ["localhost", "dev.localhost", "app.localtest.me", "127.0.0.1", "https://api.example.com"] {
+            assert!(check_worker_grants(&s(&[h]), &[], &[]).is_err(), "{h} is refused");
+        }
+        // The limits Hive settings keeps.
+        let many: Vec<String> = (0..=super::super::change::MAX_WORKER_HOSTS).map(|i| format!("h{i}.example.com")).collect();
+        assert!(check_worker_grants(&many, &[], &[]).unwrap_err().contains("at most"));
+        let socks: Vec<String> = (0..=super::super::change::MAX_WORKER_SOCKETS).map(|i| format!("/tmp/.s.PGSQL.{}", 5432 + i)).collect();
+        assert!(check_worker_grants(&[], &socks, &[]).unwrap_err().contains("at most"));
     }
 
     /// Only Claude's explicit "not logged in" warns; a login it can't vouch for, or output that

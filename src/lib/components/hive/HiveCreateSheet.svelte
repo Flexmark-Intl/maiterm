@@ -86,6 +86,8 @@
     suggestions: Record<string, StackSuggestion[] | null>; shareChoice: Record<string, boolean>;
     /** The capabilities the agent's proposal asked for (docs/hive-media.md §8), kept so a reopened sheet still opens them. */
     media?: string[];
+    /** The hosts and database sockets the proposal asked workers be given, as the human left them. */
+    workerHosts?: string[]; workerSockets?: string[];
     picks: Record<string, { on: boolean; command: string }>; step: number; reached: number;
   }
   const draftFor = () => createDrafts.get<Draft>(workspaceId);
@@ -146,12 +148,19 @@
   let rulesOpen = $state(saved?.rulesOpen ?? !!initial.rules.trim());
   let cap = $state(saved?.cap ?? seed?.cap ?? initial.cap ?? FALLBACK_CAP);
   let landing = $state<'base' | 'integration'>(saved?.landing ?? 'base');
-  let coordModel = $state(saved?.coordModel ?? initial.coordModel);
-  let coordEffort = $state(saved?.coordEffort ?? initial.coordEffort);
+  let coordModel = $state(saved?.coordModel ?? seed?.coordinatorModel ?? initial.coordModel);
+  let coordEffort = $state(saved?.coordEffort ?? seed?.coordinatorEffort ?? initial.coordEffort);
   let workerModel = $state(saved?.workerModel ?? seed?.workerModel ?? initial.workerModel);
   let workerEffort = $state(saved?.workerEffort ?? seed?.workerEffort ?? initial.workerEffort);
+  /** The tools a proposal added to the defaults: the first detection ticks those it finds, beside
+   *  the defaults it starts from (`pickTracker`). A draft already holds them in `picked`. */
+  let proposedTools: string[] = seed?.tools ?? [];
   // Ids not detected on this machine are dropped once detection answers (`knownTools`).
-  let picked = $state(new Set<string>((saved?.picked ?? initial.tools).filter((id) => !isSetupOnly(id))));
+  let picked = $state(new Set<string>((saved?.picked ?? [...initial.tools, ...proposedTools]).filter((id) => !isSetupOnly(id))));
+  /** What a proposal asks workers be given beyond the registries: a grant the human approves by
+   *  pressing Create, so Review lists each, removable. Rust checks them at Create. */
+  let workerHosts = $state<string[]>(saved?.workerHosts ?? seed?.workerHosts ?? []);
+  let workerSockets = $state<string[]>(saved?.workerSockets ?? seed?.workerSockets ?? []);
   let budgetDollars = $state(saved?.budgetDollars ?? initial.budgetDollars);
   let pushAfterLand = $state(saved?.pushAfterLand ?? initial.pushAfterLand);
   /** The budget as Create sends it: an emptied or negative field is $0, and the receipt and the
@@ -201,6 +210,7 @@
       // Kept only as edited: a rename of the workspace meanwhile otherwise wins.
       name: name === ws?.name ? '' : name, goal, instructions, brief, briefFiles, rulesOpen, folders, cap, landing, coordModel, coordEffort, workerModel, workerEffort,
       picked: [...picked], budgetDollars, pushAfterLand, phone, suggestions: read, shareChoice, picks, step, reached, media: requestedMedia,
+      workerHosts, workerSockets,
     }) as Draft);
   }
   function startOver() {
@@ -209,6 +219,9 @@
     proposedBy = null;
     requestedMedia = [];
     mediaSeed = [];
+    proposedTools = [];
+    workerHosts = [];
+    workerSockets = [];
     useDefaults = true;
     createError = null; trustError = null; folderNote = null;
     name = ws?.name ?? '';
@@ -393,7 +406,8 @@
     // The first answer: a default (or a draft's pick) this machine no longer has is dropped,
     // silently: Create sends only what the queen can really use. Defaults also bring every current
     // member of a pack picked whole, a skill added to it since included.
-    (t) => new Set(useDefaults ? defaultToolIds(fromDefaults, t) : knownTools(seedPicks ?? picked, t)),
+    // A proposal's tools are ADDED to the defaults here: the defaults alone would drop them.
+    (t) => new Set(useDefaults ? [...defaultToolIds(fromDefaults, t), ...knownTools(proposedTools.filter((id) => !isSetupOnly(id)), t)] : knownTools(seedPicks ?? picked, t)),
   );
 
   /** Detect this Mac's tools. `ready` is null for the first detection; after a setup in the media
@@ -775,6 +789,8 @@
       stack: $state.snapshot(stackRows) as Service[],
       keep_off_phone: phone === 'none',
       workers_on_phone: phone === 'all',
+      worker_hosts: [...workerHosts],
+      worker_sockets: [...workerSockets],
     };
     try {
       await createHive(workspaceId, spec);
@@ -1147,6 +1163,36 @@
               and you confirm its completion criteria before any worker starts.
               {#if instructions.trim()}Every agent also follows your {instructionCount.toLocaleString()} characters of rules.{/if}
             </p>
+            {#if workerHosts.length}
+              <div class="grant">
+                <Tooltip text="Every worker's sandbox may connect to these, beyond the package registries, from its first launch. Proposed by the agent; pressing Create grants them. You can change them later in the Hive's settings.">
+                  <span class="label">Workers may also reach</span>
+                </Tooltip>
+                <div class="brief-files">
+                  {#each workerHosts as h (h)}
+                    <div class="brief-file">
+                      <code>{h}</code>
+                      <IconButton tooltip="Don't grant {h}" onclick={() => (workerHosts = workerHosts.filter((x) => x !== h))} aria-label="Remove {h}">&times;</IconButton>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+            {#if workerSockets.length}
+              <div class="grant">
+                <Tooltip text="Local database sockets every worker may connect to, from its first launch. Proposed by the agent; pressing Create grants them. You can change them later in the Hive's settings.">
+                  <span class="label">Workers may connect to</span>
+                </Tooltip>
+                <div class="brief-files">
+                  {#each workerSockets as s (s)}
+                    <div class="brief-file">
+                      <code>{s}</code>
+                      <IconButton tooltip="Don't grant {s}" onclick={() => (workerSockets = workerSockets.filter((x) => x !== s))} aria-label="Remove {s}">&times;</IconButton>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
             {#each untrusted as f (f.key)}
               <div class="trust">
                 <Tooltip text={trustTip}>
@@ -1334,6 +1380,7 @@
   .review p { margin: 0; font-size: 1rem; line-height: 1.6; color: var(--fg); }
   .review p.hint { font-size: 0.846rem; color: var(--fg-dim); }
   .review b { font-weight: 600; }
+  .grant { display: flex; flex-direction: column; gap: 6px; }
   .mono { font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.846rem; color: var(--fg); overflow-wrap: anywhere; }
   code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.9em; background: var(--bg-dark); padding: 1px 4px; border-radius: 3px; }
   .note-line { font-size: 0.846rem; color: var(--fg-dim); overflow-wrap: anywhere; }
