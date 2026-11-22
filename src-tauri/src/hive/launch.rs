@@ -77,9 +77,9 @@ pub struct LaunchRecord {
     /// The worker's task; empty for the coordinator.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub task_id: String,
-    /// `--advisor`: the human's own Claude advisor (`advisorModel`), read at each launch of a tab
-    /// whose `--setting-sources` leaves user settings out (`launch_advisor`), so a worker or
-    /// reviewer consults the same model the human's tabs do. Empty passes none: the coordinator
+    /// `--advisor`: a worker's or reviewer's advisor, decided at each launch by the Hive's
+    /// setting (`worker_advisor`): by default the human's own Claude advisor as their tabs get it
+    /// (`launch_advisor`), since their `--setting-sources` leave user settings out. Empty passes none: the coordinator
     /// reads it from user settings itself.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub advisor: String,
@@ -421,6 +421,20 @@ pub(crate) fn config_root_for(prefs: &crate::state::Preferences, users_own: Opti
 pub(crate) fn launch_advisor(root: Option<&Path>) -> Advisor {
     let dir = root.map(Path::to_path_buf).or_else(|| dirs::home_dir().map(|h| h.join(".claude")));
     advisor_from(dir.map(|d| d.join("settings.json")))
+}
+
+/// A worker's or reviewer's advisor by the Hive's setting (`HiveSettings::worker_advisor`): the
+/// human's own, as their tabs get it, by default; none when off; else the model the Hive names,
+/// with the advisor tool's switch, since a chosen advisor must not silently do nothing where
+/// telemetry is off. An unknown stored value is none, never a model it can't name.
+pub(crate) fn worker_advisor(hive: &Hive, root: Option<&Path>) -> Advisor {
+    use super::change::{ADVISORS, ADVISOR_FOLLOW, ADVISOR_OFF};
+    match hive.settings.worker_advisor.as_str() {
+        "" | ADVISOR_FOLLOW => launch_advisor(root),
+        ADVISOR_OFF => Advisor::default(),
+        m if ADVISORS.contains(&m) => Advisor { model: m.to_string(), switch: true },
+        _ => Advisor::default(),
+    }
 }
 
 /// Claude 2.1.330 turns the advisor tool on only under a server feature flag, which it doesn't
@@ -1023,7 +1037,7 @@ fn prepare_worker(hive: &Hive, paths: &HivePaths, tab_id: &str, tasks: &[crate::
 
     let root = launch_config_root(prefs);
     let mut record = worker_record(hive, paths, &w);
-    set_advisor(&mut record, launch_advisor(root.as_deref()));
+    set_advisor(&mut record, worker_advisor(hive, root.as_deref()));
     if record != existing {
         write_record(&task, &record)?;
     }
@@ -1090,6 +1104,15 @@ fn prepare_coordinator(hive: &Hive, paths: &HivePaths, prefs: &crate::state::Pre
     let args = hive_launch_args(&record, resume.as_deref());
     log::info!("hive {}: launching the coordinator ({})", hive.id, if resume.is_some() { "resume" } else { "first launch of this goal" });
     typed_launch(&task, &launch_text(prefs, root.as_deref(), "", &record, &args))
+}
+
+/// The advisor a worker gets when its Hive follows the human's Claude settings, as the settings
+/// sheet names it beside "Follow": the model, or "" for none (unset, or telemetry off without the
+/// advisor tool's switch, which leaves the human's own tabs without one too).
+#[tauri::command]
+pub async fn hive_followed_advisor(state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    let prefs = state.app_data.read().preferences.clone();
+    tokio::task::spawn_blocking(move || launch_advisor(launch_config_root(&prefs).as_deref()).model).await.map_err(|e| e.to_string())
 }
 
 /// The line a Hive tab's shell runs to start (or resume) its agent. The frontend types it as
@@ -1160,6 +1183,26 @@ pub(crate) mod tests {
         assert!(r.settings_path.starts_with(&s(&p.coordinator_task())));
         let text = serde_json::to_string(&r).unwrap();
         assert!(!text.to_lowercase().contains("token") && !text.contains("ANTHROPIC"), "never a credential");
+    }
+
+    #[test]
+    fn the_hive_decides_a_workers_advisor_and_follows_the_human_by_default() {
+        let t = scratch("hive-advisor");
+        fs::write(t.join("settings.json"), r#"{"advisorModel":"opus","env":{"DISABLE_TELEMETRY":"1"}}"#).unwrap();
+        let mut h = sample_hive();
+        let at = |h: &Hive| worker_advisor(h, Some(&t));
+        assert_eq!(at(&h), Advisor::default(), "follow: telemetry off without the switch gives the human's tabs none");
+        fs::write(t.join("settings.json"), r#"{"advisorModel":"opus"}"#).unwrap();
+        assert_eq!(at(&h), Advisor { model: "opus".into(), switch: false }, "follow: the human's own");
+        h.settings.worker_advisor = "follow".into();
+        assert_eq!(at(&h).model, "opus");
+        h.settings.worker_advisor = "off".into();
+        assert_eq!(at(&h), Advisor::default());
+        h.settings.worker_advisor = "fable".into();
+        assert_eq!(at(&h), Advisor { model: "fable".into(), switch: true }, "a chosen advisor carries the switch, so it can't silently do nothing");
+        h.settings.worker_advisor = "--evil".into();
+        assert_eq!(at(&h), Advisor::default(), "an unknown stored value is none");
+        let _ = fs::remove_dir_all(&t);
     }
 
     #[test]

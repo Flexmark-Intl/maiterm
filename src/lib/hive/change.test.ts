@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addHost, addSocket, formFor, MAX_CAP, toChange, validateForm } from './change';
+import { addHost, addSocket, advisorLabel, formFor, MAX_CAP, toChange, validateForm } from './change';
 import type { Hive } from '$lib/tauri/types';
 
 const hive = (over: Partial<Hive> = {}) =>
@@ -21,6 +21,15 @@ describe('Workers and access', () => {
       add_hosts: ['api.example.com'],
       remove_hosts: ['docs.example.com'],
     });
+  });
+
+  it('reads the workers advisor as follow by default and names what follow gives', () => {
+    expect(formFor(hive()).workerAdvisor).toBe('follow');
+    expect(formFor(hive({ settings: { worker_advisor: 'off' } })).workerAdvisor).toBe('off');
+    expect(toChange(hive(), { ...formFor(hive()), workerAdvisor: 'fable' })).toEqual({ worker_advisor: 'fable' });
+    expect(advisorLabel('follow', 'fable')).toBe('As in my Claude settings (Claude fable)');
+    expect(advisorLabel('follow', '')).toBe('As in my Claude settings (none)');
+    expect(advisorLabel('off', 'fable')).toBe('None');
   });
 
   it('reads the phone choice from the record and sends it as workers_on_phone', () => {

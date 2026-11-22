@@ -298,7 +298,7 @@ worker never reads, and no plugin is a detected tool.
 **The queen changes any setting with `hiveChangeSettings`** (Darryl, 2026-11-21: "queen should be
 able to set anything", after Hives stalled for hours on a worker that couldn't reach a website or a
 local Postgres). It covers everything Hive settings does: workers at once, models and efforts,
-folders' setup and land check, push after land, workers on the phone, the run queue, the budget,
+the workers' advisor, folders' setup and land check, push after land, workers on the phone, the run queue, the budget,
 generator hosts and output folders, tools, hosts, database sockets, the prompt timeout, the digest,
 the worker check (§7.4) and the checkpoints. Two checkpoints decide what applies at once and what
 goes on a card (`hive/change_plan.rs`):
@@ -1261,7 +1261,16 @@ queen's brief and every media worker's carry the **capability map** (docs/hive-m
 the reader's own MCP config names it), what it spends and how long its results last, and what
 isn't set up. A code role's brief keeps the "Tools this Hive has" line.
 
-**Workers consult the human's advisor** (Darryl, 2026-11-22). Those same setting sources hide the
+**The workers' advisor is a Hive setting** (Darryl, 2026-11-22): `HiveSettings::worker_advisor`,
+in Workers and access and `hiveChangeSettings` `worker_advisor` under the Settings checkpoint.
+It is "As in my Claude settings" by default (stored `""`), None (`off`), or a model (fable, opus,
+sonnet; haiku can't advise a worker). A chosen model gets `--advisor` and the tool's switch below
+whatever the human's settings say, so a choice never silently does nothing; the sheet shows what
+"follow" gives now (`hive_followed_advisor`). Workers and reviewers only: the queen is a normal tab
+on the human's settings (§7.1), and whether `--advisor` overrides `advisorModel`, or what value
+switches it off, is unmeasured. The default, following, works as below.
+
+**Following: workers consult the human's advisor.** Those same setting sources hide the
 human's `advisorModel`, so each worker and reviewer launch reads it from the `settings.json` the
 human's own tabs read (the launch root's, or `~/.claude`'s with no root) and passes `--advisor <model>`
 (`launch::launch_advisor`); none when it is unset. Claude skips an advisor less capable than the

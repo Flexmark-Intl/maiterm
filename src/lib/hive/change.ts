@@ -7,6 +7,17 @@ import { normalizeHost } from './budget';
 
 export const MODELS = ['opus', 'sonnet', 'haiku'] as const;
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+/** `change::ADVISORS`: the workers' advisor. "follow" is stored as "". */
+export const ADVISORS = ['follow', 'off', 'fable', 'opus', 'sonnet'] as const;
+
+/** The sheet's word for an advisor choice; `followed` is what "follow" gives now ("" for none). */
+export function advisorLabel(choice: string, followed: string | null): string {
+  if (choice === 'follow') {
+    if (followed === null) return 'As in my Claude settings';
+    return `As in my Claude settings (${followed ? `Claude ${followed}` : 'none'})`;
+  }
+  return choice === 'off' ? 'None' : `Claude ${choice}`;
+}
 /** `change::MAX_CAP` and `MAX_WORKER_HOSTS`. */
 export const MAX_CAP = 64;
 export const MAX_WORKER_HOSTS = 50;
@@ -23,6 +34,8 @@ export interface ChangeForm {
   coordinatorEffort: string;
   workerModel: string;
   workerEffort: string;
+  /** One of `ADVISORS`. */
+  workerAdvisor: string;
   hosts: string[];
   sockets: string[];
   pushAfterLand: boolean;
@@ -38,6 +51,7 @@ export function formFor(hive: Fields): ChangeForm {
     coordinatorEffort: hive.models.coordinator.effort,
     workerModel: hive.models.worker.model,
     workerEffort: hive.models.worker.effort,
+    workerAdvisor: hive.settings?.worker_advisor || 'follow',
     hosts: [...(hive.settings?.worker_hosts ?? [])],
     sockets: [...(hive.settings?.worker_sockets ?? [])],
     pushAfterLand: hive.push_after_land,
@@ -88,6 +102,7 @@ export function toChange(hive: Fields, f: ChangeForm): HiveSettingsChange | null
   if (f.coordinatorEffort !== was.coordinatorEffort) c.coordinator_effort = f.coordinatorEffort;
   if (f.workerModel !== was.workerModel) c.worker_model = f.workerModel;
   if (f.workerEffort !== was.workerEffort) c.worker_effort = f.workerEffort;
+  if (f.workerAdvisor !== was.workerAdvisor) c.worker_advisor = f.workerAdvisor;
   const added = f.hosts.filter((h) => !was.hosts.includes(h));
   const removed = was.hosts.filter((h) => !f.hosts.includes(h));
   if (added.length) c.add_hosts = added;

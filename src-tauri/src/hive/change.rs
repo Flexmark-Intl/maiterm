@@ -32,6 +32,26 @@ pub const KIND: &str = "hive_settings";
 pub const SETTINGS_CHANGED_EVENT: &str = "hive-settings-changed";
 pub const MODELS: [&str; 3] = ["opus", "sonnet", "haiku"];
 pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+/// The workers' advisor (`HiveSettings::worker_advisor`): `follow` (stored as `""`) is the
+/// human's own Claude settings, `off` none, else the model. Claude refuses an advisor less
+/// capable than the worker's model, so haiku isn't offered.
+pub const ADVISORS: [&str; 5] = [ADVISOR_FOLLOW, ADVISOR_OFF, "fable", "opus", "sonnet"];
+pub const ADVISOR_FOLLOW: &str = "follow";
+pub const ADVISOR_OFF: &str = "off";
+
+/// A stored `worker_advisor` as the change tool and the sheet name it.
+pub fn advisor_choice(stored: &str) -> &str {
+    if stored.is_empty() { ADVISOR_FOLLOW } else { stored }
+}
+
+/// How the sheet and a card describe an advisor choice.
+pub fn describe_advisor(choice: &str) -> String {
+    match choice {
+        ADVISOR_FOLLOW | "" => "as in your Claude settings".to_string(),
+        ADVISOR_OFF => "none".to_string(),
+        m => format!("Claude {m}"),
+    }
+}
 /// Workers at once, whoever sets it: past this, no machine runs them.
 pub const MAX_CAP: u32 = 64;
 pub const MAX_WORKER_HOSTS: usize = 50;
@@ -51,6 +71,9 @@ pub struct SettingsChange {
     pub worker_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_effort: Option<String>,
+    /// Under the Settings checkpoint: one of `ADVISORS`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_advisor: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub add_hosts: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -280,6 +303,12 @@ pub fn check_core(hive: &Hive, c: &SettingsChange, by: By, remote_hosts: &[Strin
     }
     (out.coordinator_model, out.coordinator_effort, out.worker_model, out.worker_effort) = (cm, ce, wm, we);
 
+    let was = advisor_choice(&hive.settings.worker_advisor).to_string();
+    if let Some(a) = pick(&c.worker_advisor, &ADVISORS, "The workers\u{2019} advisor")?.filter(|a| *a != was) {
+        lines.push(format!("Workers\u{2019} advisor (each from its next launch): {} \u{2192} {}", describe_advisor(&was), describe_advisor(&a)));
+        out.worker_advisor = Some(a);
+    }
+
     let have: Vec<String> = hive.settings.worker_hosts.iter().filter_map(|h| normalize_host(h).ok()).collect();
     let mut removed = Vec::new();
     for h in &c.remove_hosts {
@@ -468,6 +497,9 @@ pub fn apply_to(hive: &mut Hive, c: &SettingsChange) {
     };
     set(&mut hive.models.coordinator, &c.coordinator_model, &c.coordinator_effort);
     set(&mut hive.models.worker, &c.worker_model, &c.worker_effort);
+    if let Some(a) = &c.worker_advisor {
+        hive.settings.worker_advisor = if a == ADVISOR_FOLLOW { String::new() } else { a.clone() };
+    }
     let hosts = &mut hive.settings.worker_hosts;
     hosts.retain(|h| normalize_host(h).map_or(true, |n| !c.remove_hosts.contains(&n)));
     hosts.extend(c.add_hosts.iter().cloned());
@@ -549,6 +581,7 @@ async fn tell_coordinator<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, text
 fn needs_worker_relaunch(c: &SettingsChange) -> bool {
     c.worker_model.is_some()
         || c.worker_effort.is_some()
+        || c.worker_advisor.is_some()
         || !c.add_hosts.is_empty()
         || !c.remove_hosts.is_empty()
         // A running builder's shell keeps the sockets it launched with, a removed one included.
@@ -712,7 +745,7 @@ pub fn tool_definition(tab_id: &Value) -> Value {
              once (your human is told, and the decision log keeps it) and what goes on a card your human approves or denies \
              (maiTerm tells you which): ACCESS covers what workers may use (add_hosts/remove_hosts, add_sockets/remove_sockets, \
              add_tools/remove_tools, add_generator_hosts/remove_generator_hosts), SETTINGS covers the rest (cap, models and \
-             efforts, folders\u{2019} setup and land check, push_after_land, workers_on_phone, run_queue, budget_usd lowered, \
+             efforts, worker_advisor, folders\u{2019} setup and land check, push_after_land, workers_on_phone, run_queue, budget_usd lowered, \
              output folders, prompt_timeout_minutes, daily_digest, health_check_minutes). Your brief says who holds each. A call may mix them: what \
              its checkpoints hand you applies, the rest goes on one card. Raising budget_usd, switching push_after_land on and any \
              change of checkpoints always go on a card. When a worker is stuck on a host, a database or a tool, grant it here rather than waiting: \
@@ -733,6 +766,7 @@ pub fn tool_definition(tab_id: &Value) -> Value {
                 "coordinator_effort": { "type": "string", "enum": EFFORTS },
                 "worker_model": { "type": "string", "enum": MODELS },
                 "worker_effort": { "type": "string", "enum": EFFORTS },
+                "worker_advisor": { "type": "string", "enum": ADVISORS, "description": "The model workers and reviewers consult before substantive work: follow (your human's own Claude settings, the default), off, or a model. Each consultation costs; it can't be less capable than the workers' model" },
                 "add_hosts": { "type": "array", "items": { "type": "string" }, "description": "Bare host names (api.example.com, *.example.com) every builder may reach" },
                 "remove_hosts": { "type": "array", "items": { "type": "string" } },
                 "checkpoints": { "type": "object", "additionalProperties": { "type": "string", "enum": ["coordinator", "ask"] }, "description": "Checkpoint by key: always a card" },
@@ -1100,6 +1134,22 @@ mod tests {
         let mut done = hive();
         done.status = super::super::record::STATUS_DONE.into();
         assert!(check(&done, &c, By::Human, &[]).is_err());
+    }
+
+    #[test]
+    fn the_workers_advisor_is_one_of_the_choices_and_follow_is_stored_empty() {
+        let set = |a: &str| SettingsChange { worker_advisor: Some(a.into()), ..Default::default() };
+        assert!(check(&hive(), &set("haiku"), By::Coordinator, &[]).is_err(), "never less capable than a worker");
+        assert!(check(&hive(), &set("follow"), By::Human, &[]).is_err(), "a new Hive already follows: nothing changes");
+        let mut h = hive();
+        let ch = check(&h, &set("Fable"), By::Coordinator, &[]).unwrap();
+        assert!(ch.lines[0].contains("as in your Claude settings \u{2192} Claude fable"), "{:?}", ch.lines);
+        apply_to(&mut h, &ch.change);
+        assert_eq!(h.settings.worker_advisor, "fable");
+        assert!(needs_worker_relaunch(&ch.change));
+        let ch = check(&h, &set("follow"), By::Human, &[]).unwrap();
+        apply_to(&mut h, &ch.change);
+        assert_eq!(h.settings.worker_advisor, "", "follow is stored as the default");
     }
 
     /// §3.6: the queen sets a new project's commands as it grows. A land check follows the

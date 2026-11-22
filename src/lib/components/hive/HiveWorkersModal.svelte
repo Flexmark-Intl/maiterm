@@ -5,9 +5,9 @@
    *  who is a chat on the phone. Rust checks and saves it (`hive_set_settings`) and tells the
    *  coordinator. GallerySettingsModal's vocabulary and rAF focus. */
   import type { Hive } from '$lib/tauri/types';
-  import { hiveSetSettings } from '$lib/tauri/commands';
+  import { hiveFollowedAdvisor, hiveSetSettings } from '$lib/tauri/commands';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
-  import { addHost as addTo, addSocket as addSocketTo, EFFORTS, formFor, MAX_CAP, MODELS, toChange, validateForm, type ChangeForm, type PhoneChoice } from '$lib/hive/change';
+  import { addHost as addTo, addSocket as addSocketTo, ADVISORS, advisorLabel, EFFORTS, formFor, MAX_CAP, MODELS, toChange, validateForm, type ChangeForm, type PhoneChoice } from '$lib/hive/change';
   import { modLabel } from '$lib/utils/platform';
   import { error as logError } from '@tauri-apps/plugin-log';
 
@@ -26,6 +26,13 @@
   let coordinatorEffort = $state(seed.coordinatorEffort);
   let workerModel = $state(seed.workerModel);
   let workerEffort = $state(seed.workerEffort);
+  let workerAdvisor = $state(seed.workerAdvisor);
+  /** What "follow" gives workers now: null until read, "" for none. */
+  let followed = $state<string | null>(null);
+  hiveFollowedAdvisor().then(
+    (m) => (followed = m),
+    (e) => logError(`hive: followed advisor not read: ${e}`),
+  );
   let hosts = $state<string[]>(seed.hosts);
   let sockets = $state<string[]>(seed.sockets);
   let pushAfterLand = $state(seed.pushAfterLand);
@@ -43,7 +50,7 @@
     return () => cancelAnimationFrame(id);
   });
 
-  const form = $derived<ChangeForm>({ cap: Number(cap), coordinatorModel, coordinatorEffort, workerModel, workerEffort, hosts, sockets, pushAfterLand, phone });
+  const form = $derived<ChangeForm>({ cap: Number(cap), coordinatorModel, coordinatorEffort, workerModel, workerEffort, workerAdvisor, hosts, sockets, pushAfterLand, phone });
   const problem = $derived(validateForm(form));
   const change = $derived(problem ? null : toChange(hive, form));
   const canSave = $derived(!saving && !!change);
@@ -133,6 +140,14 @@
         </div>
         <span class="note">A worker the queen started with its own model keeps it.</span>
       </div>
+
+      <label class="field">
+        <span class="label">Workers' advisor <span class="opt">a stronger model they consult before substantive work; reviewers too</span></span>
+        <select aria-label="Workers' advisor" bind:value={workerAdvisor}>
+          {#each ADVISORS as a (a)}<option value={a}>{advisorLabel(a, followed)}</option>{/each}
+        </select>
+        <span class="note">Each consultation costs. Claude skips an advisor less capable than the workers' model. The queen uses your Claude settings, like any tab.</span>
+      </label>
 
       <div class="field">
         <span class="label">Hosts workers may reach <span class="opt">besides the package registries; reviewers never get them</span></span>

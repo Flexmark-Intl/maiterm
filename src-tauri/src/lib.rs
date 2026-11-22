@@ -1255,6 +1255,7 @@ pub fn run() {
             share::commands::share_import_build,
             share::open::take_pending_share_opens,
             hive::launch::hive_launch_command,
+            hive::launch::hive_followed_advisor,
             hive::create::hive_preflight,
             hive::create::hive_detect_folder,
             hive::create::hive_trust_repo,

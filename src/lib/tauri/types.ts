@@ -630,6 +630,8 @@ export interface HiveSettings {
   worker_hosts?: string[];
   /** Local database sockets every builder's shell and jobs may connect to; the human's alone (§6.7). */
   worker_sockets?: string[];
+  /** The workers' and reviewers' advisor: "" follows the human's Claude settings, "off" is none, else a model. */
+  worker_advisor?: string;
   [section: string]: unknown;
 }
 
@@ -961,6 +963,8 @@ export interface HiveSettingsChange {
   coordinator_effort?: string;
   worker_model?: string;
   worker_effort?: string;
+  /** One of `ADVISORS` (hive/change.ts): follow, off, or a model. */
+  worker_advisor?: string;
   add_hosts?: string[];
   remove_hosts?: string[];
   push_after_land?: boolean;

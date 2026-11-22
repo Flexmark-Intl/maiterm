@@ -3314,6 +3314,11 @@ export async function hiveSetSettings(workspaceId: string, change: HiveSettingsC
   return invoke('hive_set_settings', { workspaceId, change });
 }
 
+/** The advisor a Hive that follows the human's Claude settings gives its workers now: the model, or "" for none. */
+export async function hiveFollowedAdvisor(): Promise<string> {
+  return invoke('hive_followed_advisor');
+}
+
 /** Hive settings → Tools (docs/hive.md §3.4): what `tools` would add and remove, and the generator
  *  hosts the added ones need. Nothing is saved. */
 export async function hiveToolsChangePreview(workspaceId: string, tools: string[]): Promise<HiveToolsPreview> {

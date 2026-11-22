@@ -248,6 +248,10 @@ pub struct HiveSettings {
     /// Local database sockets every builder's shell and jobs may connect to (§6.7): a Postgres,
     /// MySQL or Redis Unix socket, by path. The human's alone; reviewers never get them.
     pub worker_sockets: Vec<String>,
+    /// The workers' and reviewers' advisor (Darryl, 2026-11-22): `""` follows the human's own
+    /// Claude settings, as their tabs get it (`launch::launch_advisor`); `"off"` is none; else a
+    /// model from `change::ADVISORS`. The queen is a normal tab and follows the human's settings.
+    pub worker_advisor: String,
     /// Set once the integration mode's Landing checkpoint stopped being forced to Ask me
     /// (2026-11-18, §8.3): until then an `ask` there was maiTerm's, not the human's, and the load
     /// migration hands it to the queen once (`migrate_integration_landing`). Set at Create since.
