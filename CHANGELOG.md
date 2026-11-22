@@ -1,5 +1,10 @@
 # Changelog
 
+## v3.17.1
+
+- **Pushing stays yours.** The Queen can no longer switch on push after land, even when you've handed her the Settings checkpoint. Turning it on always comes to you as a card. Switching it off still follows the Settings checkpoint.
+- **Ignore artifact comments respects your own setting.** If you had already turned `CLAUDE_CODE_ARTIFACT_COMMENTS` or `CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT` on yourself, a first launch of this version leaves it alone instead of overwriting it. Values like `true`, `yes` and `on` are read the way Claude Code reads them. If you're coming from 3.17.0, that launch has already set them off: switch the rule off under Preferences → Deshittification to get comments back.
+
 ## v3.17.0
 
 A Hive's Queen can now get her workers what they need, and she notices when one is stuck.
