@@ -1,0 +1,110 @@
+# Agent Defaults (DESIGN, 2026-11-22, nothing built)
+
+One Preferences section, **Agent Defaults**, with a part per runtime (Claude, Codex,
+Antigravity), that sets the values every new session of that agent starts with: which model,
+how hard it thinks, which advisor, how long transcripts are kept. Darryl wanted Fable as
+Claude's advisor in every session without typing `/advisor` each time (2026-11-21); the rest of
+the first version was picked from a shortlist on 2026-11-22 (§3).
+
+It is the sister of Deshittification, not part of it. Deshittify switches anti-features OFF
+(a toggle per rule); Agent Defaults picks VALUES (a dropdown or a number per setting). They
+share the mechanics: §2.
+
+## 1. What it is not
+
+- **Not per tab or per session.** These are the agent's own user-level defaults, so they reach
+  sessions maiTerm didn't start too. A session's own `/model`, `/effort`, `/advisor` or launch
+  flag still wins for that session (flags and in-session choices sit above user settings in
+  every runtime).
+- **Not maiTerm state.** No `Preferences` field, no `AppData` field, nothing in
+  `preference_meta`, no MCP tool. An agent that wants a different model asks its human.
+- **Not Hive's launch settings.** The Hive launch builder (`hive_launch_command`) passes its own
+  model and effort as flags, which override these. Workers do inherit what the builder leaves
+  unset: the advisor included (§6).
+
+## 2. Mechanics (borrowed from Deshittify, `commands/deshittify.rs`)
+
+- **Disk is the state.** The section reads each agent's file and shows what is there. A value
+  the user (or the agent's own `/config`) changes by hand reads back as changed: no drift, no
+  re-assert loop.
+- **"Agent's default"** is a choice in every control, and means the key is ABSENT: maiTerm
+  removes it rather than writing the runtime's current default, so a later change of default
+  upstream reaches the user.
+- **maiTerm touches only the keys this section offers.** Everything else in the file is
+  preserved byte-for-byte where the format allows (TOML via `toml_edit`, as
+  `mcp_proxy/entries.rs` already does).
+- **An unreadable file blocks its runtime's part** with the parse error shown, and is never
+  overwritten (the rule `read_settings_at` states and why).
+- **Writes go through `util::json_file`** (`write_lock` + change-detecting replace), like
+  `claude_code/lockfile.rs` and `claude_code/agy.rs`: live agents and maiTerm's own hook
+  installer write the same files. (Deshittify's own `write_claude_settings` predates that helper
+  and does not use it: worth moving over separately.)
+- **An isolated instance makes no writes** (`instance::global_write_refusal`).
+- **Managed accounts need nothing extra.** Every account root symlinks `settings.json` and
+  `config.toml` back to the shared file (`accounts/mod.rs`), so one write reaches every account.
+
+### 2.1 SSH hosts
+
+The values travel to a bridged host the way Deshittify's do: a python3 merge appended to the
+bridge setup script (`render_remote_setup_script`, run from `sshMcpBridge.svelte.ts`), and the
+existing Antigravity merge in `commands/ssh_tunnel.rs` for its file. **This machine is the
+source of truth in both directions**, as in Deshittify: a value set here is set there, and
+"Agent's default" here removes the key there. The script rewrites a remote file only when
+something changed, and never one it can't parse.
+
+## 3. The settings (first version)
+
+Every key below was checked against the installed binary or its changelog (Claude Code
+2.1.330, Codex 0.166.0, Antigravity 1.5.14). **Re-check before building**: these are fast-moving
+CLIs, and a wrong key is silently ignored.
+
+### 3.1 Claude — `~/.claude/settings.json`
+
+| Setting | Key | Notes |
+|---|---|---|
+| Advisor | `advisorModel` | Off / opus / sonnet / fable. Claude Code refuses an advisor less capable than the main model, so the control warns when the pair won't activate. Some advisor models bill to usage credits: say so beside the control. Takes effect on new sessions, or after `/clear` / `/compact` in a running one. |
+| Default model | `model` | The public aliases (opus, sonnet, fable, haiku) plus "Agent's default". |
+| Effort | `modelSettings.<model id>.effortLevel` | Effort is stored PER MODEL (Darryl's file: Opus 5.5 medium, Opus 5 high, Sonnet 5 medium). The control edits the entry for the default model; other models' entries are shown read-only and left alone. **Verify** how an alias maps to the `modelSettings` key (`claude-opus-5-5`), and what the top-level `effortLevel` key does beside it, before building. |
+| Keep transcripts | `cleanupPeriodDays` | Claude deletes transcripts after **30 days** by default, and resume, maiLink and the Loom read them. maiTerm's default is **500 days** (§4). Minimum 1. |
+
+### 3.2 Codex — `~/.codex/config.toml`
+
+| Setting | Key | Notes |
+|---|---|---|
+| Default model | `model` | Free text with suggestions (Codex's model names change too often for a fixed list). |
+| Reasoning effort | `model_reasoning_effort` | Codex's levels. |
+| Approvals reviewer | `approvals_reviewer` | e.g. `auto_review` (Darryl's value). **Verify** the allowed values. |
+
+### 3.3 Antigravity — `~/.gemini/antigravity-cli/settings.json`
+
+| Setting | Key | Notes |
+|---|---|---|
+| Agent mode | `agentMode` | `""` (Default), `accept-edits`, `plan`, `auto`. Note `""` is itself a saved choice ("Default"), distinct from absent ("Auto where available"). |
+| Show thinking | `showThinking` | bool, off by default. |
+| Queued messages | `queuedMessages` | `queue` / `send-immediately`. |
+| Model, effort | **unknown keys** | `agy` has `--model` and `--effort` flags; find the settings keys (set them in `/config` and read the file back) before offering these. |
+
+## 4. One default maiTerm applies itself
+
+**Keep transcripts: 500 days**, applied once per user account like Deshittify's default-on
+rules (`seed_default_rules`, marker file `~/.maiterm/deshittify-seeded` or a sibling of it):
+only when `cleanupPeriodDays` is ABSENT. A value the user already set (Darryl's 548) is a choice
+and is left alone; once seeded, a change in either direction sticks. Nothing else in this
+section is applied without the human choosing it.
+
+## 5. UI
+
+A Preferences section beside Deshittification: three collapsible parts headed Claude, Codex,
+Antigravity. A part whose CLI isn't installed is shown collapsed with "not installed"; its
+values can still be set (they wait in the file). Each control shows the on-disk value, with
+"Agent's default" for absent. No section-level switch: these are values, not rules. A line
+under the section says changes apply to new sessions and reach bridged SSH hosts on their next
+connect.
+
+## 6. Open questions to settle while building
+
+1. The `modelSettings` alias→id mapping and the top-level `effortLevel` (§3.1).
+2. Antigravity's model and effort keys (§3.3).
+3. Hive workers inherit the advisor from `settings.json` (they run under the human's settings).
+   Every worker consulting Fable multiplies cost and time: should the launch builder pass an
+   explicit advisor choice for workers? Ask "Hive Feature" what the builder sets today.
