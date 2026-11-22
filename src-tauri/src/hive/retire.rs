@@ -498,8 +498,10 @@ pub(crate) async fn retire_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
 
 // ── A retired worker's chat ──
 
-/// The Claude `projects/` folders a recorded transcript may be read from: the home's and each
-/// managed account root's, as they really are (an account's is a link to the home's).
+/// The Claude `projects/` folders a recorded transcript may be read from: the home's, the user's
+/// own `CLAUDE_CONFIG_DIR`'s (where agents launch with no managed account,
+/// `launch::config_root_for`) and each managed account root's, as they really are (an account's
+/// is a link to the home's).
 pub(crate) fn transcript_roots() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     let mut add = |p: PathBuf| {
@@ -512,6 +514,9 @@ pub(crate) fn transcript_roots() -> Vec<PathBuf> {
     };
     if let Some(home) = dirs::home_dir() {
         add(home.join(".claude").join("projects"));
+    }
+    if let Some(own) = crate::accounts::user_claude_root() {
+        add(own.join("projects"));
     }
     if let Some(dir) = crate::accounts::accounts_dir().map(|d| d.join("claude")) {
         for e in fs::read_dir(dir).into_iter().flatten().flatten() {
