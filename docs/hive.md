@@ -76,8 +76,8 @@ each was made, in the spirit of Higgsfield's library.
 6. **Workers never land their own work; the coordinator does, through maiTerm.** A worker
    reports. The coordinator reviews it and lands it: by default straight into each repo's base
    branch (main), with no card (§8). maiTerm carries out the merge, never the agent's own git,
-   so it can refuse a merge that would touch anyone's uncommitted work. A land that changes
-   agent or execution config always goes to the human (§8.1). Choosing, when the Hive is
+   so it can refuse a merge that would touch anyone's uncommitted work. While Landing is Ask me,
+   a land that changes agent or execution config names the files to the human (§8.1). Choosing, when the Hive is
    created, a branch of its own instead lands each worker into `hive/<slug>`, the queen's too
    unless Landing is Ask me, and Base is the human's (§8.3).
 7. **Code lands in git; everything else lands in the gallery.** A file a person would look at
@@ -291,16 +291,41 @@ as its hosts do. The change is a line in `logs/settings.jsonl`, and the coordina
 added and removed. No change hands a worker a skill or a plugin: skills load from user settings a
 worker never reads, and no plugin is a detected tool.
 
-**The coordinator asks with `hiveChangeSettings`.** Under the **Settings** checkpoint (§7.4), whose
-default is **Ask me** (the only checkpoint that starts there), that files a `hive_settings` agent
-request: a card only the human approves (`docs/agent-requests.md`), naming each change in maiTerm's
-words and the coordinator's reason as its own. On approval Rust applies the stored change,
-checked again against the record as it is then, and tells the coordinator; a denial or a lapse is
-told too. Each card stands alone (at most five waiting, like any tab's). Cards live in memory: one pending across a
-maiTerm restart is gone, and the coordinator asks again. With the checkpoint handed to the
-coordinator, the change applies at once, the human gets a notice (`hive-settings-changed`), and it
-is never earnable (§7.6): only the human hands it over. Every change, by anyone, is a line in
-`logs/settings.jsonl`, and the human's own changes are told to the coordinator.
+**The queen changes any setting with `hiveChangeSettings`** (Darryl, 2026-11-21: "queen should be
+able to set anything", after Hives stalled for hours on a worker that couldn't reach a website or a
+local Postgres). It covers everything Hive settings does: workers at once, models and efforts,
+folders' setup and land check, push after land, workers on the phone, the run queue, the budget,
+generator hosts and output folders, tools, hosts, database sockets, the prompt timeout, the digest,
+the worker check (§7.4) and the checkpoints. Two checkpoints decide what applies at once and what
+goes on a card (`hive/change_plan.rs`):
+
+- **Access** (default: the queen): what workers may use, which is hosts, database sockets, tools and
+  generator hosts. A grant applies at once, answers each sandbox blocker it settles, and is logged.
+- **Settings** (default: Ask me): everything else.
+- **Always a card**, whoever holds either: a change of a checkpoint (the human's approval switch
+  itself) and a budget raise (money). Lowering the budget follows Settings.
+
+A call may mix them. The parts the checkpoints hand her apply, and the rest goes on one
+`hive_settings` card only the human approves (`docs/agent-requests.md`), naming each change in
+maiTerm's words, with her reason quoted. Each half is first reduced to what actually differs from
+the record, so a card stores only what it shows and nothing applies unseen on a later approval.
+Every check that needs the disk, a tool detection or a DNS lookup runs first. Then one pure function
+(`apply_all`) works the whole change out on a copy of the record and checks every limit on the
+combined result, and that copy is saved under one write lock. A change therefore applies whole or
+not at all. Only the budget is a second step, through Budget and generation's own write, since a
+raise there also closes the budget row.
+
+On approval Rust applies the stored change, checked again against the record as it is then, and
+tells the coordinator; a denial or a lapse is told too. An approved checkpoint change hands any
+prompt she holds under a checkpoint that is now Ask me to the human, as Hive settings → Autonomy
+does. Each card stands alone (at most five waiting, like any tab's). Cards live in memory: one
+pending across a maiTerm restart is gone, and the coordinator asks again. What applies at once
+gets a notice to the human (`hive-settings-changed`) and a decision-log line as hers. Neither
+checkpoint is earnable (§7.6): only the human hands it over. Every change, by anyone, is a line in
+`logs/settings.jsonl`, and the human's own changes are told to the coordinator. The limits Rust
+holds for anyone hold for her: never a repo remote's host, home or a private address (and a name
+she grants must resolve now), a socket not named like a database's, or a tool not detected on this
+Mac.
 
 **No host may answer this computer or its network.** Besides `normalize_host`'s refusals (IP
 literals, `localhost`, `.local`), well-known public names for 127.0.0.1 (`lvh.me`, `*.nip.io`,
@@ -1792,7 +1817,7 @@ exists.
 | Create a Hive; add folders | The human, by the sheet / settings. No tool can; an agent outside a Hive may only offer a filled-in sheet (`proposeHive`, §3.7) |
 | Spawn a worker within the cap | None; the Hive is the envelope (decision §14.1) |
 | Raise the cap | The human, in Hive settings |
-| Land a worker into Base (default mode) | None: the coordinator calls `hiveLand`, and maiTerm merges behind its guards (§8). A land that changes agent or execution config is the human's (§8.1) |
+| Land a worker into Base (default mode) | None: the coordinator calls `hiveLand`, and maiTerm merges behind its guards (§8). Handed Landing, that includes one changing agent or execution config (§8.1) |
 | Land a worker into the Hive's branch (integration mode) | None by default: the coordinator calls `hiveLand` (§8.3). With Landing = Ask me, the human, on a land card. Landing that branch into Base is the human's, on its own card (`hiveLandBranch`, §8.3) |
 | Deliver assets into a Hive plain folder | None for new files, within the limits below; overwriting anything, and any other destination, is the human's (Export…, §10.6) |
 | Push | **No agent.** Only maiTerm's land path pushes, and only when the Hive's Push after land setting is on (default off), never forced (§8.5) |
@@ -1872,6 +1897,17 @@ where a checkpoint says so. The checkpoints are Hive settings, and each one is s
 | Landing | Coordinator | Gates who calls `hiveLand` within the landing mode, which is fixed at creation (§3). In the integration mode it gates lands into the Hive's branch, and is the queen's by default there too (Darryl, 2026-11-18, §8.3) |
 | Picking finals in the gallery | Coordinator | Creative Hives often set this to Ask me |
 | Adding a dependency, changing a public interface | Coordinator | Listed so a Hive can tighten them |
+| What workers may use: hosts, database sockets, tools | Coordinator | `hiveChangeSettings`'s grants (§3.4), so a worker that needs a website or a local database isn't left waiting for the human |
+| Changing any other Hive setting | Ask me | `hiveChangeSettings` (§3.4); handed over, she sets anything but a checkpoint or a budget raise |
+
+**The worker check** (Darryl, 2026-11-21, `hive/health.rs`). Every
+`settings.autonomy.health_check_minutes` (15 by default, 0 for never; Autonomy, or the queen's
+`hiveChangeSettings`), each active Hive's queen is shown the workers that may be stalled, as one
+⟦HIVE CHECK⟧ notice with what to do about each. That means a worker failed or stopped, a prompt on
+its screen, a blocker on its task, or nothing from it for the whole interval, a reported worker
+nobody landed included. Nothing is sent while every unfinished worker worked within the interval,
+so a healthy Hive spends no turn. It is the net under the event-driven checks (`quiet.rs`), which
+kept missing stalls. Memory only: after a restart the first check comes an interval later.
 
 Spending past the budget and pushing are not checkpoints: spending is never delegable (below),
 and no agent pushes (§7.3).
@@ -1879,13 +1915,12 @@ and no agent pushes (§7.3).
 What never moves to the coordinator, whatever the settings (Rust refusals by tab identity, not
 words in a brief):
 
-- creating a Hive, raising the budget or the cap (§3.4; the coordinator may lower the cap), and
+- creating a Hive, raising the budget, changing a checkpoint (§3.4: always a card), and
   **spending past the budget**;
 - Claude's workspace-trust dialog (`trust_dialog_open`) and the plan dialog, whose rows are mode
   changes;
 - any prompt option that persists a setting or a rule, or changes a mode (below);
-- pushing (§7.3);
-- a land, or an undo, whose diff changes agent or execution config (§8.1);
+- pushing (§7.3): the queen's own `git push`. Push after land is a setting (§3.4);
 - delivering into anything but a Hive plain folder, and overwriting anything (§7.3, §10.6).
 
 Overwriting outside the Hive's folders can't be read off a Bash prompt, so it isn't claimed as
@@ -2295,8 +2330,8 @@ since its results are already in the gallery.
 
 ### 8.1 Default: land to Base (decided 2026-10-23)
 
-maiTerm lands the worker into Base (main) with no card (unless its diff changes agent or
-execution config, below), in two git steps per repo. Neither one
+maiTerm lands the worker into Base (main) with no card unless Landing is Ask me (§7.4; and see
+agent or execution config, below), in two git steps per repo. Neither one
 can touch anyone's uncommitted work (both behaviours checked in a scratch repo, 2026-10-23), and
 neither runs in the worker's live worktree:
 
@@ -2336,11 +2371,14 @@ branches from it. Files in the main checkout change under agents working there, 
 any one of them commits. The land log (§8.6) records the reviewed sha, the tested commit, and
 Base before and after.
 
-**A land that changes agent or execution config goes to the human, always.** A worker's commits
-can add hooks or scripts that run on the human's machine, outside any sandbox, the next time
-anyone opens a session, commits or builds there. So Rust checks the diff from Base to the tested
-commit, and if it touches any of these, the land files an **Agent request** card naming the
-files, whatever the Landing checkpoint says (§7.4 lists it as never delegated):
+**A land that changes agent or execution config goes to the human while Landing is Ask me.** A
+worker's commits can add hooks or scripts that run on the human's machine, outside any sandbox, the
+next time anyone opens a session, commits or builds there. So Rust checks the diff from Base to the
+tested commit for any of these. Under Ask me the land's card names the files, and a change that
+differs from what the human approved (Base moved) files a second **Agent request** card. Handed
+Landing, the queen decides these lands too (Darryl, 2026-11-21: "if i have set that the queen can
+decide lands, i mean she can decide"), and her undo of one goes on without a card. The hiveLand tool
+tells her to look hard at such a diff; an Undo's preview names the files. The paths:
 
 - `.claude/**`, `.mcp.json`, `CLAUDE.md` and `AGENTS.md` at any depth;
 - `.husky/**`, `.githooks/**`, CI definitions (`.github/workflows/**`, `.gitlab-ci.yml`);
@@ -2348,8 +2386,9 @@ files, whatever the Landing checkpoint says (§7.4 lists it as never delegated):
   counts as changed), `.envrc`, `build.rs`;
 - any path the human adds to the list in Hive settings.
 
-On approval the land proceeds from the same pinned sha. An Undo whose revert touches these paths
-is checked the same way (§8.6). The list errs wide on purpose: a false positive costs one click.
+On approval the land proceeds from the same pinned sha. The queen's Undo whose revert touches these
+paths is checked the same way under Ask me; the human's own Undo goes on when its confirmation
+showed exactly these files (§8.6). The list errs wide on purpose: a false positive costs one click.
 
 **Batched lands** (§6.8). Workers already passed to `hiveLand` in one repo can land as a batch:
 maiTerm builds an integration chain (Base, then each member's pinned sha merged `--no-ff`) in a
@@ -3778,9 +3817,9 @@ Decided 2026-10-23:
 
 **Changed by the 2026-10-23 review.** These override any earlier wording above or elsewhere:
 
-- **A land that touches agent or execution config always goes to the human**, whatever the
-  checkpoint (hooks, `.claude/`, `.mcp.json`, CLAUDE.md/AGENTS.md, git hooks, CI, package
-  scripts, `.envrc`, `build.rs`), undo reverts included (§8.1, §7.4).
+- **A land that touches agent or execution config goes to the human while Landing is Ask me**
+  (hooks, `.claude/`, `.mcp.json`, CLAUDE.md/AGENTS.md, git hooks, CI, package scripts, `.envrc`,
+  `build.rs`), undo reverts included; handed Landing, the queen decides them (2026-11-21, §8.1).
 - **Spending past the budget is never delegable**: not a checkpoint, never earned (§7.4, §7.6).
 - **Workers and reviewers are sandboxed and tool-restricted** (§6.7, §6.8); the brief
   explains, the launch enforces. *Superseded for the coordinator by the 2026-10-26 decision
