@@ -1,6 +1,6 @@
 //! Changing a Hive's settings after Create (docs/hive.md §3.4): workers at once, the coordinator's
-//! and the workers' model and effort, the hosts every builder's sandbox may reach, and (the human
-//! only) push after land. The human changes them in Hive settings (`hive_set_settings`). The
+//! and the workers' model and effort, the hosts every builder's sandbox may reach, push after land
+//! (switching it on is always the human's card) and the rest. The human changes them in Hive settings (`hive_set_settings`). The
 //! coordinator asks with `hiveChangeSettings`: under the Settings checkpoint's Ask me (the
 //! default) that files a card only the human approves (an agent request of kind `hive_settings`,
 //! carried out here from its stored arguments); handed to the coordinator, it applies at once and

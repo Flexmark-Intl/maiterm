@@ -457,8 +457,11 @@ pub(crate) async fn change_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         log::info!("hive {}: settings change {id} waits for the human: {}", hive.id, card.lines.join("; "));
         out.insert("request_id".into(), json!(id));
         out.insert("awaiting_approval".into(), json!(card.lines));
-        let why = if !card.change.checkpoints.is_empty() || card.change.budget_cents.is_some_and(|b| b > hive.budget_cents) {
-            "A checkpoint change and a budget raise are always your human\u{2019}s."
+        let always = !card.change.checkpoints.is_empty()
+            || card.change.budget_cents.is_some_and(|b| b > hive.budget_cents)
+            || (card.change.push_after_land == Some(true) && !hive.push_after_land);
+        let why = if always {
+            "A checkpoint change, a budget raise and switching push after land on are always your human\u{2019}s."
         } else {
             "Your human holds that checkpoint."
         };

@@ -421,7 +421,7 @@ fn checkpoint_lines(hive: &Hive) -> String {
          so. A request no one can grant (a sandbox or Claude setting maiTerm pins) is a refusal with new instructions.\n\nNever \
          yours, whatever the checkpoints: Claude\u{2019}s workspace-trust and plan dialogs; any row that saves a setting or a \
          rule, or changes a mode; the sandbox and reads outside the working folder; spending past the budget, and raising the \
-         budget or changing a checkpoint (hiveChangeSettings puts those on a card); pushing yourself; while Landing is Ask me, a land or undo whose diff changes agent or execution config. maiTerm sends those to your \
+         budget, changing a checkpoint or switching push_after_land on (hiveChangeSettings puts those on a card); pushing yourself; while Landing is Ask me, a land or undo whose diff changes agent or execution config. maiTerm sends those to your \
          human and tells you.\n"
     ));
     if super::checkpoints::asks(hive, super::checkpoints::PLAN) {

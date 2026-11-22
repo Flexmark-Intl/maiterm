@@ -194,7 +194,7 @@
   <div class="row">
     <div class="copy">
       <label for="hive-def-settings" class="label">Other settings changes</label>
-      <p class="hint">Who approves the queen changing anything else: workers at once, models, setup, push after land and the rest. Raising the budget and changing these two always come to you.</p>
+      <p class="hint">Who approves the queen changing anything else: workers at once, models, setup, push after land and the rest. Raising the budget, switching push after land on and changing these two always come to you.</p>
     </div>
     <select id="hive-def-settings" value={(d.settings_approval || 'ask')} onchange={(e) => void save({ settings_approval: e.currentTarget.value })}>
       <option value="ask">Ask me</option>

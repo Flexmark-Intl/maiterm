@@ -270,12 +270,12 @@ Slots readout):
 
 | Setting | Who may change it | Takes effect |
 |---|---|---|
-| Workers at once (`cap`, 1–64) | The human; the coordinator may lower it, and a raise is always a card the human approves | At once. Lowering it stops nobody: no new worker starts while more are running |
+| Workers at once (`cap`, 1–64) | Both (the coordinator under the Settings checkpoint) | At once. Lowering it stops nobody: no new worker starts while more are running |
 | Coordinator and worker model and effort | Both | Each agent's next launch (the launch builder rewrites its settings, §11.1). A worker spawned with its own model keeps it |
 | Hosts every builder may reach (`settings.worker_hosts`) | Both | Each worker's next launch. Added to `allowedDomains` after the registries (`settings::worker_domains`); never a repo remote's host; never given to reviewers |
-| Push after land | The human only | The next land |
-| Workers on the phone (`settings.workers_on_phone`) | The human only | Workers started from now on |
-| Tools (`Hive.tools`), and the generator hosts and output folders the added tools need | The human only, in Hive settings → Tools (`hive/tool_change.rs`); never an agent tool. The coordinator may *ask* for a missing media capability (`hiveRequestCapability`, a `tool_setup` card, docs/hive-media.md §8): the human's approval sets it up, and once it is Ready its tools join through the same write, with only the hosts the card named (and the output folder of a local server it said joins) | Each worker's next launch, and the coordinator's brief at its next launch. The launch builder reads the record fresh every time, so nothing caches it. A running worker keeps the tools it started with |
+| Push after land | Both: the coordinator under the Settings checkpoint, except that switching it on is always a card | The next land |
+| Workers on the phone (`settings.workers_on_phone`) | Both (the coordinator under the Settings checkpoint) | Workers started from now on |
+| Tools (`Hive.tools`), and the generator hosts and output folders the added tools need | Both: the human in Hive settings → Tools (`hive/tool_change.rs`), the coordinator with `hiveChangeSettings` `add_tools`/`remove_tools` under the Access checkpoint (`change_plan.rs`). The coordinator may *ask* for a missing media capability (`hiveRequestCapability`, a `tool_setup` card, docs/hive-media.md §8): the human's approval sets it up, and once it is Ready its tools join through the same write, with only the hosts the card named (and the output folder of a local server it said joins) | Each worker's next launch, and the coordinator's brief at its next launch. The launch builder reads the record fresh every time, so nothing caches it. A running worker keeps the tools it started with |
 
 **Tools change in Hive settings → Tools** (docs/hive-media.md §7), a window command
 (`hive_set_tools`, with `hive_tools_change_preview` before Save). Every id is checked against a fresh
