@@ -1370,6 +1370,11 @@ async fn handle_backend_tool(tool_name: &str, arguments: &Value, state: &Arc<App
         // detached and awaited (`detached_hive_tool`): an agent whose tool call times out drops
         // this request's future, and a land, undo or retire cut off between two of its steps was
         // left holding its lock with nothing driving it (2026-11-21, maiBlog L-0ebc7d3d).
+        // Except hiveRun: its inline wait TAKES a run's result for its own answer (run_tool,
+        // serve::ended_answer), so it must stay cancellable with the request; cancelled, the
+        // result stays queued and reaches the worker as ⟦HIVE RUN⟧ (the review). It saves in
+        // one step, so it can't be cut off between two.
+        "hiveRun" => Some(crate::hive::tools::handle(tool_name, arguments, state, app_handle).await),
         t if t.starts_with("hive") => Some(detached_hive_tool(t, arguments, state, app_handle, false).await),
         // The Hive's gallery (docs/hive.md §10.3), likewise every `gallery*` name.
         t if t.starts_with("gallery") => Some(detached_hive_tool(t, arguments, state, app_handle, true).await),
