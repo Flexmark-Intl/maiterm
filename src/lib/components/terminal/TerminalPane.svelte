@@ -245,6 +245,16 @@
   // Commands that move the viewport or the selection no longer return pixels —
   // the frame arrives on term-frame-{ptyId} like every other one, so xterm sees
   // exactly one ordered stream of deltas. The response carries only metadata.
+  // While a full-screen app (alternate screen: Claude's fullscreen mode, vim) is up,
+  // the selection mousedown handler passes clicks to xterm, so the highlight on
+  // screen is xterm's own selection, not Rust's. Copy has to read that one too, or
+  // Copy is greyed out and Cmd/Ctrl+C sends ^C over a visible selection.
+  async function copyXtermSelection() {
+    const text = terminal.getSelection();
+    if (text) await clipboardWriteText(text);
+    terminal.clearSelection();
+  }
+
   function applyFrame(meta: FrameMeta) {
     hasRustSelection = meta.has_selection;
     updateScrollbar(meta.display_offset, meta.total_lines);
@@ -1100,6 +1110,8 @@
             if (text) clipboardWriteText(text).catch(e => logError(String(e)));
             clearSelection(ptyId).then(applyFrame).catch(() => {});
           }).catch(e => logError(String(e)));
+        } else if (terminal.hasSelection()) {
+          copyXtermSelection().catch(e => logError(String(e)));
         } else {
           writeTerminal(ptyId, [0x03]).catch(e => logError(String(e)));
         }
@@ -1866,8 +1878,12 @@
       {
         label: 'Copy',
         shortcut: `${modSymbol}C`,
-        disabled: !hasRustSelection,
+        disabled: !hasRustSelection && !terminal.hasSelection(),
         action: async () => {
+          if (!hasRustSelection) {
+            await copyXtermSelection();
+            return;
+          }
           const text = await copySelection(ptyId);
           if (text) await clipboardWriteText(text);
           clearSelection(ptyId).then(applyFrame).catch(() => {});
@@ -1882,7 +1898,10 @@
         label: 'Select All',
         shortcut: `${modSymbol}A`,
         action: () => {
-          terminal.selectAll();
+          // Same split as the mouse: a full-screen app's screen is xterm's to select
+          // (its clicks pass through), everything else is the Rust buffer's.
+          if (lastFrameAlternateScreen) terminal.selectAll();
+          else selectAll(ptyId).then(applyFrame).catch(() => {});
         },
       },
       { label: '', separator: true, action: () => {} },
