@@ -110,7 +110,10 @@ connect.
 3. Hive workers get no Agent Default (§1). An advisor for workers would have to be the Hive's
    own choice, written into the worker's generated `--settings` file or passed as `--advisor`
    by the launch builder: a Hive change, and a cost one (every worker consulting the advisor).
-4. Workers also run with Claude's default 30-day transcript retention, since they don't read
-   `cleanupPeriodDays`. Check whether a worker's transcript cleanup can delete the human's older
-   transcripts in the same config root (2026-11-22: 3,321 transcripts older than 45 days still
-   on disk, so nothing suggests it does today).
+4. **Settled: a worker runs no transcript cleanup at all.** Claude Code 2.1.330 skips the
+   sweep when `--setting-sources` leaves out user settings and no enabled source sets
+   `cleanupPeriodDays` ("Skipping retention cleanup: userSettings source is disabled"). So
+   worker transcripts are swept by the human's own sessions, at the human's retention. **Never
+   give workers a `cleanupPeriodDays` of their own** (in their `--settings` file, say, to keep
+   them short-lived): that would turn the sweep on in every worker, over the whole shared
+   `projects/` folder, at the worker's period — deleting the human's older transcripts.
