@@ -1637,6 +1637,122 @@ container its own IP on macOS 26, so ports can't collide. It suits Linux-shaped 
 isolation is worth the memory. It can't run Mac apps or reach the Apple GPU, and an agent inside
 one is a remote agent. So it arrives with SSH Hives, as one piece of work (§12).
 
+### 6.8.1 Limits that fit the machine (DESIGN ONLY, Darryl's direction, 2026-11-22; nothing built)
+
+**What was seen.** A Hive bogs the computer down when its workers all run tests and builds at
+once. Measured on the live maiBlog Hive (a pnpm repo, 2026-11-22):
+
+- Its run log holds 311 queued jobs: about 200 `pnpm install` at worker setup, 98 land checks,
+  a handful of served apps. Essentially none is a worker's own test run.
+- Its 615 worker transcripts hold thousands of test and build calls made in the workers' own
+  shells. The count is inflated (a resumed transcript repeats its earlier calls), so it is a
+  proportion, not a figure. Most are `vitest run` on named paths, which is what §6.8 means by
+  cheap and local. Hundreds are whole-project `pnpm check`, `pnpm test`, `pnpm lint`,
+  `pnpm build` and `playwright test`, which the land check runs again anyway.
+- Four of the five Hives on that machine have `run_queue.commands: []`, so there is nothing for
+  the PreToolUse deny to route to `hiveRun`. And only `cargo` has a machine-wide pool: a Node
+  repo's heavy runs have no shared limit even when they are queued.
+
+So the queue isn't failing; almost nothing reaches it. And what does not reach it is not bounded
+by anything, because each test runner and compiler starts about one process per core on its own.
+
+**The rule: nothing here is tuned on one computer.** maiTerm runs on machines of unknown size.
+Today `cargo` is 2 at a time, `serve` is 8 and the default worker cap is 24 on all of them, and
+those numbers came from a 128 GB, 20-core Mac. Every limit below is derived from the machine
+maiTerm is running on, at runtime, and a measurement corrects the derivation, since a formula on
+a machine nobody has seen is still a guess.
+
+**Two costs, two parts of the machine.** They must not be folded into one number again: the
+formula removed on 2026-10-27 (§6.8, "The machine still has limits") gave 5 workers on that Mac
+because it charged each worker for CPU an idle session doesn't use.
+
+| What | Bounded by | Why |
+|---|---|---|
+| How many workers exist | Memory | A session and its MCP children hold about 1 GB (median 0.9, long sessions 2) and about 0% CPU while idle (spike 8) |
+| How many heavy runs happen at once, and how wide each is | Cores | A run is as wide as its tool makes it, which by default is every core |
+
+**1. A recommended worker count, from memory. A recommendation, never a ceiling.**
+
+- `recommended = clamp(floor((RAM − reserve) / 1.5 GB), 2, 64)`, with
+  `reserve = max(8 GB, 25% of RAM)` left for the human's own work. That is 5 on a 16 GB laptop,
+  16 on 32 GB, and 64 on the 128 GB Mac.
+- The Create sheet shows it ("This computer: up to N workers recommended") and pre-fills the cap
+  with `min(24, recommended)`. The human may set anything up to 64, as now; above the
+  recommendation the sheet says so in one line and doesn't refuse. A small machine is protected by
+  default, and a big one is never told to stay small, which is what the October decision was for.
+- The queen's brief carries the same number as a fact about the machine, beside the cap.
+- The memory-pressure gate stays the real guard. The recommendation only sets where a Hive starts.
+- A Hive made on one computer and opened on another (a restored backup, a moved data folder)
+  keeps its cap; the header notes when the cap is above this machine's recommendation.
+
+**2. Heavy slots and per-run width, from cores.**
+
+- `slots = clamp(cores / 4, 1, 4)` heavy runs at once across every Hive on the machine, and each
+  run is handed `width = max(2, cores / slots)`. So slots × width is about the core count: 1 × 4
+  on 4 cores, 2 × 4 on 8, 4 × 5 on 20.
+- `slots` replaces the fixed capacity of the `cargo` pool, and a new machine-wide `node` pool
+  takes the same number (the two share it: a `cargo` job and a `node` job compete for the same
+  cores, so they are one count under two names, or one pool named `heavy` that both entries
+  need; decide at build). `tauri-dev`, `e2e` and `gpu` stay 1: they are exclusive for ports and
+  devices, not for cores. `serve` becomes `clamp(cores / 2, 2, 8)`.
+- **Width reaches the tools through the environment**, so it also binds a run the queue never
+  saw. Every worker launch and every job gets `CARGO_BUILD_JOBS=<width>` and the equivalent for
+  the test runner the folder uses. A worker's own shell gets a narrower one,
+  `max(2, cores / 4)`, since many of those run at once and nothing schedules them. A value the
+  folder's own queued entry sets in its `env` wins.
+- This is the part that can't be gone around by a split string or a script (§6.8, "The deny is a
+  speed bump"): the worker would have to unset a variable on purpose, and the brief says why it
+  is set.
+
+**3. Whole-project runs go through the queue, without the human setting anything.**
+
+- At Create, and whenever a folder's land check is set or changed, its parts (split on `&&`)
+  that are whole-project runs become queued commands needing the heavy pool: for
+  `pnpm check && pnpm lint && pnpm build && pnpm test`, those four. A part that takes a path or a
+  filter argument at the worker's call is not matched by them, so `pnpm exec vitest run src/x`
+  stays free. The seeded entries are shown in Hive settings like any other and can be removed.
+- This is the fix for "the brief alone didn't get them set" (§3.6) on the queue's side: the same
+  land check that the queen is already nudged to set now also seeds the queue.
+- A wrong seed costs a worker a wait, never a refusal: the command still runs, queued.
+
+**4. The brief tiers the testing.** Machine-independent, and the cheapest of the four. A worker
+runs the tests for the files it touched, in its own shell. The whole-project check, lint, build
+and test are the land check's job, once per land; a worker that wants one before reporting asks
+for it with `hiveRun`. The cost is that a whole-project failure can surface at the land check,
+which runs one at a time, so a failing land holds the lands behind it for one check's length.
+
+**5. A measured backstop for CPU.** Memory has one (the pressure gate); CPU has none, and
+`pressure.rs` records idle % as "never a gate: idle CPU is not what runs out first". That was
+true of idle sessions and is not true of a wave of test runs. So, narrowly:
+
+- It holds **new heavy queue starts only**. It never stops a running job, never lowers the worker
+  cap, never holds a spawn.
+- It needs idle CPU below a threshold over a sustained window (starting values: under 15% for
+  30 s), read as idle %, never load average (§6.8).
+- **It can never hold the last one**: when no heavy job is running, the next one starts whatever
+  the reading, or the human's own work (a video export, another app's build) would stall a Hive
+  forever. It is sampled only while a heavy job is queued, like the memory sample.
+- The header says "Throttled · CPU busy", as it does for memory.
+
+**Not verified, to check before building any of it:**
+
+- The environment variable each test runner reads for its worker count, per version (vitest's
+  has changed name across majors; Playwright, Jest, turbo and `svelte-check` each differ, and
+  `tsc` is single-threaded). A wrong name is silently ignored, so each one needs a run that shows
+  the process count changed.
+- Whether cores should count Apple silicon's efficiency cores at full weight. `cores / 4` on a
+  machine with 4 performance and 6 efficiency cores may be one slot too many.
+- Whether seeded whole-project entries, once denied in a worker's own shell, make workers wait
+  long enough to be worse than the contention they replace. The maiBlog numbers say a worker
+  runs these often; the tiered brief (4) should cut that first, so it goes in before the seeding.
+- The 1.5 GB per worker and the 15% / 30 s threshold are starting values from one machine's
+  measurements, which is the very thing this section warns against. Both need a second, smaller
+  machine before they are defaults.
+
+**Build order.** 4 (the brief), then 2's width through the environment, then 1 (the
+recommendation), then 3 (seeding and the `node` pool), then 5. The first two need no new state
+and no waiting, and may be enough by themselves.
+
 ### 6.9 Any service, on any branch (a stack feature, 2026-10-23)
 
 Darryl's ask: relaunching a service on another branch should be simple. It is, because the stack
