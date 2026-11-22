@@ -1375,6 +1375,8 @@ export interface HiveDeleteResult {
   trust_removed: number;
   /** Workers' Claude transcripts removed; the queen's chat stays. */
   transcripts_removed: number;
+  /** Workers' chats that couldn't be removed, whole or in part: path and error. In Claude's projects folder, not the Hive's. */
+  transcripts_failed: string[];
   requests_failed: number;
   folder_left?: string | null;
   dropped_tabs: string[];

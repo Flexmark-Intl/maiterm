@@ -96,6 +96,9 @@ pub struct HiveDeleteResult {
     pub trust_removed: usize,
     /// Workers' Claude transcripts removed (`worker_transcripts`).
     pub transcripts_removed: usize,
+    /// Workers' chats that couldn't be removed, whole or in part: what stayed and why. They are
+    /// in Claude's `projects/` folder, not the Hive's, and aren't work.
+    pub transcripts_failed: Vec<String>,
     pub requests_failed: usize,
     /// The Hive's folder, when anything stayed in it.
     pub folder_left: Option<String>,
@@ -367,6 +370,7 @@ pub(crate) struct Disk {
     pub kept: Vec<String>,
     pub trust_removed: usize,
     pub transcripts_removed: usize,
+    pub transcripts_failed: Vec<String>,
     pub folder_left: bool,
 }
 
@@ -425,17 +429,12 @@ pub(crate) fn worker_transcripts(paths: &HivePaths, roots: &[PathBuf]) -> Vec<Pa
 }
 
 /// Removes `worker_transcripts`, each with the folder Claude keeps beside it for that session
-/// (its subagents' and tool results' files). Returns how many went, and what couldn't.
+/// (its subagents' and tool results' files). A chat counts as deleted only when both went;
+/// otherwise what stayed is returned, path and error, for the toast and the log.
 fn remove_worker_transcripts(paths: &HivePaths) -> (usize, Vec<String>) {
-    let (mut removed, mut errors) = (0, Vec::new());
+    let (mut removed, mut failed) = (0, Vec::new());
     for file in worker_transcripts(paths, &super::retire::transcript_roots()) {
-        match fs::remove_file(&file) {
-            Ok(()) => removed += 1,
-            Err(e) => {
-                errors.push(format!("a worker's chat {}: {e}", file.display()));
-                continue;
-            }
-        }
+        let mut errors: Vec<String> = Vec::new();
         let beside = file.with_extension("");
         let sibling = beside.parent() == file.parent() && beside.file_name().is_some_and(|n| n != "." && n != "..");
         if sibling && fs::symlink_metadata(&beside).is_ok_and(|m| m.is_dir()) {
@@ -443,8 +442,16 @@ fn remove_worker_transcripts(paths: &HivePaths) -> (usize, Vec<String>) {
                 errors.push(format!("{}: {e}", beside.display()));
             }
         }
+        if let Err(e) = fs::remove_file(&file) {
+            errors.push(format!("{}: {e}", file.display()));
+        }
+        if errors.is_empty() {
+            removed += 1;
+        } else {
+            failed.push(errors.join("; "));
+        }
     }
-    (removed, errors)
+    (removed, failed)
 }
 
 /// The Hive's disk, gone but for what holds work (§11.2): memory is work, so it stays in place
@@ -524,7 +531,7 @@ pub(crate) fn remove_disk(hive: &Hive, paths: &HivePaths, workers: &[WorkerRecor
     // Before `tasks/` goes: its session lists name the files.
     let (chats, failed) = remove_worker_transcripts(paths);
     out.transcripts_removed = chats;
-    out.kept.extend(failed);
+    out.transcripts_failed = failed;
 
     out.trust_removed = super::trust::remove_all_trust(paths);
     // A key that couldn't be undone keeps its record, so it can be undone later.
@@ -689,11 +696,12 @@ pub(crate) async fn delete_hive<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         super::feed::forget_meta(t);
     }
     log::info!(
-        "hive {}: deleted from workspace {}: {} worktrees and {} worker chats removed, kept {:?}, branches kept {:?}",
+        "hive {}: deleted from workspace {}: {} worktrees and {} worker chats removed, chats not removed {:?}, kept {:?}, branches kept {:?}",
         caller.hive.id,
         caller.workspace_id,
         disk.removed,
         disk.transcripts_removed,
+        disk.transcripts_failed,
         disk.kept,
         branches
     );
@@ -705,6 +713,7 @@ pub(crate) async fn delete_hive<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         memory_kept: (!delete_memory && fs::symlink_metadata(caller.paths.memory()).is_ok()).then(|| caller.paths.memory().to_string_lossy().to_string()),
         trust_removed: disk.trust_removed,
         transcripts_removed: disk.transcripts_removed,
+        transcripts_failed: disk.transcripts_failed,
         requests_failed,
         folder_left: disk.folder_left.then(|| caller.paths.root.to_string_lossy().to_string()),
         dropped_tabs: tabs.into_iter().chain(job_tabs).collect(),
