@@ -44,9 +44,23 @@ const RULE_REMOTE_CONTROL: &str = "cc_disable_remote_control";
 /// writes into its own auto-memory directory.
 const RULE_MEMORY_WRITES: &str = "cc_allow_memory_writes";
 
+/// Rule id for `tui: "default"` in `~/.claude/settings.json`: Claude Code's classic
+/// renderer instead of its fullscreen one. Fullscreen runs on the alternate screen,
+/// which has no scrollback, so inside maiTerm a session leaves nothing to scroll back
+/// through, search, save or restore, and maiTerm's own selection doesn't reach it.
+/// Fresh installs and a feature flag turn fullscreen on by themselves, which is how
+/// Windows installs ended up there.
+///
+/// The setting, not `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN`: in Claude Code 2.1.330 the
+/// setting outranks the fresh-install default and the flag, and `/tui fullscreen`
+/// still overwrites it, so a user can opt back in from inside Claude (and the rule
+/// then reads as off). The env var would outrank `/tui` and make it a dead command.
+const RULE_CLASSIC_RENDERER: &str = "cc_classic_renderer";
+
 /// Rules maiTerm applies on its own, once per user account (`seed_default_rules`).
 /// After that the usual rule holds — disk is the toggle — so switching one off sticks.
-const DEFAULT_ON_RULES: &[&str] = &[RULE_REMOTE_CONTROL, RULE_MEMORY_WRITES, RULE_ARTIFACT_COMMENTS];
+const DEFAULT_ON_RULES: &[&str] =
+    &[RULE_REMOTE_CONTROL, RULE_MEMORY_WRITES, RULE_ARTIFACT_COMMENTS, RULE_CLASSIC_RENDERER];
 
 /// Which default-on rules have been settled: seeded by maiTerm, or toggled by the
 /// user. One rule id per line. Lives beside the state it protects rather than in
@@ -231,6 +245,9 @@ fn chosen_otherwise(id: &str, settings: &serde_json::Value) -> bool {
     if id == RULE_REMOTE_CONTROL {
         return remote_control_chosen_on(settings);
     }
+    if id == RULE_CLASSIC_RENDERER {
+        return fullscreen_chosen(settings);
+    }
     ENV_RULES
         .iter()
         .find(|(rid, _)| *rid == id)
@@ -242,6 +259,31 @@ fn chosen_otherwise(id: &str, settings: &serde_json::Value) -> bool {
 fn remote_control_chosen_on(settings: &serde_json::Value) -> bool {
     settings.get("disableRemoteControl") == Some(&serde_json::Value::Bool(false))
         || settings.get("remoteControlAtStartup") == Some(&serde_json::Value::Bool(true))
+}
+
+/// Fullscreen picked on purpose: `tui: "fullscreen"` (written by `/tui fullscreen`, or
+/// by Claude Code after a fullscreen trial the user took up) or `CLAUDE_CODE_NO_FLICKER`
+/// on in settings' env, which outranks the setting anyway. A fresh install's default
+/// and the rollout flag leave no trace on disk, so they are no choice.
+fn fullscreen_chosen(settings: &serde_json::Value) -> bool {
+    settings.get("tui").and_then(|v| v.as_str()) == Some("fullscreen")
+        || env_var_bool(settings, "CLAUDE_CODE_NO_FLICKER") == Some(true)
+}
+
+fn classic_renderer_applied(settings: &serde_json::Value) -> bool {
+    settings.get("tui").and_then(|v| v.as_str()) == Some("default")
+}
+
+fn set_classic_renderer(enabled: bool) -> Result<(), String> {
+    edit_claude_settings(|obj| {
+        if enabled {
+            obj.insert("tui".into(), serde_json::Value::String("default".into()));
+        } else if obj.get("tui").and_then(|v| v.as_str()) == Some("default") {
+            // Only our value: a "fullscreen" written since by `/tui` is the user's.
+            obj.remove("tui");
+        }
+        Ok(())
+    })
 }
 
 fn remote_control_applied(settings: &serde_json::Value) -> bool {
@@ -967,6 +1009,12 @@ fn build_status() -> DeshittifyStatus {
         blocked: settings_err.is_some(),
         detail: settings_err.clone(),
     });
+    rules.push(DeshittifyRuleStatus {
+        id: RULE_CLASSIC_RENDERER.into(),
+        applied: settings_err.is_none() && classic_renderer_applied(&settings),
+        blocked: settings_err.is_some(),
+        detail: settings_err.clone(),
+    });
     rules.push(memory_writes_status(&settings, &settings_err));
     rules.push(commit_hook_status());
 
@@ -995,6 +1043,7 @@ fn apply_rule_inner(id: &str, enabled: bool) -> Result<(), String> {
         RULE_CO_AUTHORED => set_co_authored(enabled),
         RULE_COMMIT_HOOK => set_commit_hook(enabled),
         RULE_REMOTE_CONTROL => set_remote_control(enabled),
+        RULE_CLASSIC_RENDERER => set_classic_renderer(enabled),
         RULE_MEMORY_WRITES => set_memory_writes(enabled),
         other => Err(format!("Unknown deshittification rule: {other}")),
     }
@@ -1043,6 +1092,10 @@ else:
         s.pop("disableRemoteControl")
     if s.get("remoteControlAtStartup") is False:
         s.pop("remoteControlAtStartup")
+if d["classicRenderer"]=="set":
+    s["tui"]="default"
+elif s.get("tui")=="default":
+    s.pop("tui")
 def ours(x):
     return isinstance(x,dict) and d["memoryHookTag"] in str(x.get("command",""))
 hk=s.get("hooks")
@@ -1130,6 +1183,7 @@ fn render_remote_setup_script_from(status: &DeshittifyStatus, settings_readable:
             "envUnset": env_unset,
             "coAuthored": if applied(RULE_CO_AUTHORED) { "set" } else { "unset" },
             "remoteControl": if applied(RULE_REMOTE_CONTROL) { "set" } else { "unset" },
+            "classicRenderer": if applied(RULE_CLASSIC_RENDERER) { "set" } else { "unset" },
             "memoryHook": if applied(RULE_MEMORY_WRITES) { "set" } else { "unset" },
             "memoryHookCommand": MEMORY_HOOK_COMMAND,
             "memoryHookTag": MEMORY_HOOK_TAG,
@@ -1586,7 +1640,7 @@ mod tests {
                 detail: None,
             })
             .collect();
-        for id in [RULE_CO_AUTHORED, RULE_COMMIT_HOOK, RULE_REMOTE_CONTROL, RULE_MEMORY_WRITES] {
+        for id in [RULE_CO_AUTHORED, RULE_COMMIT_HOOK, RULE_REMOTE_CONTROL, RULE_MEMORY_WRITES, RULE_CLASSIC_RENDERER] {
             rules.push(DeshittifyRuleStatus {
                 id: id.into(),
                 applied: all_on,
@@ -1651,6 +1705,7 @@ mod tests {
         assert_eq!(s["includeCoAuthoredBy"], serde_json::Value::Bool(false));
         assert_eq!(s["disableRemoteControl"], serde_json::Value::Bool(true));
         assert_eq!(s["remoteControlAtStartup"], serde_json::Value::Bool(false));
+        assert_eq!(s["tui"], "default");
         assert_eq!(s["hooks"]["PermissionRequest"][0]["hooks"][0]["command"], MEMORY_HOOK_COMMAND);
         assert_eq!(
             fs::read_to_string(home.join(MEMORY_HOOK_REL)).unwrap(),
@@ -1698,6 +1753,7 @@ mod tests {
         assert!(s.get("includeCoAuthoredBy").is_none(), "includeCoAuthoredBy survived the undo");
         assert!(s.get("disableRemoteControl").is_none(), "disableRemoteControl survived the undo");
         assert!(s.get("remoteControlAtStartup").is_none(), "remoteControlAtStartup survived the undo");
+        assert!(s.get("tui").is_none(), "tui survived the undo");
         assert!(s.get("hooks").is_none(), "the memory hook entry survived the undo: {s}");
         assert!(!home.join(MEMORY_HOOK_REL).exists(), "the memory hook script survived the undo");
         assert!(!home.join(".maiterm/githooks").exists(), "managed hooks survived the undo");
@@ -1718,6 +1774,40 @@ mod tests {
         assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
         assert_eq!(fs::read_to_string(&settings).unwrap(), "{\"remoteControlAtStartup\":true}");
         let _ = fs::remove_dir_all(&home);
+    }
+
+    /// The same for the renderer: switching the rule off removes only our "default",
+    /// never a "fullscreen" the remote's owner picked with `/tui`.
+    #[test]
+    fn remote_script_keeps_a_users_own_fullscreen_choice() {
+        let home = scratch("remote-tui");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        let settings = home.join(".claude/settings.json");
+        fs::write(&settings, "{\"tui\":\"fullscreen\"}").unwrap();
+        let out = run_remote_script(&render_remote_setup_script_from(&status_with(false), true), &home);
+        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(fs::read_to_string(&settings).unwrap(), "{\"tui\":\"fullscreen\"}");
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_classic_renderer_rule_reads_disk_and_respects_a_fullscreen_choice() {
+        assert!(classic_renderer_applied(&serde_json::json!({"tui": "default"})));
+        assert!(!classic_renderer_applied(&serde_json::json!({})));
+        assert!(!classic_renderer_applied(&serde_json::json!({"tui": "fullscreen"})));
+
+        // The seed leaves fullscreen alone when the user picked it…
+        assert!(chosen_otherwise(RULE_CLASSIC_RENDERER, &serde_json::json!({"tui": "fullscreen"})));
+        assert!(chosen_otherwise(
+            RULE_CLASSIC_RENDERER,
+            &serde_json::json!({"env": {"CLAUDE_CODE_NO_FLICKER": "1"}})
+        ));
+        // …but not when it is only Claude Code's own default (nothing on disk).
+        assert!(!chosen_otherwise(RULE_CLASSIC_RENDERER, &serde_json::json!({})));
+        assert!(!chosen_otherwise(
+            RULE_CLASSIC_RENDERER,
+            &serde_json::json!({"env": {"CLAUDE_CODE_NO_FLICKER": "0"}})
+        ));
     }
 
     /// Feed the memory hook one PermissionRequest, as Claude Code would, and say

@@ -314,6 +314,11 @@
           hint: 'Sets CLAUDE_CODE_ARTIFACT_COMMENTS=0 and CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT=0. Comments people leave on an artifact Claude published to claude.ai stop arriving in your session as prompts, and Claude stops acting on them by itself: other people\'s words don\'t get typed into your agent. On by default — maiTerm applies it once; switch it off and it stays off.',
         },
         {
+          id: 'cc_classic_renderer',
+          label: 'Keep the classic terminal UI',
+          hint: 'Sets tui: "default". New Claude Code installs can switch themselves to the fullscreen renderer, which draws on the alternate screen: nothing it prints reaches the terminal\'s scrollback, so in maiTerm you can\'t scroll back through a session, search it or keep it across a restart, and you can only select what\'s on screen. Run /tui fullscreen inside Claude Code to opt back in, and this switch reads as off. On by default: maiTerm applies it once, unless you already chose fullscreen. Switch it off and it stays off.',
+        },
+        {
           id: 'cc_allow_memory_writes',
           label: 'Stop asking to write memory',
           hint: 'Adds a PermissionRequest hook (~/.maiterm/claude-hooks/approve-memory-writes) that approves writes to Markdown files in Claude Code\'s own memory directory. Claude Code means to allow these itself, but misses them wherever its config directory runs through a symlink — every maiTerm account does — so each memory asks, and auto mode refuses. Checks where the path really leads; anything else still prompts. A Bash write into memory (cat > memory/x.md) is refused on the spot with a note to use Write or Edit, instead of waiting for you. On by default — maiTerm applies it once; switch it off and it stays off.',
