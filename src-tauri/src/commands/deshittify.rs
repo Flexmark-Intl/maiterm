@@ -213,6 +213,26 @@ fn set_co_authored(enabled: bool) -> Result<(), String> {
 /// an org or rollout default can switch on even where the feature stays allowed.
 /// The user's own explicit opt-in — Remote Control switched on by hand. The seed
 /// leaves such a file alone: a default is for people who never chose.
+/// True when the user has set one of an env rule's vars to something other than
+/// the rule's value (e.g. `CLAUDE_CODE_ARTIFACT_COMMENTS=1`): an explicit choice
+/// the first-launch seed must leave alone, as it does Remote Control's.
+fn env_rule_chosen_otherwise(settings: &serde_json::Value, vars: &[(&str, &str)]) -> bool {
+    vars.iter().any(|(k, v)| {
+        settings.get("env").and_then(|e| e.get(*k)).is_some() && !env_var_applied(settings, k, v)
+    })
+}
+
+/// A default-on rule the user already chose against before maiTerm seeded it.
+fn chosen_otherwise(id: &str, settings: &serde_json::Value) -> bool {
+    if id == RULE_REMOTE_CONTROL {
+        return remote_control_chosen_on(settings);
+    }
+    ENV_RULES
+        .iter()
+        .find(|(rid, _)| *rid == id)
+        .is_some_and(|(_, vars)| env_rule_chosen_otherwise(settings, vars))
+}
+
 fn remote_control_chosen_on(settings: &serde_json::Value) -> bool {
     settings.get("disableRemoteControl") == Some(&serde_json::Value::Bool(false))
         || settings.get("remoteControlAtStartup") == Some(&serde_json::Value::Bool(true))
@@ -1228,7 +1248,7 @@ pub fn seed_default_rules() {
             log::warn!("Deshittify: default rule {id} is blocked, will retry next launch");
             continue;
         }
-        if rule.applied || (id == RULE_REMOTE_CONTROL && remote_control_chosen_on(&settings)) {
+        if rule.applied || chosen_otherwise(id, &settings) {
             if let Err(e) = mark_seeded(&marker, id) {
                 log::warn!("Deshittify: could not record {id} as settled: {e}");
             }
@@ -1953,6 +1973,18 @@ mod tests {
         assert!(remote_control_chosen_on(&serde_json::json!({"disableRemoteControl": false})));
         assert!(!remote_control_chosen_on(&serde_json::json!({})));
         assert!(!remote_control_chosen_on(&serde_json::json!({"remoteControlAtStartup": false})));
+
+        // An artifact-comments var the user set on themselves is a choice too;
+        // one that's absent or already "0" is not.
+        let env = |e: serde_json::Value| serde_json::json!({ "env": e });
+        assert!(chosen_otherwise(RULE_ARTIFACT_COMMENTS, &env(serde_json::json!({"CLAUDE_CODE_ARTIFACT_COMMENTS": "1"}))));
+        assert!(chosen_otherwise(
+            RULE_ARTIFACT_COMMENTS,
+            &env(serde_json::json!({"CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT": true}))
+        ));
+        assert!(!chosen_otherwise(RULE_ARTIFACT_COMMENTS, &env(serde_json::json!({"CLAUDE_CODE_ARTIFACT_COMMENTS": "0"}))));
+        assert!(!chosen_otherwise(RULE_ARTIFACT_COMMENTS, &serde_json::json!({})));
+        assert!(!chosen_otherwise(RULE_MEMORY_WRITES, &env(serde_json::json!({"CLAUDE_CODE_ARTIFACT_COMMENTS": "1"}))));
     }
 
     /// A host whose owner set their own core.hooksPath, and a user who never
