@@ -222,6 +222,17 @@ const kindBody = (kind) => (Object.hasOwn(KIND_BODY, kind) ? KIND_BODY[kind] : "
 // Only a finished turn is an FYI. Every other kind, known or not, is someone waiting.
 const kindIsWaiting = (kind) => kind !== "idle_done";
 
+// Which desktop rang, for a phone paired with several (protocol §6.3). Both optional: a string
+// that is present and non-blank is passed on, capped; anything else is left out entirely, so an
+// older desktop's push builds exactly the payload it always did (and FCM's string-only `data`
+// never receives "undefined").
+const optField = (v, max) =>
+  typeof v === "string" && v.trim() ? v.trim().slice(0, max) : undefined;
+const serverFields = (msg) => ({
+  fp: optField(msg.server_fp, 128),
+  name: optField(msg.server_name, 40),
+});
+
 function b64urlFromBytes(bytes) {
   let bin = "";
   for (const b of bytes) bin += String.fromCharCode(b);
@@ -314,19 +325,25 @@ async function sendApns(env, msg) {
   const host =
     msg.env === "production" ? "api.push.apple.com" : "api.sandbox.push.apple.com";
   const jwt = await apnsJwt(env);
-  const body = JSON.stringify({
+  const server = serverFields(msg);
+  const alert = {
+    title: msg.title || "maiTerm",
+    body: kindBody(msg.kind),
+  };
+  if (server.name) alert.subtitle = server.name;
+  const payload = {
     aps: {
-      alert: {
-        title: msg.title || "maiTerm",
-        body: kindBody(msg.kind),
-      },
+      alert,
       sound: "default",
       "thread-id": msg.tab_id,
       "interruption-level": kindIsWaiting(msg.kind) ? "time-sensitive" : "active",
     },
     tabId: msg.tab_id,
     kind: msg.kind,
-  });
+  };
+  if (server.fp) payload.serverFp = server.fp;
+  if (server.name) payload.serverName = server.name;
+  const body = JSON.stringify(payload);
   const resp = await fetch(`https://${host}/3/device/${msg.push_token}`, {
     method: "POST",
     headers: {
@@ -392,18 +409,24 @@ async function sendFcm(env, msg) {
   }
   const sa = JSON.parse(env.FCM_SERVICE_ACCOUNT);
   const accessToken = await fcmAccessToken(sa);
+  const server = serverFields(msg);
+  const title = msg.title || "maiTerm";
+  const data = { tabId: String(msg.tab_id), kind: String(msg.kind) };
+  if (server.fp) data.serverFp = server.fp;
+  if (server.name) data.serverName = server.name;
   const body = JSON.stringify({
     message: {
       token: msg.push_token,
       notification: {
-        title: msg.title || "maiTerm",
+        // FCM's notification has no subtitle, so the desktop's name leads the title.
+        title: server.name ? `${server.name} · ${title}` : title,
         body: kindBody(msg.kind),
       },
       // `priority` here is a DELIVERY-latency knob, not a presentation one — the APNs
       // interruption-level split has no FCM counterpart. Downgrading idle_done to "normal" would
       // let Doze defer the wake, which breaks the doorbell's actual job rather than fixing copy.
       android: { collapse_key: String(msg.tab_id), priority: "high" },
-      data: { tabId: String(msg.tab_id), kind: String(msg.kind) },
+      data,
     },
   });
   const resp = await fetch(

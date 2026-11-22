@@ -87,6 +87,13 @@ desktop can't forge a cap for a token it never got from a real phone; rotating
   (`api.push.apple.com`); anything else (incl. a dev build's `sandbox` token, or
   an unknown value) uses `api.sandbox.push.apple.com`.
 - `collapse`/`thread` = `tab_id`, so repeat pings for one tab coalesce.
+- `server_fp` (optional): the desktop's pinned certificate fingerprint. Passed to
+  the phone as `serverFp` (APNs custom key, FCM `data`), so a phone paired with
+  several desktops opens the tap on the one that rang (protocol §6.3).
+- `server_name` (optional): what the PHONE calls that desktop, sent only while it
+  holds several pairings. APNs `aps.alert.subtitle`; FCM has no subtitle, so the
+  title becomes `<name> · <title>`; both also get `serverName`. Absent keys are
+  left out, so an older desktop's push is exactly the old payload.
 
 The response is JSON echoing the upstream verdict
 (`{platform, ok, status, detail}`) so the desktop log shows APNs/FCM's own status
