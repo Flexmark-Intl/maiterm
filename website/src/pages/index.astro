@@ -161,7 +161,7 @@ const EVERYTHING = [
   },
   {
     title: 'Deshittify your agent',
-    body: 'One Preferences section switches off the parts of a coding agent that serve its vendor: telemetry, error uploads, feedback nags, Remote Control (off by default), and the <code>Co-Authored-By</code> trailer in your history.',
+    body: 'One Preferences section switches off the parts of a coding agent that serve its vendor: telemetry, error uploads, feedback nags, Remote Control (off by default), other people’s comments on your claude.ai artifacts arriving as prompts (ignored by default), and the <code>Co-Authored-By</code> trailer in your history.',
   },
   {
     title: 'A Rust terminal underneath',
@@ -310,7 +310,10 @@ const EVERYTHING = [
       - Workers' prompts/questions go to the Queen first (prompts.rs, autonomy.ts); some always
         come to the human. Precedents are recorded by the Queen from the human's own answers.
       - Completion criteria: no worker starts until the human confirms them (finish.rs).
-      - Hosts: the Queen grants them (change.rs), not the human.
+      - Hosts: the Queen grants them (change.rs), not the human. v3.17.0: hosts, sockets and tools
+        sit behind the "What workers may use" checkpoint, the Queen's by default
+        (change_plan.rs route); "can grant" because a human can set it to Ask me. The worker
+        check is 15 min by default, 0 off (hive/health.rs).
       - Windows refused (create.rs); queued jobs macOS-only (job_sandbox.rs) — hence "macOS".
       - v3.14.0 media: the capabilities are the catalogue's (resources/hive/media/catalogue.json);
         setup is a sign-in, a pasted key or a Homebrew install (lib/hive/mediaSetup.ts), and Verify
@@ -344,9 +347,10 @@ const EVERYTHING = [
         <div class="ln-card">
           <h3>Asked only what she can't decide</h3>
           <p>
-            Workers' permission prompts and questions go to the Queen first. What she brings you
-            waits in one <strong>Needs you</strong> list; she can record your answers as precedents
-            and cite them later, and you can take over anything she's holding.
+            Workers' permission prompts and questions go to the Queen first. When one needs a
+            website, a local database or a tool, she can grant it herself, and every 15 minutes
+            she checks on any worker that may be stuck. What she brings you waits in one
+            <strong>Needs you</strong> list, and you can take over anything she's holding.
           </p>
         </div>
         <div class="ln-card">

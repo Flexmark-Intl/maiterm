@@ -1,9 +1,9 @@
 ---
 title: Deshittification
-description: Switch off the parts of a coding agent that serve its vendor rather than you — telemetry, feedback nags, Remote Control, self-promotion in your commit history, and the memory-write prompts Claude Code asks by mistake.
+description: Switch off the parts of a coding agent that serve its vendor rather than you — telemetry, feedback nags, Remote Control, other people's artifact comments arriving as prompts, self-promotion in your commit history, and the memory-write prompts Claude Code asks by mistake.
 ---
 
-Coding agents ship with behaviour that works for the vendor rather than for you: usage telemetry, uploaded error reports, in-session feedback surveys, Remote Control exposing your sessions to claude.ai and the mobile app, and a `Co-Authored-By: Claude` trailer stamped into your commit history — plus a permission prompt for every memory Claude Code writes, which it never meant to ask. **Preferences → Deshittification** switches those off — one rule at a time, or the whole group with a single toggle.
+Coding agents ship with behaviour that works for the vendor rather than for you: usage telemetry, uploaded error reports, in-session feedback surveys, Remote Control exposing your sessions to claude.ai and the mobile app, comments other people leave on your claude.ai artifacts arriving in your session as prompts, and a `Co-Authored-By: Claude` trailer stamped into your commit history — plus a permission prompt for every memory Claude Code writes, which it never meant to ask. **Preferences → Deshittification** switches those off — one rule at a time, or the whole group with a single toggle.
 
 There's one group today, **Claude Code**. maiTerm edits the agent's *own* configuration — `~/.claude/settings.json` and your global git config — so the rules hold in every terminal you run the agent in, not just maiTerm's. Claude Code picks them up on its next session.
 
@@ -17,6 +17,7 @@ There's one group today, **Claude Code**. maiTerm edits the agent's *own* config
 | **Remove the `/feedback` command** | The command stops being offered |
 | **Suppress feedback surveys** | Stops the in-session survey prompts |
 | **Disable Remote Control** | Sets `disableRemoteControl: true` and `remoteControlAtStartup: false`, so your sessions aren't exposed to claude.ai/code or the mobile app and the bridge never auto-starts. **On by default** |
+| **Ignore artifact comments** | Sets `CLAUDE_CODE_ARTIFACT_COMMENTS=0` and `CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT=0`. Comments people leave on an artifact Claude published to claude.ai stop arriving in your session as prompts, and Claude stops starting work on them by itself, so other people's words aren't typed into your agent. **On by default** |
 | **Stop asking to write memory** | A permission hook approves Claude Code's writes to Markdown files in its own memory directory, which it otherwise asks about one by one, and refuses outright in auto mode, wherever its config directory runs through a symlink. Anything that doesn't really lead into a memory directory still prompts. An agent that tries to write a memory with a shell command instead is turned back at once and told to use its file tools, rather than left waiting for you. **On by default** |
 | **No `Co-Authored-By` in commits** | Claude Code stops writing the trailer in the first place |
 | **Strip agent credit at commit time** | A `commit-msg` hook deletes `Co-Authored-By: Claude` and `Generated with Claude Code` lines from your commit messages |
@@ -29,7 +30,7 @@ None of this is stored as a maiTerm preference. Each toggle reads the agent's re
 
 ## Default-on rules
 
-**Disable Remote Control** and **Stop asking to write memory** are the rules maiTerm turns on without being asked. Each is applied once, the first time a maiTerm with that rule launches; after that it's like every other rule. Switch one off and it stays off — maiTerm remembers the rule is settled (in `~/.maiterm/`, so a backup restore or a second maiTerm build doesn't forget) and never re-asserts it. If you'd already switched Remote Control on yourself, the default leaves your choice alone.
+**Disable Remote Control**, **Ignore artifact comments** and **Stop asking to write memory** are the rules maiTerm turns on without being asked. Each is applied once, the first time a maiTerm with that rule launches; after that it's like every other rule. Switch one off and it stays off — maiTerm remembers the rule is settled (in `~/.maiterm/`, so a backup restore or a second maiTerm build doesn't forget) and never re-asserts it. If you'd already switched Remote Control on yourself, the default leaves your choice alone.
 
 ## Your repo's own hooks still run
 

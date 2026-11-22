@@ -71,7 +71,7 @@ Agent settings live in one runtime-neutral **AI Agents** section in Preferences,
 
 The last three appear once the one above them is on.
 
-A separate **Deshittification** section switches off the vendor-serving parts of an agent — telemetry, feedback nags, Remote Control, and the `Co-Authored-By` trailer in your commits — and stops Claude Code asking permission for its own memory writes. Those rules edit the agent's own config rather than maiTerm's, so they hold in every terminal. See [Deshittification](/features/deshittification/).
+A separate **Deshittification** section switches off the vendor-serving parts of an agent — telemetry, feedback nags, Remote Control, other people's artifact comments arriving as prompts, and the `Co-Authored-By` trailer in your commits — and stops Claude Code asking permission for its own memory writes. Those rules edit the agent's own config rather than maiTerm's, so they hold in every terminal. See [Deshittification](/features/deshittification/).
 
 ### SSH MCP Bridge
 

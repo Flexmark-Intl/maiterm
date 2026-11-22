@@ -36,6 +36,8 @@ A Hive replaces the workspace's terminals with its own view:
 
 Across the top: the goal on one line (**More** shows the rest), **Board**, **Needs you**, **Gallery** and **Memory** (`Cmd+Shift+Y` switches), the Hive's status with **Pause** and **Resume**, and a bar of readouts — slots in use, budget, criteria, where work lands, autonomy and the run queue. The ⋯ menu holds **New goal…**, **Earlier goals**, **Land log** and **Delete Hive…**.
 
+The Hive's agents don't raise **Command completed** notifications: the Queen reports for her workers.
+
 | Shortcut | Action |
 |----------|--------|
 | `Cmd+1` | The Queen |
@@ -52,6 +54,8 @@ While a Hive is running, its status says what is actually happening: **Working**
 
 A worker has gone quiet when its turn ended more than 10 minutes ago, nothing has happened in its tab since, and nothing it could be waiting for is on its way: no job of its own running, no question of its own waiting on you. Its card says **Quiet · … · no report**, and the Queen is told once, so a worker waiting on something that won't come doesn't hold the Hive up unnoticed. A worker whose job is still running says **Waiting on its run** instead.
 
+On top of that, the Queen gets a regular look at her workers: every 15 minutes by default (**Autonomy…** → **Worker check**, in minutes, 0 for never), she's shown any worker that may be stalled — one that failed or stopped, has a prompt on its screen or a blocker on its task, or has done nothing in that time — with what to do about it. A Hive whose workers are all busy is sent nothing, so a healthy Hive spends no turn on it, and each worker's concern is told once, then again only if it changes.
+
 A job result that comes in while you have the Hive paused is kept on disk, not in memory, and goes to its worker when you **Resume**, so restarting maiTerm in between loses nothing.
 
 ### Needs you
@@ -64,7 +68,16 @@ A decision or approval from the Queen herself opens here, beside her chat, rathe
 
 A worker's permission prompts, questions and blockers go to the Queen first. She answers what she can and brings you only what she can't decide. Some things always come to you: anything you've set to **Ask me**, a permission row that would save a rule or change a mode, and anything she hasn't answered in time (five minutes by default, set in **Autonomy…**).
 
-**Autonomy…** in the Hive's settings decides who answers each kind of decision, **Queen** or **Ask me**: *Plan*, *Workers' questions*, *Workers' permission prompts*, *Landing*, *Picking finals in the gallery*, *Adding a dependency, changing a public interface*, and *Changing Hive settings*. Everything starts with the Queen except changing the Hive's settings, which asks you.
+**Autonomy…** in the Hive's settings decides who answers each kind of decision, **Queen** or **Ask me**: *Plan*, *Workers' questions*, *Workers' permission prompts*, *Landing*, *Picking finals in the gallery*, *Adding a dependency, changing a public interface*, *What workers may use*, and *Changing other Hive settings*. Everything starts with the Queen except *Changing other Hive settings*, which asks you; the last two start from [your defaults](#your-defaults).
+
+### The Queen can change the Hive's settings
+
+The Queen can change any setting you can: workers at once, models and effort, setup and land checks, network hosts, local database sockets, tools, output folders, push after each land, workers on your phone, the run queue, the prompt timeout, the digest and the worker check. Two checkpoints decide what she applies herself and what comes to you as a card:
+
+- **What workers may use** — websites, local database sockets, tools (MCP servers, CLIs) and the hosts paid generators reach. **Queen** by default, so when a worker is stuck on one she grants it at once instead of the Hive waiting hours for you; you're told each time, and her reason is kept in her decision log.
+- **Changing other Hive settings** — everything else. **Ask me** by default, so each change is a card.
+
+Raising the budget and changing a checkpoint always come to you as a card, whoever holds either. One request can mix the two: what the checkpoints hand her applies, the rest goes on one card, and everything is checked before anything is saved, so a change applies whole or not at all. A change reaches each agent at its next launch; a worker already running keeps what it started with until it's restarted.
 
 When you answer something yourself, the Queen can record it as a **precedent** and cite it the next time the same question comes up, so you aren't asked twice. Precedents, and every decision she made, are under **Memory → Precedents** and **Memory → Decisions**, where you can edit a precedent, make it apply to every Hive, or override a decision.
 
@@ -80,9 +93,9 @@ When you answer something yourself, the Queen can record it as a **precedent** a
 
 **Whole output kept.** When a job ends, everything its terminal kept is saved in the Hive's folder as `runs/<job>/output.log`, and a failed check names that file, so the Queen reads what failed instead of running it again.
 
-**The network.** A worker reaches only the hosts the Queen has granted the Hive, plus the package registries for installs. A refused host goes to her; she grants or removes hosts herself, with a reason that's kept in her decision log, and you can edit the list under **Workers and access…**.
+**The network.** A worker reaches only the hosts the Queen has granted the Hive, plus the package registries for installs. A refused host goes to her; she grants or removes hosts herself — or asks you, if you've set *What workers may use* to **Ask me** — with a reason that's kept in her decision log, and you can edit the list under **Workers and access…**.
 
-**A local database.** A worker's sandbox closes off this Mac's network services, so a builder whose tests need a database can't reach the one you run. Under **Workers and access…**, **Local databases workers may connect to** takes the socket of a Postgres, MySQL or Redis server on this Mac; builders, their jobs and their land checks may then connect to it. Reviewers never get one. A worker reaches every database that server holds, yours included, so give the Hive a database of its own. Only you can add one, and it applies from each worker's next launch.
+**A local database.** A worker's sandbox closes off this Mac's network services, so a builder whose tests need a database can't reach the one you run. Under **Workers and access…**, **Local databases workers may connect to** takes the socket of a Postgres, MySQL or Redis server on this Mac; builders, their jobs and their land checks may then connect to it. Reviewers never get one. A worker reaches every database that server holds, yours included, so give the Hive a database of its own. Only a socket named like a database's (`.s.PGSQL.<port>`, `mysql.sock`, `redis.sock`) is accepted. The Queen can add one under *What workers may use*, as she does hosts, and it applies from each worker's next launch.
 
 **Reviewed.** A finished builder's work is checked by a fresh reviewer worker, on a copy pinned at the commits it reported. Three failed reviews go to the Queen to settle.
 
@@ -93,9 +106,9 @@ When a reviewed worker's work is ready, the Queen lands it — the exact commits
 - **Straight into Base** — the Queen merges each finished worker into its repository's Base branch.
 - **Into a branch of its own** — the Queen lands each finished worker into the Hive's own branch, by herself unless you've set *Landing* to **Ask me**. Base stays untouched until the work is in, and then she asks you once, with a card in the Hive and on your phone, to land that branch into Base. The card says whether the branch's last land check passed on exactly what would land. Approved, it becomes one merge commit on Base; nothing is pushed. Undoing that merge is done by hand.
 
-Whichever you chose, a land that changes agent or build configuration — hooks, settings, scripts that would run on your machine outside any sandbox — asks you first.
+While *Landing* is **Ask me**, a land that changes agent or execution configuration — `CLAUDE.md`, `.claude/`, git hooks, CI, `package.json` scripts, anything that would run on your machine outside any sandbox — asks you first. Hand *Landing* to the Queen and she decides those lands too, told to look hard at such a diff.
 
-Landing never touches your uncommitted work. **Land log** lists every land, undo and post-land check, newest first, and **Undo…** on a land writes a revert commit and lands it like any other: history is never rewritten. **Push after each land** pushes when you've asked for it; the Queen never pushes on her own.
+Landing never touches your uncommitted work. **Land log** lists every land, undo and post-land check, newest first, and **Undo…** on a land writes a revert commit and lands it like any other: history is never rewritten. **Push after each land** pushes when it's on; the Queen never pushes by herself. It's one of the settings she can change, so with *Changing other Hive settings* left on **Ask me** (the default), turning it on is yours.
 
 ## Shared memory
 
@@ -136,7 +149,7 @@ Each server writes into an output folder of its own, which joins the Hive's outp
 
 ### Changing a Hive's tools
 
-A Hive's tools aren't fixed when you create it. **Tools** in the Hive's settings → **Change…** adds or removes them, and offers the network hosts and output folders the new ones need. Workers launched after the change get it; a worker already running keeps what it started with. The Queen is told.
+A Hive's tools aren't fixed when you create it. **Tools** in the Hive's settings → **Change…** adds or removes them, and offers the network hosts and output folders the new ones need. Workers launched after the change get it; a worker already running keeps what it started with. The Queen is told. She can add or remove a tool already on this Mac herself, under *What workers may use*.
 
 ### When the Queen needs something it can't make
 
@@ -166,13 +179,15 @@ The Queen keeps running after Done. Write to her in the Hive's message box, or f
 
 An agent you've been planning a project with can propose it as a Hive with `proposeHive`. You get a request naming the agent — **Make this Hive?**, or **A new goal for this Hive?** when a Done or paused Hive already works in that folder — in the [Loom](/features/loom/#decisions)'s Decisions and on your phone. On the desktop, **Open in the sheet** opens the wizard filled in from the plan, and nothing starts until you press **Create Hive**. On the phone, **Approve** creates it from exactly the plan the card shows. Either way, it's your decision, never the agent's.
 
+A proposal can also say what the Hive needs: tools (MCP servers, CLIs and skills on this Mac, added to your default picks), the Queen's model and effort, and the network hosts and local database sockets workers may use. The sheet shows those grants on **Review** as chips you can remove, and the phone card names every one, since **Approve** grants them all. They're checked when the agent files the proposal, with the same rules Hive settings apply, so a card never promises access that creating the Hive would refuse.
+
 ## On your phone
 
 With [maiLink](/features/mailink/), a Hive's chats come to the phone like any other: each shows its role and status, and the Queen's shows her Done report. **Chats on your phone** chooses **The queen only** (the default), **The queen and its workers** or **Nobody**.
 
 ## Your defaults
 
-**Preferences → Hive** holds the **Defaults for new Hives** the wizard starts from: **Tools**, **Models**, **Workers at once**, **Budget for paid generation**, **Chats on your phone**, **Push after each land** and **Rules for every agent**. The wizard's **Save as my defaults** saves its choices back here. No agent can change these.
+**Preferences → Hive** holds the **Defaults for new Hives** the wizard starts from: **Tools**, **Models**, **Workers at once**, **Budget for paid generation**, **Chats on your phone**, **Push after each land** and **Rules for every agent**, plus who approves the Queen's changes for each new Hive: **Workers' access** (**Queen** unless you change it) and **Other settings changes** (**Ask me** unless you change it). The wizard's **Save as my defaults** saves its choices back here. No agent can change these.
 
 ## Requirements
 
@@ -180,5 +195,5 @@ With [maiLink](/features/mailink/), a Hive's chats come to the phone like any ot
 - **macOS.** A Hive needs Claude Code's sandbox, which native Windows doesn't have, so Windows can't make one. On Linux a Hive can be made, but the jobs workers queue — installs, builds and tests, served apps and land checks — run only on macOS in this version.
 
 :::note
-A Hive is new in maiTerm 3.13.0. What it can make, setting providers up from it, changing a Hive's tools after it's made, and the gallery's **For you** and **Proof** are new in 3.14.0.
+A Hive is new in maiTerm 3.13.0. What it can make, setting providers up from it, changing a Hive's tools after it's made, and the gallery's **For you** and **Proof** are new in 3.14.0. The Queen's reach over every setting, the worker check and the checkpoint defaults are new in 3.17.0.
 :::
