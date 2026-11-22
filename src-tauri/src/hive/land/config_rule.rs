@@ -1,5 +1,6 @@
 //! The config rule (docs/hive.md §8.1): a land whose diff from Base changes agent or execution
-//! config goes to the human, whatever the Landing checkpoint says. A worker's commits can add
+//! config is a card for the human while Landing is Ask me; with Landing handed to the coordinator
+//! she decides it, as she decides every land (the human's decision, 2026-11-21). A worker's commits can add
 //! hooks or scripts that run on the human's machine outside any sandbox the next time anyone
 //! opens a session, commits or builds there.
 //!

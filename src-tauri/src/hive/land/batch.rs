@@ -11,7 +11,7 @@
 //! merge commit is an ancestor of the new Base, and its log line (`batch_member`) names that merge,
 //! which Undo reverts with `revert -m 1`. A member that conflicts in the chain, or whose own merge
 //! trips the config rule, leaves and lands alone (the conflict meets its own step 1, the config its
-//! card). Multi-repo workers (plan D10), the integration mode, Landing = Ask me, fix-forward lands
+//! own driving — a batch only runs with Landing handed, so that is no card either). Multi-repo workers (plan D10), the integration mode, Landing = Ask me, fix-forward lands
 //! and folders without a land check never batch.
 //!
 //! The run lives in memory: a restart holds every member (`land::reconcile`), and the

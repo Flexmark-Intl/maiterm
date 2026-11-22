@@ -55,13 +55,13 @@ pub struct SettingsChange {
     pub add_hosts: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub remove_hosts: Vec<String>,
-    /// The human's alone: a push leaves this computer.
+    /// Under the Settings checkpoint (`change_plan::route`); a push leaves this computer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub push_after_land: Option<bool>,
-    /// The human's alone: which of the Hive's agents are chats on the phone.
+    /// Under the Settings checkpoint: which of the Hive's agents are chats on the phone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workers_on_phone: Option<bool>,
-    /// The human's alone: local database sockets the builders may connect to (`check_socket`).
+    /// Under the Access checkpoint: local database sockets the builders may connect to (`check_socket`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub add_sockets: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
