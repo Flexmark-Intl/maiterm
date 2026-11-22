@@ -73,7 +73,7 @@ test('a claude -p run inside the tab is never asked about or blocked', async ($,
   on('session.surfaces', () => ({ value: [] }))
   const result = await $.classic.PreCompact({ trigger: 'auto', custom_instructions: null })
   expect(result.block).toBeUndefined()
-  // It does not speak for the tab at all (nested-session.test.ts), so maiTerm hears nothing.
+  // It does not speak for the tab at all (nested-session.test.ts), so maiTerm hears nothing of it.
   expect(urls).toEqual([])
   expect(beneath.runs).toBe(1)
 })

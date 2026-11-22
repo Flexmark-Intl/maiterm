@@ -29,12 +29,15 @@ function tab(on: On, posted: string[], owner: string | undefined, surfaces: stri
 
 const start = { hook_event_name: 'SessionStart', session_id: 'session-child', source: 'startup' }
 
-test('a claude -p the tab agent runs does not claim the tab', async ($, on) => {
+test('a claude -p the tab agent runs does not claim the tab, and says it is a child run', async ($, on) => {
   const posted: string[] = []
   tab(on, posted, 'session-parent', [])
   await $.classic.SessionStart(start)
   await $.classic.Stop({})
-  expect(posted).toEqual([])
+  // Only its SessionStart goes, naming no tab, so maiTerm drops the settings hook's anonymous copy.
+  expect(posted.length).toBe(1)
+  expect(posted[0]).toContain('nested=1')
+  expect(posted[0]).toContain('tab_id=&')
 })
 
 test('the tab agent itself, started fresh, claims its tab', async ($, on) => {

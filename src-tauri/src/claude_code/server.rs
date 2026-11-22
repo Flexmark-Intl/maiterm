@@ -5668,6 +5668,14 @@ async fn hooks_handler(
             let mut sent = srv.state.mod_agent_sessions.write();
             sent.retain(|_, at| now.duration_since(*at) < MOD_COPY_WINDOW * 6);
             sent.insert(key, now);
+            // A `claude -p` a tab's agent ran (the mod's `load`): recorded above only so the
+            // settings hooks' tab-less copy of this event is dropped rather than pooled for an
+            // initSession to claim. It is no tab's agent, so nothing else is done with it.
+            if params.get("nested").map(String::as_str) == Some("1") {
+                log::debug!("Claude hook: '{}' session={} is a child run inside a tab, not its agent",
+                    hook_event_name, &session_id[..session_id.len().min(8)]);
+                return StatusCode::OK.into_response();
+            }
         } else if srv.state.mod_agent_sessions.read().get(&key).is_some_and(|at| at.elapsed() < MOD_COPY_WINDOW) {
             log::debug!("Claude hook: '{}' session={} dropped, the maiterm-tab mod already sent it",
                 hook_event_name, &session_id[..session_id.len().min(8)]);

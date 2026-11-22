@@ -16,6 +16,8 @@ const MIN_VERSION = [2, 1, 290]
 type Link = { tab: string; port: string; auth: string }
 
 let link: Promise<Link | null> | undefined
+// Set instead of `link` in a child run (`load`): where maiTerm is, to say only that much.
+let nested: Link | undefined
 
 function isAtLeast(version: string, min: number[]): boolean {
   const parts = version.split(/[.-]/).map(n => Number.parseInt(n, 10))
@@ -46,7 +48,10 @@ async function load($: EngineInterface): Promise<Link | null> {
   // mod reloaded and then ran /clear also holds a stale id there for a moment, and it draws.
   // MAITERM_VIA_MOD, inherited too, keeps the settings command hooks beneath quiet as well.
   const owner = await $.env.get('MAITERM_MOD_SESSION')
-  if (owner && owner !== (await $.session.id()) && (await $.session.surfaces()).length === 0) return null
+  if (owner && owner !== (await $.session.id()) && (await $.session.surfaces()).length === 0) {
+    nested = { tab, port, auth }
+    return null
+  }
   // Tells maiTerm's SessionStart/SessionEnd command hooks, which run beneath this mod and
   // inherit this process's environment, that this mod speaks for the tab.
   await $.env.set('MAITERM_VIA_MOD', '1')
@@ -267,7 +272,13 @@ export const register: Register = on => {
 
   on('classic.SessionStart', async ($, e, next) => {
     const to = await linkOf($)
-    if (!to) return next(e)
+    if (!to) {
+      // A child run says only that it is one, with no tab: its settings http hook beneath sends
+      // the same SessionStart with no tab either, which maiTerm would otherwise pool for the next
+      // `initSession` without a session id to claim (claim_pending_index) — the takeover again.
+      if (nested) await send($, { ...nested, tab: '' }, e, '&nested=1')
+      return next(e)
+    }
     // A /clear starts a new session in this process (and no `session.start`): the loop runs on.
     // Only then: a reloaded mod runs `session.start` again, which sets it; and a non-empty value
     // is no proof of an interactive process, since a `claude -p` with no input inherits it and
