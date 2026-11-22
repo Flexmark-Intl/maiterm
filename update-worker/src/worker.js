@@ -225,9 +225,10 @@ const kindIsWaiting = (kind) => kind !== "idle_done";
 // Which desktop rang, for a phone paired with several (protocol §6.3). Both optional: a string
 // that is present and non-blank is passed on, capped; anything else is left out entirely, so an
 // older desktop's push builds exactly the payload it always did (and FCM's string-only `data`
-// never receives "undefined").
+// never receives "undefined"). Capped by code point, as the desktop counts: a UTF-16 slice
+// could cut an emoji in half and send APNs/FCM a lone surrogate.
 const optField = (v, max) =>
-  typeof v === "string" && v.trim() ? v.trim().slice(0, max) : undefined;
+  typeof v === "string" && v.trim() ? [...v.trim()].slice(0, max).join("") : undefined;
 const serverFields = (msg) => ({
   fp: optField(msg.server_fp, 128),
   name: optField(msg.server_name, 40),
