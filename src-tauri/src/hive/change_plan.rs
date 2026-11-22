@@ -11,18 +11,24 @@
 //! A call may mix them: the parts the checkpoints hand the queen apply at once, and the rest goes on
 //! one card the human approves (`change::approved_in`). Each half is reduced to what actually differs
 //! from the record (`Prepared::change`) before anything else: a card stores only what it shows, so
-//! a field that was a no-op at filing can't apply unseen on a later approval (the review). Every
-//! limit is checked before anything is saved, so a call that would fail applies nothing; a part
-//! that fails anyway (the record changed meanwhile) leaves what already applied logged and told.
+//! a field that was a no-op at filing can't apply unseen on a later approval.
 //!
-//! The core fields go through `change::check_core`/`write`, under the write lock. Tools go through
-//! the Tools sheet's own write (`tool_change::write_tools`), with the hosts and output folders the
-//! added tools need ticked, since they come with the tool. The gallery (budget, generator hosts,
-//! output folders) is a delta merged onto the record as it is after the tools write, just before
-//! Budget and generation's write (`gallery::budget::set_checked`), so neither a tool's hosts nor a
-//! change the human just made is written over. The rules Rust holds for anyone hold for her: never
-//! a repo remote's host, home or a private address, a socket not named like a database's, or a tool
-//! not detected on this Mac.
+//! **One write.** Everything that needs the disk, the network or a tool detection is gathered first
+//! (`gather`: the detection, every added output folder in its canonical form, the hosts looked up).
+//! Then `apply_all` works the whole change out on a copy of the record (core fields, tools and the
+//! gallery's hosts and folders) and checks every limit on the combined result. The same function is
+//! the dry run (`prepare`) and, under the write lock, the write (`commit`), so a change applies whole
+//! or not at all. Two review rounds found the earlier shape, three writers each with its own checks,
+//! losing a tool's hosts, storing folders as typed and saving half a change; this is the fix of the
+//! approach, not of the lines. The budget alone is a second step after it, through Budget and
+//! generation's own write (`gallery::budget::set_checked`), because a raise there also closes the
+//! budget row and wakes the queen; it is read and written with no await between, so nothing written
+//! meanwhile is written over.
+//!
+//! The rules Rust holds for anyone hold for her: never a repo remote's host, home or a private
+//! address, a socket not named like a database's, or a tool not detected on this Mac.
+
+use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
@@ -31,9 +37,9 @@ use super::checkpoints::{self, ACCESS, SETTINGS};
 use super::create::DetectedTool;
 use super::deliver::one_line;
 use super::gallery::budget::{self as gallery, normalize_host, GalleryChange, MAX_GENERATOR_HOSTS, MAX_OUTPUT_FOLDERS};
-use super::record::Hive;
+use super::record::{Hive, STATUS_ACTIVE};
 use super::rpc::{HiveRequest, HiveWindow};
-use super::tool_change::{self, ToolsPreview};
+use super::tool_change;
 use super::tools::{Caller, Ctx};
 
 const MAX_REASON: usize = 500;
@@ -69,6 +75,7 @@ pub fn route(hive: &Hive, c: &SettingsChange) -> (SettingsChange, SettingsChange
         remove_output_folders,
         prompt_timeout_secs,
         daily_digest,
+        health_check_minutes,
         run_queue
     );
     // The approval switch itself, and money: the human's, always.
@@ -78,18 +85,61 @@ pub fn route(hive: &Hive, c: &SettingsChange) -> (SettingsChange, SettingsChange
     (now, card)
 }
 
-/// A tools change worked out against a fresh detection, every limit `write_tools` holds checked.
-struct ToolsStep {
-    detected: Vec<DetectedTool>,
-    next: Vec<String>,
-    preview: ToolsPreview,
+/// What the write needs from the disk and a tool detection, gathered off the lock.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Gathered {
+    /// A fresh detection, when the change names tools.
+    detected: Option<Vec<DetectedTool>>,
+    /// Each output folder named, as typed (trimmed) → its canonical form; a folder offered by an
+    /// added tool too. A folder named to be added that has no entry here wasn't checked: refused.
+    canon: HashMap<String, String>,
 }
 
-/// What a change does, every part checked against the record: nothing is saved. `change` is only
-/// what differs, normalised: what a card stores and what applies.
-pub(crate) struct Prepared {
-    pub lines: Vec<String>,
-    pub change: SettingsChange,
+impl Gathered {
+    fn canon_of(&self, raw: &str) -> Option<&String> {
+        self.canon.get(raw.trim())
+    }
+}
+
+/// The detection and the canonical folders, and every check that needs the disk: an added folder
+/// as Budget and generation checks one (it exists, holds neither the Hive nor maiTerm's data), a
+/// folder an added tool offers likewise. Blocks off the async thread.
+async fn gather<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, hive: &Hive, c: &SettingsChange, remotes: &[String]) -> Result<Gathered, String> {
+    let mut g = Gathered::default();
+    let mut offered: Vec<String> = Vec::new();
+    if !c.add_tools.is_empty() || !c.remove_tools.is_empty() {
+        let prefs = ctx.data.read().preferences.clone();
+        let detected = super::tools::blocking(move || Ok(super::create::detect_tools(&prefs))).await?;
+        let next = tools_next(hive, c);
+        if next != hive.tools {
+            let preview = tool_change::preview(hive, &detected, &next, remotes)?;
+            offered = preview.folders_offered.clone();
+            // A host an added tool brings must not answer home either.
+            change::refuse_private_hosts(&preview.hosts_offered, false, &change::ip_remotes(remotes)).await?;
+        }
+        g.detected = Some(detected);
+    }
+    let adds: Vec<String> = c.add_output_folders.iter().chain(offered.iter()).map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).collect();
+    let removes: Vec<String> = c.remove_output_folders.iter().map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).collect();
+    let root = caller.paths.root.clone();
+    let canon = super::tools::blocking(move || {
+        let mut m = HashMap::new();
+        let app = super::create::app_data_dir();
+        for f in adds {
+            let c = gallery::check_output_folders(std::slice::from_ref(&f), &root, app.as_deref())?;
+            m.insert(f, c.into_iter().next().unwrap_or_default());
+        }
+        // A removal needs no check, only its canonical form when it still exists.
+        for f in removes {
+            if let Ok(p) = std::fs::canonicalize(crate::share::expand_tilde(&f)) {
+                m.entry(f).or_insert_with(|| p.to_string_lossy().to_string());
+            }
+        }
+        Ok(m)
+    })
+    .await?;
+    g.canon = canon;
+    Ok(g)
 }
 
 fn tools_next(hive: &Hive, c: &SettingsChange) -> Vec<String> {
@@ -102,231 +152,182 @@ fn tools_next(hive: &Hive, c: &SettingsChange) -> Vec<String> {
     next
 }
 
-async fn tools_step<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, hive: &Hive, c: &SettingsChange, remotes: &[String]) -> Result<Option<ToolsStep>, String> {
-    if c.add_tools.is_empty() && c.remove_tools.is_empty() {
-        return Ok(None);
-    }
-    for r in &c.remove_tools {
-        if !hive.tools.iter().any(|t| t == r.trim()) {
-            return Err(format!("This Hive has no tool \u{201c}{}\u{201d} to remove; its tools: {}.", one_line(r.trim(), 80), if hive.tools.is_empty() { "none".to_string() } else { hive.tools.join(", ") }));
-        }
-    }
-    let next = tools_next(hive, c);
-    if next == hive.tools {
-        return Ok(None);
-    }
-    let prefs = ctx.data.read().preferences.clone();
-    let detected = super::tools::blocking(move || Ok(super::create::detect_tools(&prefs))).await?;
-    let preview = tool_change::preview(hive, &detected, &next, remotes)?;
-    // The limits `write_tools` holds, now: nothing may save before one of them refuses.
-    let checked = tool_change::check(hive, &detected, &next, &preview.hosts_offered, remotes)?;
-    let (h, root, folders) = (hive.clone(), caller.paths.root.clone(), preview.folders_offered.clone());
-    super::tools::blocking(move || tool_change::check_folders(&h, &checked, &folders, &root, super::create::app_data_dir().as_deref())).await?;
-    Ok(Some(ToolsStep { detected, next, preview }))
-}
-
-fn tools_lines(s: &ToolsStep) -> Vec<String> {
-    tool_change::change_lines(&tool_change::Checked { preview: s.preview.clone(), hosts_added: s.preview.hosts_offered.clone(), folders_added: s.preview.folders_offered.clone() })
-}
-
-/// The gallery part, only what differs: a budget, and hosts and folders added or removed.
-#[derive(Debug, Clone, Default, PartialEq)]
-struct GalleryDelta {
-    budget: Option<u64>,
-    add_hosts: Vec<String>,
-    remove_hosts: Vec<String>,
-    add_folders: Vec<String>,
-    remove_folders: Vec<String>,
-}
-
 fn usd_of(cents: u64) -> String {
     gallery::usd(i64::try_from(cents).unwrap_or(i64::MAX / 10_000).saturating_mul(10_000))
 }
 
-/// What `c` changes in the gallery as it is on `hive`, and its lines: None when nothing differs.
-fn gallery_delta(hive: &Hive, c: &SettingsChange, by: By) -> Result<Option<(GalleryDelta, Vec<String>)>, String> {
-    let g = &hive.settings.gallery;
-    let mut d = GalleryDelta::default();
-    let mut lines = Vec::new();
-    if let Some(b) = c.budget_cents.filter(|b| *b != hive.budget_cents) {
+/// The whole change worked out: what it says and only what differs, normalised.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Prepared {
+    pub lines: Vec<String>,
+    pub change: SettingsChange,
+}
+
+/// `c` applied to `h` in full, or `h` left as it was and why not: the core fields
+/// (`change::check_core`), tools (`tool_change::check`, their offered hosts and folders with them),
+/// and the gallery's generator hosts and output folders, every limit checked on the combined
+/// result. The budget is only checked and named here: `commit` writes it after. Pure: the disk and
+/// the detection come in `g`.
+pub(crate) fn apply_all(h: &mut Hive, c: &SettingsChange, by: By, remotes: &[String], g: &Gathered) -> Result<Prepared, String> {
+    let core = change::check_core(h, &c.core(), by, remotes)?;
+    let mut next = h.clone();
+    change::apply_to(&mut next, &core.change);
+    let mut out = Prepared { lines: core.lines, change: core.change };
+
+    if let Some(detected) = &g.detected {
+        for r in &c.remove_tools {
+            if !h.tools.iter().any(|t| t == r.trim()) {
+                return Err(format!("This Hive has no tool \u{201c}{}\u{201d} to remove; its tools: {}.", one_line(r.trim(), 80), if h.tools.is_empty() { "none".to_string() } else { h.tools.join(", ") }));
+            }
+        }
+        let tools = tools_next(h, c);
+        if tools != h.tools {
+            let preview = tool_change::preview(&next, detected, &tools, remotes)?;
+            let mut checked = tool_change::check(&next, detected, &tools, &preview.hosts_offered, remotes)?;
+            checked.folders_added = Vec::new();
+            for f in &preview.folders_offered {
+                let canon = g.canon_of(f).ok_or_else(|| format!("{} wasn\u{2019}t checked: try again.", one_line(f, 200)))?;
+                if !next.settings.gallery.output_folders.contains(canon) && !checked.folders_added.contains(canon) {
+                    checked.folders_added.push(canon.clone());
+                }
+            }
+            out.lines.extend(tool_change::change_lines(&checked));
+            (out.change.add_tools, out.change.remove_tools) = (checked.preview.added.clone(), checked.preview.removed.clone());
+            tool_change::apply_to(&mut next, &checked);
+        }
+    } else if !c.add_tools.is_empty() || !c.remove_tools.is_empty() {
+        return Err("The tools weren\u{2019}t detected: try again.".to_string());
+    }
+
+    // The gallery's hosts and folders, as a delta on the record as the tools left it.
+    let gal = &mut next.settings.gallery;
+    let have: Vec<String> = gal.generator_hosts.iter().filter_map(|x| normalize_host(x).ok()).collect();
+    let mut removed_hosts = Vec::new();
+    for x in &c.remove_generator_hosts {
+        let n = normalize_host(x)?;
+        if have.contains(&n) && !removed_hosts.contains(&n) {
+            removed_hosts.push(n);
+        }
+    }
+    let mut added_hosts = Vec::new();
+    for n in gallery::check_hosts(&c.add_generator_hosts, remotes)? {
+        if !have.contains(&n) && !removed_hosts.contains(&n) {
+            added_hosts.push(n);
+        }
+    }
+    gal.generator_hosts.retain(|x| normalize_host(x).map_or(true, |n| !removed_hosts.contains(&n)));
+    gal.generator_hosts.extend(added_hosts.iter().cloned());
+    let mut removed_folders = Vec::new();
+    for f in c.remove_output_folders.iter().map(|f| f.trim()).filter(|f| !f.is_empty()) {
+        let canon = g.canon_of(f);
+        if let Some(x) = gal.output_folders.iter().find(|x| x.as_str() == f || Some(*x) == canon) {
+            if !removed_folders.contains(x) {
+                removed_folders.push(x.clone());
+            }
+        }
+    }
+    let mut added_folders = Vec::new();
+    for f in c.add_output_folders.iter().map(|f| f.trim()).filter(|f| !f.is_empty()) {
+        let canon = g.canon_of(f).ok_or_else(|| format!("{} wasn\u{2019}t checked: try again.", one_line(f, 200)))?.clone();
+        if !gal.output_folders.contains(&canon) && !added_folders.contains(&canon) && !removed_folders.contains(&canon) {
+            added_folders.push(canon);
+        }
+    }
+    gal.output_folders.retain(|x| !removed_folders.contains(x));
+    gal.output_folders.extend(added_folders.iter().cloned());
+    if gal.generator_hosts.len() > MAX_GENERATOR_HOSTS {
+        return Err(format!("At most {MAX_GENERATOR_HOSTS} generator hosts, the ones added tools bring included."));
+    }
+    if gal.output_folders.len() > MAX_OUTPUT_FOLDERS {
+        return Err(format!("At most {MAX_OUTPUT_FOLDERS} output folders, the ones added tools write into included."));
+    }
+    if !added_hosts.is_empty() {
+        out.lines.push(format!("Media workers may also reach (from each one\u{2019}s next launch): {}", added_hosts.join(", ")));
+    }
+    if !removed_hosts.is_empty() {
+        out.lines.push(format!("Media workers no longer reach (from each one\u{2019}s next launch): {}", removed_hosts.join(", ")));
+    }
+    if !added_folders.is_empty() {
+        out.lines.push(format!("galleryAdd may also file from: {}", added_folders.join(", ")));
+    }
+    if !removed_folders.is_empty() {
+        out.lines.push(format!("galleryAdd no longer files from: {}", removed_folders.join(", ")));
+    }
+    (out.change.add_generator_hosts, out.change.remove_generator_hosts) = (added_hosts, removed_hosts);
+    (out.change.add_output_folders, out.change.remove_output_folders) = (added_folders, removed_folders);
+
+    if let Some(b) = c.budget_cents.filter(|b| *b != h.budget_cents) {
         gallery::check_budget(b)?;
-        if b > hive.budget_cents && by == By::Coordinator {
+        if b > h.budget_cents && by == By::Coordinator {
             return Err("Raising the budget is your human\u{2019}s: it goes on a card.".to_string());
         }
-        lines.push(format!("Budget: {} \u{2192} {}", usd_of(hive.budget_cents), usd_of(b)));
-        d.budget = Some(b);
+        out.lines.push(format!("Budget: {} \u{2192} {}", usd_of(h.budget_cents), usd_of(b)));
+        out.change.budget_cents = Some(b);
     }
-    let have: Vec<String> = g.generator_hosts.iter().filter_map(|h| normalize_host(h).ok()).collect();
-    for h in &c.remove_generator_hosts {
-        let n = normalize_host(h)?;
-        if have.contains(&n) && !d.remove_hosts.contains(&n) {
-            d.remove_hosts.push(n);
-        }
-    }
-    for h in &c.add_generator_hosts {
-        let n = normalize_host(h)?;
-        if !have.contains(&n) && !d.add_hosts.contains(&n) && !d.remove_hosts.contains(&n) {
-            d.add_hosts.push(n);
-        }
-    }
-    for f in c.remove_output_folders.iter().map(|f| f.trim()) {
-        if g.output_folders.iter().any(|x| x == f) && !d.remove_folders.iter().any(|x| x == f) {
-            d.remove_folders.push(f.to_string());
-        }
-    }
-    for f in c.add_output_folders.iter().map(|f| f.trim()).filter(|f| !f.is_empty()) {
-        if !g.output_folders.iter().any(|x| x == f) && !d.add_folders.iter().any(|x| x == f) && !d.remove_folders.iter().any(|x| x == f) {
-            d.add_folders.push(f.to_string());
-        }
-    }
-    if !d.add_hosts.is_empty() {
-        lines.push(format!("Media workers may also reach (from each one\u{2019}s next launch): {}", d.add_hosts.join(", ")));
-    }
-    if !d.remove_hosts.is_empty() {
-        lines.push(format!("Media workers no longer reach (from each one\u{2019}s next launch): {}", d.remove_hosts.join(", ")));
-    }
-    if !d.add_folders.is_empty() {
-        lines.push(format!("galleryAdd may also file from: {}", d.add_folders.join(", ")));
-    }
-    if !d.remove_folders.is_empty() {
-        lines.push(format!("galleryAdd no longer files from: {}", d.remove_folders.join(", ")));
-    }
-    if lines.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some((d, lines)))
-}
 
-/// The gallery with `d` merged onto it, or why not: within the limits Budget and generation holds.
-fn merged(hive: &Hive, d: &GalleryDelta) -> Result<GalleryChange, String> {
-    let g = &hive.settings.gallery;
-    let mut hosts: Vec<String> = g.generator_hosts.iter().filter(|h| normalize_host(h).map_or(true, |n| !d.remove_hosts.contains(&n))).cloned().collect();
-    for h in &d.add_hosts {
-        if !hosts.iter().any(|x| normalize_host(x).ok().as_deref() == Some(h.as_str())) {
-            hosts.push(h.clone());
-        }
-    }
-    let mut folders: Vec<String> = g.output_folders.iter().filter(|f| !d.remove_folders.contains(f)).cloned().collect();
-    for f in &d.add_folders {
-        if !folders.contains(f) {
-            folders.push(f.clone());
-        }
-    }
-    if hosts.len() > MAX_GENERATOR_HOSTS {
-        return Err(format!("At most {MAX_GENERATOR_HOSTS} generator hosts."));
-    }
-    if folders.len() > MAX_OUTPUT_FOLDERS {
-        return Err(format!("At most {MAX_OUTPUT_FOLDERS} output folders."));
-    }
-    Ok(GalleryChange { budget_cents: d.budget.unwrap_or(hive.budget_cents), output_folders: folders, generator_hosts: hosts })
-}
-
-/// The added hosts and folders checked as Budget and generation checks them (folders on disk, hosts
-/// against the remotes), off the async thread. A removal needs no check.
-async fn gallery_checked(caller: &Caller, d: &GalleryDelta, remotes: &[String]) -> Result<(), String> {
-    let (d, remotes, root) = (d.clone(), remotes.to_vec(), caller.paths.root.clone());
-    super::tools::blocking(move || {
-        gallery::check_hosts(&d.add_hosts, &remotes)?;
-        gallery::check_output_folders(&d.add_folders, &root, super::create::app_data_dir().as_deref())?;
-        Ok(())
-    })
-    .await
+    // The budget is `commit`'s second step; everything else lands here, whole.
+    next.budget_cents = h.budget_cents;
+    *h = next;
+    Ok(out)
 }
 
 /// What `c` would do to `hive`, every part checked, nothing saved.
 pub(crate) async fn prepare<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, hive: &Hive, c: &SettingsChange, by: By, remotes: &[String]) -> Result<Prepared, String> {
-    let core = change::check_core(hive, &c.core(), by, remotes)?;
-    let mut lines = core.lines;
-    let mut change = core.change;
-    if let Some(s) = tools_step(ctx, caller, hive, c, remotes).await? {
-        lines.extend(tools_lines(&s));
-        (change.add_tools, change.remove_tools) = (s.preview.added.clone(), s.preview.removed.clone());
-    }
-    if let Some((d, l)) = gallery_delta(hive, c, by)? {
-        merged(hive, &d)?;
-        gallery_checked(caller, &d, remotes).await?;
-        lines.extend(l);
-        change.budget_cents = d.budget;
-        (change.add_generator_hosts, change.remove_generator_hosts, change.add_output_folders, change.remove_output_folders) = (d.add_hosts, d.remove_hosts, d.add_folders, d.remove_folders);
-    }
-    Ok(Prepared { lines, change })
+    let g = gather(ctx, caller, hive, c, remotes).await?;
+    apply_all(&mut hive.clone(), c, by, remotes, &g)
 }
 
-/// Hosts added now must not answer home: a name the queen grants alone must resolve too.
-async fn refuse_home(c: &SettingsChange, by: By, remotes: &[String]) -> Result<(), String> {
-    let hosts: Vec<String> = c.add_hosts.iter().chain(c.add_generator_hosts.iter()).cloned().collect();
-    change::refuse_private_hosts(&hosts, by == By::Coordinator, &change::ip_remotes(remotes)).await
-}
-
-/// A change applied: the record after, what changed, and the part that failed after others had
-/// applied, if one did.
+/// A change applied: the record after, what changed, and the budget step's refusal when it failed
+/// after the rest had applied.
 pub(crate) struct Committed {
     pub hive: Hive,
     pub lines: Vec<String>,
     pub failed: Option<String>,
 }
 
-/// `c` applied, each part checked again against the record as it is now, every limit before any
-/// write: the core under the write lock, then tools, then the gallery merged onto the record as
-/// the tools write left it. Err only when nothing applied.
+/// `c` applied whole, checked again against the record under the write lock (`apply_all`), then
+/// its budget. Err when nothing applied.
 pub(crate) async fn commit<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, c: &SettingsChange, by: By, remotes: &[String]) -> Result<Committed, String> {
-    refuse_home(c, by, remotes).await?;
+    // A host the queen grants alone must resolve, and nowhere home; the human's may not resolve yet.
+    let hosts: Vec<String> = c.add_hosts.iter().chain(c.add_generator_hosts.iter()).cloned().collect();
+    change::refuse_private_hosts(&hosts, by == By::Coordinator, &change::ip_remotes(remotes)).await?;
     let current = super::autonomy::current_hive(ctx, caller).ok_or("This Hive is gone.")?;
-    let tools = tools_step(ctx, caller, &current, c, remotes).await?;
-    let gallery_part = gallery_delta(&current, c, by)?;
-    if let Some((d, _)) = &gallery_part {
-        merged(&current, d)?;
-        gallery_checked(caller, d, remotes).await?;
-    }
-    change::check_core(&current, &c.core(), by, remotes)?;
-
-    let (mut hive, mut lines) = change::write(ctx, caller, &c.core(), by, remotes)?;
+    let g = gather(ctx, caller, &current, c, remotes).await?;
+    let mut outcome: Result<Prepared, String> = Err("This Hive is gone.".to_string());
+    // A refused change leaves the record as it was (saved again, unchanged: harmless).
+    let mut hive = super::finish::write_status(ctx, caller, &[STATUS_ACTIVE, super::fuses::STATUS_PAUSED], None, |h| {
+        outcome = apply_all(h, c, by, remotes, &g);
+    })?;
+    let done = outcome?;
+    let mut lines = done.lines;
     let mut failed = None;
-    if let Some(s) = tools {
-        match tool_change::write_tools(ctx, caller, &s.detected, remotes, &s.next, &s.preview.hosts_offered, &s.preview.folders_offered).await {
-            Ok((h, checked)) => {
-                hive = h;
-                lines.extend(tool_change::change_lines(&checked));
+    if let Some(b) = done.change.budget_cents {
+        let (p, id) = (caller.paths.clone(), caller.hive.id.clone());
+        match super::tools::blocking(move || Ok(gallery::spent_of(&id, &p))).await {
+            Ok(spent) => {
+                // Read and written with no await between: the lists stay as they are now.
+                let res = match super::autonomy::current_hive(ctx, caller) {
+                    Some(fresh) => {
+                        let gc = GalleryChange { budget_cents: b, output_folders: fresh.settings.gallery.output_folders.clone(), generator_hosts: fresh.settings.gallery.generator_hosts.clone() };
+                        gallery::set_checked(ctx, &caller.label, &caller.workspace_id, &caller.hive.id, gc, spent).await
+                    }
+                    None => Err("This Hive is gone.".to_string()),
+                };
+                match res {
+                    Ok(h) => hive = h,
+                    Err(e) => failed = Some(e),
+                }
             }
             Err(e) => failed = Some(e),
         }
-    }
-    if let (None, Some((d, _))) = (&failed, gallery_part) {
-        let p = caller.paths.clone();
-        let id = caller.hive.id.clone();
-        let spent = super::tools::blocking(move || Ok(gallery::spent_of(&id, &p))).await?;
-        // Re-read and merged with no await before the write, so nothing written meanwhile (the
-        // tools write's hosts, the human's own budget) is written over.
-        let fresh = super::autonomy::current_hive(ctx, caller).ok_or("This Hive is gone.")?;
-        let applied = match (gallery_delta(&fresh, &delta_change(&d), by), merged(&fresh, &d)) {
-            (Ok(Some((_, l))), Ok(g)) => gallery::set_checked(ctx, &caller.label, &caller.workspace_id, &caller.hive.id, g, spent).await.map(|h| (h, l)),
-            (Ok(None), _) => Ok((hive.clone(), Vec::new())),
-            (Err(e), _) | (_, Err(e)) => Err(e),
-        };
-        match applied {
-            Ok((h, l)) => {
-                hive = h;
-                lines.extend(l);
-            }
-            Err(e) => failed = Some(e),
+        if failed.is_some() {
+            lines.retain(|l| !l.starts_with("Budget: "));
         }
     }
     match (lines.is_empty(), failed) {
         (true, Some(e)) => Err(e),
         (true, None) => Err(change::NOTHING.to_string()),
         (false, failed) => Ok(Committed { hive, lines, failed }),
-    }
-}
-
-/// A gallery delta as the change fields that name it.
-fn delta_change(d: &GalleryDelta) -> SettingsChange {
-    SettingsChange {
-        budget_cents: d.budget,
-        add_generator_hosts: d.add_hosts.clone(),
-        remove_generator_hosts: d.remove_hosts.clone(),
-        add_output_folders: d.add_folders.clone(),
-        remove_output_folders: d.remove_folders.clone(),
-        ..Default::default()
     }
 }
 
@@ -383,9 +384,8 @@ pub(crate) async fn change_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
     let remotes = change::remotes_of(&hive).await?;
     let (now, card) = route(&hive, &change);
     // Both halves checked, and reduced to what differs, before either applies.
-    let none = || Prepared { lines: Vec::new(), change: SettingsChange::default() };
-    let now = if is_empty(&now) { none() } else { prepare(ctx, caller, &hive, &now, By::Coordinator, &remotes).await? };
-    let card = if is_empty(&card) { none() } else { prepare(ctx, caller, &hive, &card, By::Approved, &remotes).await? };
+    let now = if is_empty(&now) { Prepared::default() } else { prepare(ctx, caller, &hive, &now, By::Coordinator, &remotes).await? };
+    let card = if is_empty(&card) { Prepared::default() } else { prepare(ctx, caller, &hive, &card, By::Approved, &remotes).await? };
     if now.lines.is_empty() && card.lines.is_empty() {
         return Err(change::NOTHING.to_string());
     }
@@ -420,7 +420,7 @@ pub(crate) async fn change_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
             note.push_str(&running);
         }
         if let Some(e) = &done.failed {
-            note.push_str(&format!(" Not applied, as the Hive changed meanwhile: {e}"));
+            note.push_str(&format!(" The budget wasn\u{2019}t changed: {e}"));
             out.insert("not_applied".into(), json!(e));
         }
         out.insert("applied".into(), json!(lines));
@@ -473,7 +473,6 @@ pub(crate) async fn change_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hive::record::STATUS_ACTIVE;
 
     fn hive() -> Hive {
         let mut h = Hive { id: "h1".into(), cap: 3, budget_cents: 1000, status: STATUS_ACTIVE.into(), checkpoints: super::super::create::default_checkpoints("base"), ..Hive::default() };
@@ -542,6 +541,7 @@ mod tests {
             budget_cents: Some(900),
             prompt_timeout_secs: Some(600),
             daily_digest: Some(false),
+            health_check_minutes: Some(30),
             run_queue: Some(Default::default()),
             checkpoints: [("access".to_string(), "ask".to_string())].into(),
         };
@@ -562,41 +562,55 @@ mod tests {
         }
     }
 
-    /// The gallery is a delta of only what differs, merged onto the record as it is when it
-    /// applies: a host a tools write added meanwhile is kept, and her raise is refused.
+    fn gathered(pairs: &[(&str, &str)]) -> Gathered {
+        Gathered { detected: None, canon: pairs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect() }
+    }
+
+    /// The gallery part is only what differs, folders in their canonical form (a folder already
+    /// listed under its canonical name isn't added twice), and her raise is refused.
     #[test]
-    fn the_gallery_part_is_a_delta_merged_onto_the_record_now() {
+    fn the_gallery_part_is_only_what_differs_in_canonical_form() {
         let mut h = hive();
         h.settings.gallery.generator_hosts = vec!["old.example.com".into()];
-        h.settings.gallery.output_folders = vec!["/tmp/a".into()];
+        h.settings.gallery.output_folders = vec!["/private/tmp/a".into(), "/Users/u/renders".into()];
+        let g = gathered(&[("/tmp/a", "/private/tmp/a"), ("~/renders", "/Users/u/renders"), ("/tmp/new", "/private/tmp/new")]);
         let c = SettingsChange {
             budget_cents: Some(500),
             add_generator_hosts: vec!["New.Example.com".into(), "old.example.com".into()],
+            add_output_folders: vec!["~/renders".into(), "/tmp/new".into()],
             remove_output_folders: vec!["/tmp/a".into(), "/tmp/never".into()],
             ..Default::default()
         };
-        let (d, lines) = gallery_delta(&h, &c, By::Coordinator).unwrap().unwrap();
-        assert_eq!(d, GalleryDelta { budget: Some(500), add_hosts: vec!["new.example.com".into()], remove_folders: vec!["/tmp/a".into()], ..Default::default() }, "only what differs");
-        assert_eq!(lines.len(), 3, "{lines:?}");
+        let mut after = h.clone();
+        let p = apply_all(&mut after, &c, By::Coordinator, &[], &g).unwrap();
+        assert_eq!(p.change.add_generator_hosts, vec!["new.example.com".to_string()], "only what differs");
+        assert_eq!(p.change.add_output_folders, vec!["/private/tmp/new".to_string()], "canonical, and ~/renders is already there");
+        assert_eq!(p.change.remove_output_folders, vec!["/private/tmp/a".to_string()], "found by its canonical form");
+        assert_eq!(p.change.budget_cents, Some(500));
+        assert_eq!(after.settings.gallery.output_folders, vec!["/Users/u/renders".to_string(), "/private/tmp/new".to_string()]);
+        assert_eq!(after.budget_cents, 1000, "the budget is commit's second step");
+        assert_eq!(p.lines.len(), 4, "{:?}", p.lines);
 
-        // A tools write added a host meanwhile: the merge keeps it.
-        let mut later = h.clone();
-        later.settings.gallery.generator_hosts.push("tool.example.com".into());
-        let g = merged(&later, &d).unwrap();
-        assert_eq!(g.generator_hosts, vec!["old.example.com".to_string(), "tool.example.com".to_string(), "new.example.com".to_string()]);
-        assert!(g.output_folders.is_empty());
-        // The human lowered the budget meanwhile: a delta that names none keeps theirs.
-        let hosts_only = GalleryDelta { add_hosts: vec!["x.example.com".into()], ..Default::default() };
-        later.budget_cents = 200;
-        assert_eq!(merged(&later, &hosts_only).unwrap().budget_cents, 200);
+        let unchecked = SettingsChange { add_output_folders: vec!["/elsewhere".into()], ..Default::default() };
+        assert!(apply_all(&mut h.clone(), &unchecked, By::Coordinator, &[], &g).unwrap_err().contains("checked"));
+        let raise = SettingsChange { budget_cents: Some(5000), ..Default::default() };
+        assert!(apply_all(&mut h.clone(), &raise, By::Coordinator, &[], &g).unwrap_err().contains("card"));
+        assert!(apply_all(&mut h.clone(), &raise, By::Approved, &[], &g).is_ok());
+        let same = SettingsChange { budget_cents: Some(1000), add_generator_hosts: vec!["old.example.com".into()], ..Default::default() };
+        assert!(apply_all(&mut h.clone(), &same, By::Approved, &[], &g).unwrap().lines.is_empty(), "a no-op can't ride on a card");
+    }
 
-        assert!(gallery_delta(&h, &SettingsChange { budget_cents: Some(5000), ..Default::default() }, By::Coordinator).unwrap_err().contains("card"));
-        assert!(gallery_delta(&h, &SettingsChange { budget_cents: Some(5000), ..Default::default() }, By::Approved).unwrap().is_some());
-        assert!(gallery_delta(&h, &SettingsChange { budget_cents: Some(1000), ..Default::default() }, By::Approved).unwrap().is_none(), "the same budget changes nothing, so a card can't carry it");
-        assert!(gallery_delta(&h, &SettingsChange { add_generator_hosts: vec!["old.example.com".into()], ..Default::default() }, By::Approved).unwrap().is_none());
-        let mut full = h.clone();
-        full.settings.gallery.generator_hosts = (0..MAX_GENERATOR_HOSTS).map(|i| format!("h{i}.example.com")).collect();
-        assert!(merged(&full, &hosts_only).unwrap_err().contains("At most"));
+    /// A refused part leaves the whole record as it was: nothing applies by halves.
+    #[test]
+    fn a_change_applies_whole_or_not_at_all() {
+        let mut h = hive();
+        h.settings.gallery.generator_hosts = (0..MAX_GENERATOR_HOSTS).map(|i| format!("h{i}.example.com")).collect();
+        let before = h.clone();
+        let c = SettingsChange { cap: Some(5), add_generator_hosts: vec!["one-more.example.com".into()], ..Default::default() };
+        assert!(apply_all(&mut h, &c, By::Approved, &[], &Gathered::default()).unwrap_err().contains("At most"));
+        assert_eq!(h, before, "the cap didn't apply either");
+        let tools = SettingsChange { add_tools: vec!["mcp:x".into()], ..Default::default() };
+        assert!(apply_all(&mut h, &tools, By::Approved, &[], &Gathered::default()).unwrap_err().contains("detected"));
     }
 
     #[test]

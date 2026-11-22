@@ -90,6 +90,9 @@ pub struct SettingsChange {
     pub prompt_timeout_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daily_digest: Option<bool>,
+    /// How often the queen is shown workers that may be stalled (`health`); 0 is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health_check_minutes: Option<u32>,
     /// The run queue, whole: its queued commands and resource limits.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_queue: Option<super::record::RunQueueSettings>,
@@ -383,6 +386,16 @@ pub fn check_core(hive: &Hive, c: &SettingsChange, by: By, remote_hosts: &[Strin
             lines.push(format!("Daily digest: {}", if d { "on" } else { "off" }));
         }
     }
+    if let Some(m) = c.health_check_minutes {
+        if m > super::health::MAX_MINUTES {
+            return Err(format!("The worker check runs every 1 to {} minutes, or 0 for never.", super::health::MAX_MINUTES));
+        }
+        if m != hive.settings.autonomy.health_check_minutes {
+            out.health_check_minutes = Some(m);
+            let say = |m: u32| if m == 0 { "off".to_string() } else { format!("every {m} min") };
+            lines.push(format!("Worker check: {} \u{2192} {}", say(hive.settings.autonomy.health_check_minutes), say(m)));
+        }
+    }
 
     if let Some(rq) = &c.run_queue {
         let rq = super::run::validate_run_queue(hive, rq)?;
@@ -482,6 +495,9 @@ pub fn apply_to(hive: &mut Hive, c: &SettingsChange) {
     }
     if let Some(d) = c.daily_digest {
         hive.settings.autonomy.daily_digest = d;
+    }
+    if let Some(m) = c.health_check_minutes {
+        hive.settings.autonomy.health_check_minutes = m;
     }
     if let Some(rq) = &c.run_queue {
         hive.settings.run_queue = rq.clone();
@@ -689,7 +705,7 @@ fn run_queue_schema() -> Value {
 }
 
 pub fn tool_definition(tab_id: &Value) -> Value {
-    json!({
+    let mut def = json!({
         "name": "hiveChangeSettings",
         "description": format!(
             "Change any of this Hive\u{2019}s settings; name only what changes, and say why. Two checkpoints decide what applies at \
@@ -697,7 +713,7 @@ pub fn tool_definition(tab_id: &Value) -> Value {
              (maiTerm tells you which): ACCESS covers what workers may use (add_hosts/remove_hosts, add_sockets/remove_sockets, \
              add_tools/remove_tools, add_generator_hosts/remove_generator_hosts), SETTINGS covers the rest (cap, models and \
              efforts, folders\u{2019} setup and land check, push_after_land, workers_on_phone, run_queue, budget_usd lowered, \
-             output folders, prompt_timeout_minutes, daily_digest). Your brief says who holds each. A call may mix them: what \
+             output folders, prompt_timeout_minutes, daily_digest, health_check_minutes). Your brief says who holds each. A call may mix them: what \
              its checkpoints hand you applies, the rest goes on one card. Raising budget_usd and any change of checkpoints \
              always go on a card. When a worker is stuck on a host, a database or a tool, grant it here rather than waiting: \
              a host answers each open sandbox blocker it settles. A change reaches each agent at its next launch: a running \
@@ -719,20 +735,6 @@ pub fn tool_definition(tab_id: &Value) -> Value {
                 "worker_effort": { "type": "string", "enum": EFFORTS },
                 "add_hosts": { "type": "array", "items": { "type": "string" }, "description": "Bare host names (api.example.com, *.example.com) every builder may reach" },
                 "remove_hosts": { "type": "array", "items": { "type": "string" } },
-                "add_sockets": { "type": "array", "items": { "type": "string" }, "description": "Full paths of local database sockets every builder may connect to (/tmp/.s.PGSQL.5432)" },
-                "remove_sockets": { "type": "array", "items": { "type": "string" } },
-                "add_tools": { "type": "array", "items": { "type": "string" }, "description": "Tool ids detected on this Mac (mcp:<server>, cli:<program>, skill:<name>): workers get the MCP servers and CLIs, and the hosts and output folders they need come with them" },
-                "remove_tools": { "type": "array", "items": { "type": "string" } },
-                "add_generator_hosts": { "type": "array", "items": { "type": "string" }, "description": "Hosts paid generators reach, for media workers" },
-                "remove_generator_hosts": { "type": "array", "items": { "type": "string" } },
-                "add_output_folders": { "type": "array", "items": { "type": "string" }, "description": "Absolute folders galleryAdd may file from" },
-                "remove_output_folders": { "type": "array", "items": { "type": "string" } },
-                "push_after_land": { "type": "boolean", "description": "maiTerm pushes each land to its remote" },
-                "workers_on_phone": { "type": "boolean", "description": "Workers are chats on your human's phone too" },
-                "budget_usd": { "type": "number", "minimum": 0, "description": "The generation budget in dollars; a raise always goes on a card" },
-                "prompt_timeout_minutes": { "type": "integer", "minimum": 1, "maximum": 60, "description": "How long you have to answer a worker's prompt before your human is told" },
-                "daily_digest": { "type": "boolean" },
-                "run_queue": run_queue_schema(),
                 "checkpoints": { "type": "object", "additionalProperties": { "type": "string", "enum": ["coordinator", "ask"] }, "description": "Checkpoint by key: always a card" },
                 "folders": {
                     "type": "array",
@@ -751,7 +753,34 @@ pub fn tool_definition(tab_id: &Value) -> Value {
             },
             "required": ["reason"]
         }
-    })
+    });
+    if let Some(p) = def.pointer_mut("/inputSchema/properties").and_then(Value::as_object_mut) {
+        p.extend(more_properties());
+    }
+    def
+}
+
+/// The rest of the tool's properties (their own `json!`: one would pass the macro's recursion limit).
+fn more_properties() -> serde_json::Map<String, Value> {
+    let strings = json!({ "type": "array", "items": { "type": "string" } });
+    let mut m = json!({
+        "add_sockets": { "type": "array", "items": { "type": "string" }, "description": "Full paths of local database sockets every builder may connect to (/tmp/.s.PGSQL.5432)" },
+        "add_tools": { "type": "array", "items": { "type": "string" }, "description": "Tool ids detected on this Mac (mcp:<server>, cli:<program>, skill:<name>): workers get the MCP servers and CLIs, and the hosts and output folders they need come with them" },
+        "add_generator_hosts": { "type": "array", "items": { "type": "string" }, "description": "Hosts paid generators reach, for media workers" },
+        "add_output_folders": { "type": "array", "items": { "type": "string" }, "description": "Absolute folders galleryAdd may file from" },
+        "push_after_land": { "type": "boolean", "description": "maiTerm pushes each land to its remote" },
+        "workers_on_phone": { "type": "boolean", "description": "Workers are chats on your human's phone too" },
+        "budget_usd": { "type": "number", "minimum": 0, "description": "The generation budget in dollars; a raise always goes on a card" },
+        "prompt_timeout_minutes": { "type": "integer", "minimum": 1, "maximum": 60, "description": "How long you have to answer a worker's prompt before your human is told" },
+        "daily_digest": { "type": "boolean" },
+        "health_check_minutes": { "type": "integer", "minimum": 0, "maximum": super::health::MAX_MINUTES, "description": "How often maiTerm shows you workers that may be stalled (⟦HIVE CHECK⟧); 0 is never" }
+    });
+    let m = m.as_object_mut().expect("an object");
+    for k in ["remove_sockets", "remove_tools", "remove_generator_hosts", "remove_output_folders"] {
+        m.insert(k.to_string(), strings.clone());
+    }
+    m.insert("run_queue".to_string(), run_queue_schema());
+    std::mem::take(m)
 }
 
 /// Hive settings: the human's own change (the core fields: tools, the gallery and autonomy have
