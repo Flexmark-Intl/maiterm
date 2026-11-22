@@ -1,5 +1,24 @@
 # Changelog
 
+## v3.17.0
+
+A Hive's Queen can now get her workers what they need, and she notices when one is stuck.
+
+### Hive
+
+- **The Queen can change any Hive setting**, not just the worker cap, models, hosts and folders. When a worker can't reach a website or a local database, she can grant the host, socket or tool herself instead of the Hive stalling for hours. Two new checkpoints govern this. **Access** covers hosts, sockets, tools and generator hosts; it's the Queen's by default, so grants apply at once and are logged. **Settings** covers everything else and asks you by default. Raising the budget and changing a checkpoint always come to you as a card. A change applies whole or not at all.
+- **Set the defaults once.** Preferences → Hive picks who approves the Queen's access grants and other settings changes for every new Hive.
+- **The Queen checks on workers that may be stalled**, every 15 minutes by default (Hive settings → Autonomy → Worker check, 0 for never). She's shown any worker that failed, stopped, has a prompt or a blocker waiting, or has done nothing in that time, along with what to do about it. A Hive whose workers are all busy costs no turn. Each concern is reported once, and again only if it changes.
+- **Handed Landing means handed.** When the Queen decides lands, she also lands changes to agent or execution config (CLAUDE.md, `.claude/`, git hooks, CI, `package.json` scripts) instead of sending every one to you.
+- **An agent proposing a Hive can include what it needs**: tools, the Queen's model and effort, worker hosts and database sockets. The Create sheet shows them on Review as removable chips, and the phone card lists every grant. Grants are checked when the proposal is filed, so a card never promises access that Create would refuse.
+- **A slow land no longer gets stuck.** A long land check (a big `node_modules` copy) could outlast the Queen's tool call and leave the land locked until a restart. Hive tools now finish even if the call that started them is dropped.
+- **No more "Command completed" toasts** from Hive agents' tabs. The Queen reports for her workers.
+- **A Hive keeps its Overlord-exempt button** in the sidebar while the flag is set, so you can still clear it.
+
+### Claude Code
+
+- **Ignore artifact comments**, under Preferences → Deshittification, on by default. Comments other people leave on an artifact Claude published to claude.ai no longer arrive in your session as prompts, and Claude no longer starts acting on them by itself. It applies on ssh hosts too.
+
 ## v3.16.0
 
 Antigravity joins Claude Code and Codex as an agent maiTerm runs. Plus Hives that land into a branch, watch scripts that wait as long as you need, and a Files column that keeps up.
