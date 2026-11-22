@@ -284,11 +284,12 @@ fn env_on(settings: &Value, key: &str) -> bool {
 
 /// Claude stops fetching feature flags when `DISABLE_TELEMETRY` or
 /// `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set to ANYTHING ("0" included), or
-/// `DO_NOT_TRACK` is on.
+/// `DO_NOT_TRACK`, `CLAUDE_CODE_DISABLE_FEATURE_FLAGS` or `DISABLE_GROWTHBOOK` is on (2.1.330's
+/// feature-availability check names each as the reason).
 fn flags_off(settings: &Value) -> bool {
     env_text(settings, "DISABLE_TELEMETRY").is_some()
         || env_text(settings, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC").is_some()
-        || env_on(settings, "DO_NOT_TRACK")
+        || ["DO_NOT_TRACK", "CLAUDE_CODE_DISABLE_FEATURE_FLAGS", "DISABLE_GROWTHBOOK"].iter().any(|k| env_on(settings, k))
 }
 
 fn claude_status(path: &Path) -> ClaudePart {
@@ -774,6 +775,9 @@ mod tests {
         assert!(!flags_off(&s(json!({"DISABLE_TELEMETRY": ""}))));
         assert!(!flags_off(&s(json!({"DO_NOT_TRACK": "0"}))));
         assert!(flags_off(&s(json!({"DO_NOT_TRACK": "true"}))));
+        assert!(flags_off(&s(json!({"DISABLE_GROWTHBOOK": "1"}))));
+        assert!(flags_off(&s(json!({"CLAUDE_CODE_DISABLE_FEATURE_FLAGS": "on"}))));
+        assert!(!flags_off(&s(json!({"CLAUDE_CODE_DISABLE_FEATURE_FLAGS": "0"}))));
     }
 
     #[cfg(unix)]
