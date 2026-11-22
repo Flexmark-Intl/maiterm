@@ -1226,6 +1226,11 @@ export interface HiveDefaults {
   /** "" | "coordinator" | "all" | "none". */
   phone: string;
   rules: string;
+  /** Who approves the queen's access grants in a new Hive: "" (built-in: the queen) | "coordinator" | "ask".
+   *  Optional: an older build's preferences lack it. */
+  access_approval?: string;
+  /** Who approves her other settings changes: "" (built-in: Ask me) | "coordinator" | "ask". */
+  settings_approval?: string;
 }
 
 export interface HiveCreated {

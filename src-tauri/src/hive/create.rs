@@ -1183,6 +1183,17 @@ fn trust_new_repos(empty: &[PathBuf], roots: &[PathBuf]) {
     }
 }
 
+/// The human's defaults for who approves the queen's settings changes (Preferences → Hive): the
+/// Access and Settings checkpoints a new Hive starts with. "" keeps the built-in (Access the
+/// queen's, Settings Ask me); anything but `coordinator` or `ask` is ignored.
+pub fn apply_approval_defaults(hive: &mut Hive, d: &crate::state::workspace::HiveDefaults) {
+    for (key, v) in [(super::checkpoints::ACCESS, &d.access_approval), (super::checkpoints::SETTINGS, &d.settings_approval)] {
+        if v == super::checkpoints::COORDINATOR || v == super::checkpoints::ASK {
+            hive.checkpoints.insert(key.to_string(), v.clone());
+        }
+    }
+}
+
 pub fn build_hive(spec: &HiveSpec, id: String, folders: Vec<HiveFolder>) -> Hive {
     let mut models = spec.models.clone();
     for m in [&mut models.coordinator, &mut models.worker] {
@@ -1405,6 +1416,7 @@ pub async fn hive_create(
         let empty = start_new_repos(&spec_for_disk.folders, app_data_dir().as_deref())?;
         let folders = resolve_folders(&spec_for_disk.folders, &roots, app_data_dir().as_deref())?;
         let mut hive = build_hive(&spec_for_disk, uuid::Uuid::new_v4().to_string(), folders);
+        apply_approval_defaults(&mut hive, &prefs_for_folders.hive_defaults);
         let remotes = super::settings::hive_remote_hosts(&hive);
         // The hosts and sockets the human approved on the sheet or card, held to Hive settings' rules.
         let (hosts, sockets) = check_worker_grants(&spec_for_disk.worker_hosts, &spec_for_disk.worker_sockets, &remotes)?;
@@ -1952,6 +1964,15 @@ mod tests {
         assert_eq!((h.cap, h.budget_cents, h.status.as_str()), (DEFAULT_CAP, 1000, STATUS_ACTIVE));
         assert_eq!(h.checkpoints.len(), 8);
         assert!(h.checkpoints.iter().all(|(k, v)| v == if k == "settings" { "ask" } else { "coordinator" }), "the human approves settings changes");
+        // Preferences → Hive sets who approves the queen's changes in a new Hive; "" and junk keep the built-ins.
+        let mut d = crate::state::workspace::HiveDefaults { access_approval: "ask".into(), settings_approval: "coordinator".into(), ..Default::default() };
+        let mut h2 = h.clone();
+        apply_approval_defaults(&mut h2, &d);
+        assert_eq!((h2.checkpoints["access"].as_str(), h2.checkpoints["settings"].as_str()), ("ask", "coordinator"));
+        (d.access_approval, d.settings_approval) = (String::new(), "maybe".into());
+        let mut h3 = h.clone();
+        apply_approval_defaults(&mut h3, &d);
+        assert_eq!(h3.checkpoints, h.checkpoints);
         assert_eq!(default_checkpoints(LANDING_INTEGRATION).get("landing").map(String::as_str), Some("coordinator"), "the queen lands into the Hive's branch");
     }
 

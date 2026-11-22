@@ -180,6 +180,28 @@
     </button>
   </div>
 
+  <div class="row">
+    <div class="copy">
+      <label for="hive-def-access" class="label">Workers' access</label>
+      <p class="hint">Who approves the queen giving workers a website, a local database or a tool. Queen means she grants it the moment a worker needs it, so a Hive doesn't stall waiting for you; you're told each time.</p>
+    </div>
+    <select id="hive-def-access" value={(d.access_approval || 'coordinator')} onchange={(e) => void save({ access_approval: e.currentTarget.value })}>
+      <option value="coordinator">Queen</option>
+      <option value="ask">Ask me</option>
+    </select>
+  </div>
+
+  <div class="row">
+    <div class="copy">
+      <label for="hive-def-settings" class="label">Other settings changes</label>
+      <p class="hint">Who approves the queen changing anything else: workers at once, models, setup, push after land and the rest. Raising the budget and changing these two always come to you.</p>
+    </div>
+    <select id="hive-def-settings" value={(d.settings_approval || 'ask')} onchange={(e) => void save({ settings_approval: e.currentTarget.value })}>
+      <option value="ask">Ask me</option>
+      <option value="coordinator">Queen</option>
+    </select>
+  </div>
+
   <div class="block">
     <div class="copy">
       <label for="hive-def-rules" class="label">Rules for every agent</label>

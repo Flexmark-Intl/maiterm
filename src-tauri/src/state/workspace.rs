@@ -1817,6 +1817,11 @@ pub struct HiveDefaults {
     pub phone: String,
     /// Prefills "Rules for every agent".
     pub rules: String,
+    /// Who approves the queen's access grants (hosts, sockets, tools) in a new Hive: "" (built-in:
+    /// the queen) | "coordinator" | "ask". `hive::create::apply_approval_defaults`.
+    pub access_approval: String,
+    /// Who approves her other settings changes: "" (built-in: Ask me) | "coordinator" | "ask".
+    pub settings_approval: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2776,6 +2781,8 @@ mod hive_defaults_tests {
             push_after_land: true,
             phone: "all".into(),
             rules: "use pnpm".into(),
+            access_approval: "ask".into(),
+            settings_approval: "coordinator".into(),
         };
         let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(back.hive_defaults, p.hive_defaults);

@@ -44,6 +44,8 @@ export const EMPTY_HIVE_DEFAULTS: HiveDefaults = {
   push_after_land: false,
   phone: '',
   rules: '',
+  access_approval: '',
+  settings_approval: '',
 };
 
 /** The stored record with every field present (Rust omits nothing, but a partial one from an
@@ -64,6 +66,8 @@ export function normalizeHiveDefaults(raw: Partial<HiveDefaults> | null | undefi
     push_after_land: !!r.push_after_land,
     phone: r.phone ?? '',
     rules: r.rules ?? '',
+    access_approval: r.access_approval ?? '',
+    settings_approval: r.settings_approval ?? '',
   };
 }
 
