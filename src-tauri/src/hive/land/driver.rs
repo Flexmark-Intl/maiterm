@@ -1136,7 +1136,18 @@ pub(crate) async fn on_check_end<W: HiveWindow>(
     .await
     .ok()
     .flatten();
-    let (w, (folder, all_in)) = marked?;
+    let Some((w, (folder, all_in))) = marked else {
+        // Said, never silent: a land whose driver stopped before it marked this check running
+        // (2026-11-21: a dropped tool call left one `locking` with its lock held) shows here.
+        log::warn!(
+            "hive {}: land {}: check {} ended ({}) but no repo of that land is checking it: the land isn't waiting for it",
+            caller.hive.id,
+            run.land_id,
+            job.id,
+            if passed { "passed" } else { "failed" }
+        );
+        return None;
+    };
     let land = w.land.clone()?;
     log::info!("hive {}: land {}: check {} in {folder} {}", caller.hive.id, land.id, job.id, if passed { "passed" } else { "failed" });
     if !passed {

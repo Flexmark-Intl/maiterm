@@ -1336,6 +1336,21 @@ async fn agent_file_activity(arguments: &Value, state: &Arc<AppState>, app_handl
     answer.unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }))
 }
 
+/// A Hive or gallery tool on its own task, awaited: if the caller's request is dropped (its tool
+/// call timed out), the tool still runs to its end, so a multi-step land, undo or retire never
+/// stops between two of its saves. Its answer then goes nowhere, and the work stands.
+async fn detached_hive_tool(tool: &str, arguments: &Value, state: &Arc<AppState>, app_handle: &AppHandle, gallery: bool) -> Value {
+    let (tool, args, state, app) = (tool.to_string(), arguments.clone(), state.clone(), app_handle.clone());
+    let task = tauri::async_runtime::spawn(async move {
+        if gallery {
+            crate::hive::gallery::tools::handle(&tool, &args, &state, &app).await
+        } else {
+            crate::hive::tools::handle(&tool, &args, &state, &app).await
+        }
+    });
+    task.await.unwrap_or_else(|e| serde_json::json!({ "error": format!("maiTerm's Hive tool stopped: {e}") }))
+}
+
 async fn handle_backend_tool(tool_name: &str, arguments: &Value, state: &Arc<AppState>, app_handle: &AppHandle) -> Option<Value> {
     match tool_name {
         "bindCommsThread" => Some(handle_bind_comms_thread(arguments, state, app_handle).await),
@@ -1351,10 +1366,13 @@ async fn handle_backend_tool(tool_name: &str, arguments: &Value, state: &Arc<App
             Some(serde_json::json!({ "error": FILES_TOOLS_OFF }))
         }
         t if crate::browser_link::is_browser_tool(t) => Some(crate::browser_link::handle_tool(t, arguments, state, app_handle).await),
-        // Every `hive*` name, built or not, so none falls through to the frontend's switch.
-        t if t.starts_with("hive") => Some(crate::hive::tools::handle(t, arguments, state, app_handle).await),
+        // Every `hive*` name, built or not, so none falls through to the frontend's switch. Run
+        // detached and awaited (`detached_hive_tool`): an agent whose tool call times out drops
+        // this request's future, and a land, undo or retire cut off between two of its steps was
+        // left holding its lock with nothing driving it (2026-11-21, maiBlog L-0ebc7d3d).
+        t if t.starts_with("hive") => Some(detached_hive_tool(t, arguments, state, app_handle, false).await),
         // The Hive's gallery (docs/hive.md §10.3), likewise every `gallery*` name.
-        t if t.starts_with("gallery") => Some(crate::hive::gallery::tools::handle(t, arguments, state, app_handle).await),
+        t if t.starts_with("gallery") => Some(detached_hive_tool(t, arguments, state, app_handle, true).await),
         "postCommsReply" => Some(handle_post_comms_reply(arguments, state, app_handle).await),
         "startCommsThread" => Some(handle_start_comms_thread(arguments, state, app_handle).await),
         "unbindCommsThread" => {
