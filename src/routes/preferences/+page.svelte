@@ -2623,7 +2623,7 @@
 
           <h3 class="section-heading" style="margin-top: 20px;">Paired devices</h3>
           <p class="section-desc">
-            Phones paired to this Mac. Pairing shows a one-time QR the maiLink app scans; the
+            Phones paired to this computer. Pairing shows a one-time QR the maiLink app scans; the
             code expires in two minutes and works once. Revoke a device to stop it connecting and
             ringing.
           </p>
@@ -3119,7 +3119,7 @@
   >
     <div class="pairing-modal">
       <h2 class="pairing-title">Scan with maiLink</h2>
-      <p class="pairing-sub">Open maiLink on your phone and scan this code to pair it with this Mac.</p>
+      <p class="pairing-sub">Open maiLink on your phone and scan this code to pair it with this computer.</p>
 
       <div class="pairing-qr">
         <!-- eslint-disable-next-line svelte/no-at-html-tags -->
