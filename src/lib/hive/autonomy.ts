@@ -22,7 +22,7 @@ export const CHECKPOINT_ROWS: readonly CheckpointRow[] = [
   { key: 'finals', label: 'Picking finals in the gallery', note: 'Creative Hives often set this to Ask me.' },
   { key: 'interfaces', label: 'Adding a dependency, changing a public interface', note: 'Listed so a Hive can tighten them.' },
   { key: 'access', label: 'What workers may use', note: 'Websites, local database sockets and tools (MCP servers, CLIs). Queen (the default) grants one the moment a worker needs it, so a Hive doesn\'t stall waiting for you; you\'re told each time.' },
-  { key: 'settings', label: 'Changing other Hive settings', note: 'Workers at once, models, setup and land checks, push after land, the run queue and the rest. Ask me (the default) puts each change on a card for you.' },
+  { key: 'settings', label: 'Changing other Hive settings', note: 'Workers at once, models, setup and land checks, push after land off (switching it on always asks you), the run queue and the rest. Ask me (the default) puts each change on a card for you.' },
 ];
 
 /** What never moves to the coordinator, whatever the settings (§7.4): Rust refuses it by tab. */

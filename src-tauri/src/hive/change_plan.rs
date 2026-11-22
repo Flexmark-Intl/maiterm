@@ -6,7 +6,8 @@
 //!   stall on a worker that can't reach a website or a local Postgres.
 //! - **Settings** (`checkpoints::SETTINGS`, Ask me by default): everything else.
 //! - **Always a card**, whoever holds either: a change of a checkpoint (the human's approval switch
-//!   itself) and a budget raise (money).
+//!   itself), a budget raise (money) and switching push-after-land on (a push leaves this computer;
+//!   the Autonomy window's "Pushing" is always the human's).
 //!
 //! A call may mix them: the parts the checkpoints hand the queen apply at once, and the rest goes on
 //! one card the human approves (`change::approved_in`). Each half is reduced to what actually differs
@@ -68,7 +69,6 @@ pub fn route(hive: &Hive, c: &SettingsChange) -> (SettingsChange, SettingsChange
         coordinator_effort,
         worker_model,
         worker_effort,
-        push_after_land,
         workers_on_phone,
         folders,
         add_output_folders,
@@ -82,6 +82,10 @@ pub fn route(hive: &Hive, c: &SettingsChange) -> (SettingsChange, SettingsChange
     card.checkpoints = c.checkpoints.clone();
     let raise = c.budget_cents.is_some_and(|b| b > hive.budget_cents);
     put!(settings && !raise, budget_cents);
+    // And pushing (the human's answer, 2026-11-21: "Always ask me"): a push leaves this computer,
+    // so switching it on is a card; switching it off follows Settings.
+    let push_on = c.push_after_land == Some(true) && !hive.push_after_land;
+    put!(settings && !push_on, push_after_land);
     (now, card)
 }
 
@@ -507,8 +511,12 @@ mod tests {
         let mut both = hive();
         both.checkpoints.insert(SETTINGS.into(), "coordinator".into());
         let (now, card) = route(&both, &c);
-        assert_eq!((now.cap, now.push_after_land), (Some(5), Some(true)), "handed Settings, she sets anything");
-        assert_eq!((card.budget_cents, card.checkpoints.len()), (Some(2000), 1), "but a raise and a checkpoint stay a card");
+        assert_eq!((now.cap, now.push_after_land), (Some(5), None), "handed Settings, she sets anything but pushing");
+        assert_eq!((card.budget_cents, card.checkpoints.len(), card.push_after_land), (Some(2000), 1, Some(true)), "a raise, a checkpoint and pushing on stay a card");
+        let mut pushing = both.clone();
+        pushing.push_after_land = true;
+        let off = SettingsChange { push_after_land: Some(false), ..Default::default() };
+        assert_eq!(route(&pushing, &off).0.push_after_land, Some(false), "switching pushing off follows Settings");
         assert!(card.cap.is_none() && card.add_hosts.is_empty());
         let lower = SettingsChange { budget_cents: Some(500), ..Default::default() };
         assert_eq!(route(&both, &lower).0.budget_cents, Some(500), "lowering it follows Settings");

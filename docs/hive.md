@@ -307,7 +307,9 @@ goes on a card (`hive/change_plan.rs`):
   generator hosts. A grant applies at once, answers each sandbox blocker it settles, and is logged.
 - **Settings** (default: Ask me): everything else.
 - **Always a card**, whoever holds either: a change of a checkpoint (the human's approval switch
-  itself) and a budget raise (money). Lowering the budget follows Settings.
+  itself), a budget raise (money) and switching push after land on (a push leaves this
+  computer; the human's answer, 2026-11-21). Lowering the budget, or switching pushing off,
+  follows Settings.
 
 A call may mix them. The parts the checkpoints hand her apply, and the rest goes on one
 `hive_settings` card only the human approves (`docs/agent-requests.md`), naming each change in
@@ -1916,7 +1918,7 @@ where a checkpoint says so. The checkpoints are Hive settings, and each one is s
 | Picking finals in the gallery | Coordinator | Creative Hives often set this to Ask me |
 | Adding a dependency, changing a public interface | Coordinator | Listed so a Hive can tighten them |
 | What workers may use: hosts, database sockets, tools | Coordinator | `hiveChangeSettings`'s grants (§3.4), so a worker that needs a website or a local database isn't left waiting for the human |
-| Changing any other Hive setting | Ask me | `hiveChangeSettings` (§3.4); handed over, she sets anything but a checkpoint or a budget raise |
+| Changing any other Hive setting | Ask me | `hiveChangeSettings` (§3.4); handed over, she sets anything but a checkpoint, a budget raise or switching push after land on |
 
 **The worker check** (Darryl, 2026-11-21, `hive/health.rs`). Every
 `settings.autonomy.health_check_minutes` (15 by default, 0 for never; Autonomy, or the queen's
@@ -1938,7 +1940,8 @@ words in a brief):
 - Claude's workspace-trust dialog (`trust_dialog_open`) and the plan dialog, whose rows are mode
   changes;
 - any prompt option that persists a setting or a rule, or changes a mode (below);
-- pushing (§7.3): the queen's own `git push`. Push after land is a setting (§3.4);
+- pushing (§7.3): the queen's own `git push`, and switching push after land on (§3.4: always a
+  card; switching it off is a Settings change);
 - delivering into anything but a Hive plain folder, and overwriting anything (§7.3, §10.6).
 
 Overwriting outside the Hive's folders can't be read off a Bash prompt, so it isn't claimed as

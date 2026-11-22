@@ -211,8 +211,8 @@ pub enum By {
     /// The human's approval of the coordinator's card: the human's limits.
     Approved,
     /// `hiveChangeSettings` applying at once, under a checkpoint handed to the queen
-    /// (`change_plan::route`): anything but the checkpoints themselves and a budget raise, which
-    /// are always a card (the human's approval switch, and money).
+    /// (`change_plan::route`): anything but the checkpoints themselves, a budget raise and
+    /// switching push after land on, which are always a card (the approval switch, money, a push).
     Coordinator,
 }
 
@@ -714,8 +714,8 @@ pub fn tool_definition(tab_id: &Value) -> Value {
              add_tools/remove_tools, add_generator_hosts/remove_generator_hosts), SETTINGS covers the rest (cap, models and \
              efforts, folders\u{2019} setup and land check, push_after_land, workers_on_phone, run_queue, budget_usd lowered, \
              output folders, prompt_timeout_minutes, daily_digest, health_check_minutes). Your brief says who holds each. A call may mix them: what \
-             its checkpoints hand you applies, the rest goes on one card. Raising budget_usd and any change of checkpoints \
-             always go on a card. When a worker is stuck on a host, a database or a tool, grant it here rather than waiting: \
+             its checkpoints hand you applies, the rest goes on one card. Raising budget_usd, switching push_after_land on and any \
+             change of checkpoints always go on a card. When a worker is stuck on a host, a database or a tool, grant it here rather than waiting: \
              a host answers each open sandbox blocker it settles. A change reaches each agent at its next launch: a running \
              worker keeps its model, network, sockets and tools until hiveRestartWorker relaunches it. Refused for anyone: a \
              repo remote\u{2019}s host, localhost or a private address; a socket not named like a database\u{2019}s \
