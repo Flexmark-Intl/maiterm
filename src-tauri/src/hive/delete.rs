@@ -404,7 +404,10 @@ pub(crate) fn worker_transcripts(paths: &HivePaths, roots: &[PathBuf]) -> Vec<Pa
             continue;
         }
         for e in read_sessions(&task) {
-            if e.session_id.is_empty() || queens.contains(&e.session_id) {
+            // A session id is a UUID: never "." or "..", whose `..jsonl` would make the folder
+            // beside it the whole `projects/` folder.
+            let plain = !e.session_id.is_empty() && e.session_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+            if !plain || queens.contains(&e.session_id) {
                 continue;
             }
             let Some(file) = e.transcript_path.as_deref().and_then(|p| super::retire::readable_transcript(p, roots)) else {
@@ -434,7 +437,8 @@ fn remove_worker_transcripts(paths: &HivePaths) -> (usize, Vec<String>) {
             }
         }
         let beside = file.with_extension("");
-        if fs::symlink_metadata(&beside).is_ok_and(|m| m.is_dir()) {
+        let sibling = beside.parent() == file.parent() && beside.file_name().is_some_and(|n| n != "." && n != "..");
+        if sibling && fs::symlink_metadata(&beside).is_ok_and(|m| m.is_dir()) {
             if let Err(e) = fs::remove_dir_all(&beside) {
                 errors.push(format!("{}: {e}", beside.display()));
             }
@@ -789,13 +793,14 @@ mod tests {
         let queen_named_by_worker = chat(&wt, "q-2");
         let humans = chat(Path::new("/Users/someone/project"), "h-1");
         let misnamed = chat(&wt, "other");
+        let dot = chat(&wt, ".");
         let outside = t.join("elsewhere.jsonl");
         fs::write(&outside, "{}\n").unwrap();
 
         sessions(&paths.coordinator_task(), &[("q-1", &queens), ("q-2", &queen_named_by_worker)]);
         sessions(
             &paths.task("t1"),
-            &[("w-1", &mine), ("w-2", &resumed), ("q-1", &queens), ("q-2", &queen_named_by_worker), ("h-1", &humans), ("w-3", &misnamed), ("w-4", &outside.to_string_lossy())],
+            &[("w-1", &mine), ("w-2", &resumed), ("q-1", &queens), ("q-2", &queen_named_by_worker), ("h-1", &humans), ("w-3", &misnamed), ("w-4", &outside.to_string_lossy()), (".", &dot)],
         );
         sessions(&paths.task("t2"), &[("w-1", &mine)]);
 
