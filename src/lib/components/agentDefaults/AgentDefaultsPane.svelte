@@ -141,6 +141,21 @@
     }
   }
 
+  /** Write the advisor again: its switch goes with it. A select can't re-pick the value it
+   *  already shows, so the "not running" warning offers this instead. */
+  async function setSwitch(advisor: string | null) {
+    if (busy || advisor === null) return;
+    busy = 'claude:advisor';
+    feedback = null;
+    try {
+      status = await commands.agentDefaultsSet('claude', 'advisor', advisor);
+    } catch (e) {
+      feedback = { runtime: 'claude', text: String(e) };
+    } finally {
+      busy = null;
+    }
+  }
+
   async function enable(on: boolean, el: HTMLInputElement) {
     if (busy) {
       el.checked = !on;
@@ -314,7 +329,12 @@
               {#if advisorStuck}
                 <p class="warn">
                   Not running: telemetry is off in Claude's settings, and the advisor then needs
-                  a switch that isn't set. Choose the advisor again here to set it.
+                  a switch that isn't set.
+                  {#if status?.enabled && isManaged('claude', 'advisor') && !c.error}
+                    <button class="link" disabled={busy !== null} onclick={() => setSwitch(c.advisor)}>Set it</button>.
+                  {:else}
+                    Tick the advisor (with the section on) and maiTerm sets it with the advisor.
+                  {/if}
                 </p>
               {/if}
               {@render drifted('claude', 'advisor', c.advisor, c.error)}
@@ -339,8 +359,9 @@
             <div class="effort">
               {#each c.effort as row (row.model_id)}
                 <div class="effort-row">
-                  {#if row.label}
-                    {@render tick('claude', `effort:${row.model_id}`, `${row.label} effort`, c.error)}
+                  {#if row.label || isManaged('claude', `effort:${row.model_id}`)}
+                    <!-- An entry recorded for a model this build no longer offers can still be unticked. -->
+                    {@render tick('claude', `effort:${row.model_id}`, `${row.label ?? row.model_id} effort`, c.error)}
                   {:else}
                     <span class="tick-space"></span>
                   {/if}

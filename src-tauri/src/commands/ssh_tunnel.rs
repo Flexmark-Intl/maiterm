@@ -1615,6 +1615,12 @@ pub async fn ssh_run_setup(
             return Err(format!("SSH setup failed (exit {}): {}",
                 output.status.code().unwrap_or(-1), stderr.trim()));
         }
+    } else {
+        // A merge that left a remote file alone says why on stderr ("maiterm: …") and the
+        // script still exits 0: keep that in the log, or a skipped host leaves no trace.
+        for line in String::from_utf8_lossy(&output.stderr).lines().filter(|l| l.starts_with("maiterm:")) {
+            log::warn!("SSH setup on {}: {}", ssh_args, line);
+        }
     }
 
     log::info!("SSH setup completed for {}", ssh_args);

@@ -762,9 +762,13 @@ fn carriable(runtime: Runtime, key: &str, v: &Value) -> bool {
 /// Tick (`on`) or untick a setting. Ticking records what this machine's file holds now, so
 /// nothing changes here and hosts are given this machine's value; it writes no agent file.
 pub fn manage(p: &Paths, runtime: Runtime, key: &str, on: bool) -> Result<(), String> {
-    // A known setting (an effort row only for the models offered; others are read-only).
-    typed(runtime, key, None)?;
     let id = managed_id(runtime, key);
+    // Unticking needs no check: a setting recorded under a model this build no longer offers
+    // must still be removable, or it would be carried to hosts for good.
+    if on {
+        // A known setting (an effort row only for the models offered; others are read-only).
+        typed(runtime, key, None)?;
+    }
     if !on {
         return edit_managed(&p.managed, |m| {
             m.keys.remove(&id);
@@ -815,9 +819,10 @@ pub fn set_managed(p: &Paths, runtime: Runtime, key: &str, value: Option<&str>) 
 
 /// Merges managed settings into a remote JSON settings file (`sys.argv[1]`: `claude` or `agy`).
 /// The payload on stdin holds `[path, value]` pairs per file; null removes the key, and an
-/// object that removal empties goes too. Does nothing where the agent's folder doesn't exist,
+/// object that removal empties goes too; a set replaces a non-object on its way, as `set_claude`
+/// does (the advisor never lands without its switch). Does nothing where the agent's folder doesn't exist,
 /// to a link whose file is gone, or to a file it can't parse; writes only when something
-/// changed, through a temp file beside the link's target. No single quotes (the shell wraps it
+/// changed, through a temp file beside the link's target that keeps the file's mode. No single quotes (the shell wraps it
 /// in them), pure ASCII.
 const PY_REMOTE_JSON: &str = r#"import json,os,sys
 which=sys.argv[1]
@@ -859,29 +864,37 @@ for path,v in ops:
     else:
         cur=s
         for k in path[:-1]:
-            if k not in cur:
+            if not isinstance(cur.get(k),dict):
                 cur[k]={}
             cur=cur[k]
-            if not isinstance(cur,dict):
-                cur=None
-                break
-        if cur is not None:
-            cur[path[-1]]=v
+        cur[path[-1]]=v
 if json.dumps(s,sort_keys=True)!=before:
     t=os.path.realpath(p)
     tmp=t+".maiterm-tmp-"+str(os.getpid())
-    open(tmp,"w").write(json.dumps(s,indent=2)+"\n")
+    f=os.fdopen(os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600),"w")
+    f.write(json.dumps(s,indent=2)+"\n")
+    f.close()
+    if os.path.exists(t):
+        os.chmod(tmp,os.stat(t).st_mode&0o7777)
     os.replace(tmp,t)"#;
 
 /// Merges managed settings into a remote `~/.codex/config.toml` (top-level string keys only),
-/// textually, as `CODEX_TOML_MERGE_PY` does: python3 has no TOML writer. A changed value keeps
-/// its line and trailing comment; a new key goes on the first line, which is always top level;
-/// a removed one loses its line. With tomllib (Python 3.11+), a file it can't parse is left
-/// alone, and so is a result that doesn't read back with exactly the values meant.
-const PY_REMOTE_TOML: &str = r#"import json,os,re,sys
+/// textually, as `CODEX_TOML_MERGE_PY` does: python3 has no TOML writer. A line counts as a
+/// key or a table header only where a statement can start: not inside a multi-line string, an
+/// array or an inline table. A key whose value isn't a one-line string, or that appears twice,
+/// leaves the file alone. A changed value keeps its line and trailing comment; a new key goes on
+/// the first line, which is always top level; a removed one loses its line. With tomllib
+/// (Python 3.11+) a file that doesn't parse is left alone, and so is an edit after which the
+/// file reads back as anything but the old file with exactly our keys changed. Keeps the file's
+/// mode (the bridge's own token is in it).
+const PY_REMOTE_TOML: &str = r##"import json,os,re,sys
+Q=chr(39)
 d=json.load(sys.stdin)
 ops=d.get("codex") or []
 p=os.path.expanduser("~/.codex/config.toml")
+def leave(why):
+    sys.stderr.write("maiterm: Agent Defaults left "+p+" alone: "+why+"\n")
+    sys.exit(0)
 if not ops or not os.path.isdir(os.path.dirname(p)):
     sys.exit(0)
 if os.path.islink(p) and not os.path.exists(p):
@@ -894,56 +907,110 @@ try:
     import tomllib
 except ImportError:
     tomllib=None
+old=None
 if tomllib:
     try:
-        tomllib.loads(src)
+        old=tomllib.loads(src)
     except Exception:
-        sys.stderr.write("maiterm: Agent Defaults left "+p+" alone: it does not parse\n")
-        sys.exit(0)
+        leave("it does not parse")
 lines=src.split("\n")
-hdr=re.compile(r"^\s*\[\[?\s*[A-Za-z0-9_\"-][A-Za-z0-9_.\" -]*\]\]?\s*(#.*)?$")
+starts=[]
+ml=None
+depth=0
+for l in lines:
+    starts.append(ml is None and depth==0)
+    i=0
+    n=len(l)
+    while i<n:
+        if ml:
+            if l.startswith(ml,i):
+                j=i+3
+                while j<n and j-i<5 and l[j]==ml[0]:
+                    j+=1
+                i=j
+                ml=None
+            elif ml[0]=="\"" and l[i]=="\\":
+                i+=2
+            else:
+                i+=1
+            continue
+        c=l[i]
+        if c=="#":
+            break
+        if l.startswith("\"\"\"",i) or l.startswith(Q*3,i):
+            ml=l[i:i+3]
+            i+=3
+        elif c=="\"":
+            i+=1
+            while i<n and l[i]!="\"":
+                i+=2 if l[i]=="\\" else 1
+            i+=1
+        elif c==Q:
+            j=l.find(Q,i+1)
+            i=n if j<0 else j+1
+        else:
+            if c in "[{":
+                depth+=1
+            elif c in "]}":
+                depth=max(0,depth-1)
+            i+=1
 end=len(lines)
 for i,l in enumerate(lines):
-    if hdr.match(l):
+    if starts[i] and re.match(r"^\s*\[",l):
         end=i
         break
+one=re.compile(r"^(\s*\S+\s*=\s*)(\"(?:[^\"\\]|\\.)*\"|"+Q+"[^"+Q+"]*"+Q+r")(\s*(?:#.*)?)$")
 for k,v in ops:
-    key=re.compile(r"^\s*(" + re.escape(k) + r"|\"" + re.escape(k) + r"\")\s*=")
-    idx=[i for i in range(end) if key.match(lines[i])]
+    e=re.escape(k)
+    key=re.compile(r"^\s*("+e+"|\""+e+"\"|"+Q+e+Q+r")\s*=")
+    idx=[i for i in range(end) if starts[i] and key.match(lines[i])]
+    if len(idx)>1:
+        leave(k+" is set more than once")
+    m=one.match(lines[idx[0]]) if idx else None
+    if idx and not m:
+        leave(k+" is not a one-line string")
     if v is None:
-        for i in reversed(idx):
-            del lines[i]
+        if idx:
+            del lines[idx[0]]
+            del starts[idx[0]]
             end-=1
         continue
     if not idx:
         lines.insert(0,k+" = "+json.dumps(v))
+        starts.insert(0,True)
         end+=1
         continue
-    m=re.match(r"^(\s*\S+\s*=\s*)(\"(?:[^\"\\]|\\.)*\")(.*)$",lines[idx[0]])
-    if m:
-        try:
-            same=json.loads(m.group(2))==v
-        except Exception:
-            same=False
-        if not same:
-            lines[idx[0]]=m.group(1)+json.dumps(v)+m.group(3)
-    else:
-        lines[idx[0]]=k+" = "+json.dumps(v)
+    cur=m.group(2)
+    try:
+        same=(json.loads(cur) if cur[0]=="\"" else cur[1:-1])==v
+    except Exception:
+        same=False
+    if not same:
+        lines[idx[0]]=m.group(1)+json.dumps(v)+m.group(3)
 res="\n".join(lines)
 if res==src:
     sys.exit(0)
 if tomllib:
     try:
-        back=tomllib.loads(res)
+        new=tomllib.loads(res)
     except Exception:
-        sys.exit(0)
+        leave("the edit would not parse")
+    want=dict(old)
     for k,v in ops:
-        if back.get(k)!=v:
-            sys.exit(0)
+        if v is None:
+            want.pop(k,None)
+        else:
+            want[k]=v
+    if new!=want:
+        leave("the edit would change more than its own keys")
 t=os.path.realpath(p)
 tmp=t+".maiterm-tmp-"+str(os.getpid())
-open(tmp,"w").write(res)
-os.replace(tmp,t)"#;
+f=os.fdopen(os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600),"w")
+f.write(res)
+f.close()
+if os.path.exists(t):
+    os.chmod(tmp,os.stat(t).st_mode&0o7777)
+os.replace(tmp,t)"##;
 
 /// The script that gives a bridged SSH host every managed setting: set where a value is
 /// recorded, removed where "the agent's default" is. Empty when the section is off, nothing is
@@ -1256,6 +1323,11 @@ mod tests {
         assert!(manage(&p, Runtime::Claude, "effort:claude-opus-4", true).is_err(), "only the models offered");
         assert!(load_managed(&p.managed).unwrap().keys.is_empty());
         assert_eq!(remote_script(&p), "", "nothing managed: no script");
+        // Recorded by an older build for a model no longer offered: still removable.
+        fs::create_dir_all(p.managed.parent().unwrap()).unwrap();
+        fs::write(&p.managed, json!({"keys": {"claude.effort:claude-opus-4": "high"}}).to_string()).unwrap();
+        manage(&p, Runtime::Claude, "effort:claude-opus-4", false).unwrap();
+        assert!(load_managed(&p.managed).unwrap().keys.is_empty());
     }
 
     /// Run the remote script with `home` as HOME. None when this machine has no python3.
@@ -1345,6 +1417,82 @@ mod tests {
         if probe.status.success() {
             assert_eq!(fs::read_to_string(&r.codex).unwrap(), "model = [unclosed\n");
         }
+    }
+
+    /// Run the Codex merge on `toml` with `ops`, with and without tomllib (a shadow module that
+    /// fails to import stands in for Python < 3.11). Each run's result: None when python3 is missing.
+    fn codex_merge(toml: &str, ops: Value) -> Option<[String; 2]> {
+        std::process::Command::new("python3").arg("-c").arg("pass").output().ok()?.status.success().then_some(())?;
+        let run = |hide: bool| {
+            let (home, p) = scratch();
+            write(&p.codex, toml);
+            let shadow = home.join("shadow");
+            fs::create_dir_all(&shadow).unwrap();
+            fs::write(shadow.join("tomllib.py"), "raise ImportError\n").unwrap();
+            let mut cmd = std::process::Command::new("python3");
+            cmd.arg("-c").arg(PY_REMOTE_TOML).env("HOME", &home).stdin(std::process::Stdio::piped());
+            if hide {
+                cmd.env("PYTHONPATH", &shadow);
+            }
+            let mut child = cmd.spawn().unwrap();
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(json!({ "codex": ops }).to_string().as_bytes()).unwrap();
+            assert!(child.wait().unwrap().success());
+            fs::read_to_string(&p.codex).unwrap()
+        };
+        Some([run(false), run(true)])
+    }
+
+    #[test]
+    fn the_codex_merge_reads_only_real_top_level_keys() {
+        let ops = json!([["model", "b"], ["approvals_reviewer", null]]);
+        // Lines inside a multi-line string, an array of arrays and a quoted table name are
+        // not keys or headers.
+        let toml = "developer_instructions = \"\"\"\nBe terse.\nmodel = \"small\"\napprovals_reviewer = \"x\"\n[notes]\n\"\"\"\nnotify = [\n  [\"a\"],\n]\nmodel = \"a\" # mine\napprovals_reviewer = \"user\"\n\n[projects.\"/home/u/x\"]\nmodel = \"p\"\n";
+        let want = "developer_instructions = \"\"\"\nBe terse.\nmodel = \"small\"\napprovals_reviewer = \"x\"\n[notes]\n\"\"\"\nnotify = [\n  [\"a\"],\n]\nmodel = \"b\" # mine\n\n[projects.\"/home/u/x\"]\nmodel = \"p\"\n";
+        let Some(out) = codex_merge(toml, ops.clone()) else { return };
+        assert_eq!(out, [want.to_string(), want.to_string()]);
+
+        // A literal-quoted key is the key.
+        let Some(out) = codex_merge("'model' = 'a'\n", ops.clone()) else { return };
+        assert_eq!(out, ["'model' = \"b\"\n".to_string(), "'model' = \"b\"\n".to_string()]);
+    }
+
+    #[test]
+    fn the_codex_merge_leaves_what_it_cannot_edit_safely() {
+        for toml in [
+            "model = [\n \"a\",\n]\n",            // not a one-line string
+            "model = \"a\"\nmodel = \"c\"\n",      // twice
+            "model = \"\"\"\na\n\"\"\"\n",         // multi-line
+        ] {
+            let Some(out) = codex_merge(toml, json!([["model", "b"]])) else { return };
+            assert_eq!(out, [toml.to_string(), toml.to_string()], "{toml}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_files_keep_their_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_h, p) = scratch();
+        let (remote, r) = scratch();
+        fs::create_dir_all(p.managed.parent().unwrap()).unwrap();
+        fs::write(&p.managed, json!({"keys": {"codex.effort": "low", "agy.agent_mode": "plan", "claude.advisor": "opus"}}).to_string()).unwrap();
+        write(&r.codex, "model = \"a\"\n");
+        write(&r.agy, "{}");
+        write(&r.claude, r#"{"env":null}"#);
+        for f in [&r.codex, &r.agy, &r.claude] {
+            fs::set_permissions(f, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        if run_remote(&p, &remote).is_none() {
+            return;
+        }
+        for f in [&r.codex, &r.agy, &r.claude] {
+            assert_eq!(fs::metadata(f).unwrap().permissions().mode() & 0o777, 0o600, "{}", f.display());
+        }
+        assert!(fs::read_to_string(&r.codex).unwrap().contains("model_reasoning_effort = \"low\""));
+        let c = json_at(&r.claude);
+        assert_eq!((c["advisorModel"].as_str(), c["env"][ADVISOR_TOOL_ENV].as_str()), (Some("opus"), Some("1")), "the switch goes with the advisor");
     }
 
     #[test]
