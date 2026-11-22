@@ -413,15 +413,17 @@ pub(crate) fn config_root_for(prefs: &crate::state::Preferences, users_own: Opti
 
 /// The human's Claude advisor (`advisorModel`) for a worker or reviewer launch. They run with
 /// `--setting-sources` that leave user settings out, so Claude never reads it for them: it comes
-/// from the launch root's `settings.json` (an account root symlinks the user's own), else
-/// `~/.claude/settings.json`. Empty when unset or not a plain model name. Claude itself skips an
-/// advisor less capable than the main model, with a log line.
+/// from the one `settings.json` the human's own tabs read, the launch root's (an account root
+/// symlinks the user's own), or `~/.claude`'s when there is no root. Never `~/.claude`'s beside a
+/// root: a user's own `CLAUDE_CONFIG_DIR` without the file gives their tabs no advisor. Empty when
+/// unset or not a plain model name. Claude itself skips an advisor less capable than the main
+/// model, with a log line.
 pub(crate) fn launch_advisor(root: Option<&Path>) -> String {
-    let home = dirs::home_dir().map(|h| h.join(".claude"));
-    advisor_from([root.map(Path::to_path_buf), home].into_iter().flatten().map(|d| d.join("settings.json")))
+    let dir = root.map(Path::to_path_buf).or_else(|| dirs::home_dir().map(|h| h.join(".claude")));
+    advisor_from(dir.map(|d| d.join("settings.json")))
 }
 
-/// The first `settings.json` that reads, as `launch_advisor` takes its advisor from it.
+/// The advisor in the `settings.json` given, as `launch_advisor` takes it.
 fn advisor_from(files: impl IntoIterator<Item = PathBuf>) -> String {
     let Some(v) = files.into_iter().find_map(|f| fs::read(f).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())) else {
         return String::new();
@@ -1118,9 +1120,10 @@ pub(crate) mod tests {
         let t = scratch("advisor");
         let (account, home) = (t.join("account.json"), t.join("home.json"));
         fs::write(&home, r#"{"advisorModel":"fable"}"#).unwrap();
-        assert_eq!(advisor_from([t.join("missing.json"), home.clone()]), "fable", "an account root without the file falls back");
+        assert_eq!(advisor_from([home.clone()]), "fable");
         fs::write(&account, r#"{"model":"opus"}"#).unwrap();
-        assert_eq!(advisor_from([account.clone(), home.clone()]), "", "the account's own file decides, even with no advisor");
+        assert_eq!(advisor_from([account.clone()]), "", "no advisorModel, no advisor");
+        assert_eq!(launch_advisor(Some(&t.join("own-config-dir"))), "", "a root without settings.json gives the human's tabs no advisor, so none here");
         for bad in [r#"{"advisorModel":"--dangerously-skip-permissions"}"#, r#"{"advisorModel":"a b"}"#, r#"{"advisorModel":7}"#] {
             fs::write(&account, bad).unwrap();
             assert_eq!(advisor_from([account.clone()]), "", "{bad}");
