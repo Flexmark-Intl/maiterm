@@ -311,7 +311,7 @@ pub fn check_core(hive: &Hive, c: &SettingsChange, by: By, remote_hosts: &[Strin
     let (a, w) = (advisor.clone().unwrap_or_else(|| was.clone()), out.worker_model.clone().unwrap_or_else(|| hive.models.worker.model.clone()));
     if (advisor.is_some() || out.worker_model.is_some()) && rank(&a).zip(rank(&w)).is_some_and(|(ra, rw)| ra < rw) {
         return Err(format!(
-            "Claude {a} can\u{2019}t advise workers on Claude {w}: an advisor must be at least as capable as the model it advises, or Claude skips it. Choose a stronger advisor, follow, or off."
+            "Claude {a} can\u{2019}t advise workers on Claude {w}: an advisor must be at least as capable as the model it advises, or Claude skips it. Choose a stronger advisor or off (follow uses your human\u{2019}s own Claude advisor, which may be weaker too)."
         ));
     }
     if let Some(a) = advisor {
