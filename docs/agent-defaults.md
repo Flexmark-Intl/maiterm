@@ -1,4 +1,7 @@
-# Agent Defaults (DESIGN, 2026-11-22, nothing built)
+# Agent Defaults (built 2026-11-22: local files + Preferences; SSH hosts not yet)
+
+Code: `src-tauri/src/agent_defaults.rs` (every read and write, path-parameterized, tests),
+`commands/agent_defaults.rs` (Tauri), `components/agentDefaults/AgentDefaultsPane.svelte`.
 
 One Preferences section, **Agent Defaults**, with a part per runtime (Claude, Codex,
 Antigravity), that sets the values every new session of that agent starts with: which model,
@@ -35,15 +38,22 @@ share the mechanics: §2.
 - **"Agent's default"** is a choice in every control, and means the key is ABSENT: maiTerm
   removes it rather than writing the runtime's current default, so a later change of default
   upstream reaches the user.
-- **maiTerm touches only the keys this section offers.** Everything else in the file is
-  preserved byte-for-byte where the format allows (TOML via `toml_edit`, as
-  `mcp_proxy/entries.rs` already does).
+- **maiTerm touches only the keys this section offers.** Everything else in the file is kept:
+  TOML byte-for-byte (`toml_edit`, a changed value keeps its comment), JSON by value.
+- **Claude's file is the one the human's tabs read**: `~/.claude/settings.json` with a managed
+  account (every account root links it), else the user's own exported `CLAUDE_CONFIG_DIR`, else
+  `~/.claude`, as `hive::launch::launch_config_root` picks. A link to a missing file is refused,
+  never replaced.
 - **An unreadable file blocks its runtime's part** with the parse error shown, and is never
   overwritten (the rule `read_settings_at` states and why).
-- **Writes go through `util::json_file`** (`write_lock` + change-detecting replace), like
-  `claude_code/lockfile.rs` and `claude_code/agy.rs`: live agents and maiTerm's own hook
-  installer write the same files. (Deshittify's own `write_claude_settings` predates that helper
-  and does not use it: worth moving over separately.)
+- **Writes take `util::json_file`'s `write_lock` and a change-detecting replace**, like
+  `claude_code/agy.rs`: live agents write the same files. **Not yet true of maiTerm's other
+  writers of them** (2026-11-22 review): the hook installer (`lockfile.rs` `write_hook_settings`,
+  also on its reassert timer), Deshittify's `write_claude_settings`, the Codex registrar
+  (`codex.rs` `atomic_write`) and the MCP proxy's `write_toml` read, edit and rename without the
+  lock, so one of them can overwrite a value set here in the same instant. On the board.
+- **JSON keys come back sorted** (serde_json without `preserve_order`), as from every other
+  maiTerm JSON writer; values and the keys we don't own are kept. TOML is kept as written.
 - **An isolated instance makes no writes** (`instance::global_write_refusal`).
 - **Managed accounts need nothing extra.** Every account root symlinks `settings.json` and
   `config.toml` back to the shared file (`accounts/mod.rs`), so one write reaches every account.
@@ -54,7 +64,10 @@ The values travel to a bridged host the way Deshittify's do: a python3 merge app
 bridge setup script (`render_remote_setup_script`, run from `sshMcpBridge.svelte.ts`), and the
 existing Antigravity merge in `commands/ssh_tunnel.rs` for its file. **This machine is the
 source of truth in both directions**, as in Deshittify: a value set here is set there, and
-"Agent's default" here removes the key there. The script rewrites a remote file only when
+"Agent's default" here removes the key there. **Open (2026-11-22, on the board):** for values,
+unlike Deshittify's on/off rules, mirroring removals deletes a value a host set for itself (another
+plan's model, say); the MCP proxy's remote merge never deletes for that reason. Darryl decides
+between set-only and mirroring before this is built. The script rewrites a remote file only when
 something changed, and never one it can't parse.
 
 ## 3. The settings (first version)
@@ -69,7 +82,7 @@ CLIs, and a wrong key is silently ignored.
 |---|---|---|
 | Advisor | `advisorModel` (+ `env.CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL`) | Off / opus / sonnet / fable. **The advisor needs Claude's feature flags, and Deshittify's "Disable telemetry" rule (`DISABLE_TELEMETRY`, also `DO_NOT_TRACK`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) switches flag fetching off**: then `advisorModel` is silently ignored and `/advisor` says "isn't available while DISABLE_TELEMETRY is set". Setting `CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1` bypasses the flag (Claude Code 2.1.330, tested 2026-11-22: debug log shows "Server-side tool enabled with claude-fable-5-2" only with it), so the control writes it beside `advisorModel` and removes it with Off. The `/advisor` command itself stays refused; the setting still works. Claude Code refuses an advisor less capable than the main model, so the control warns when the pair won't activate. Some advisor models bill to usage credits: say so beside the control. Takes effect on new sessions, or after `/clear` / `/compact` in a running one. |
 | Default model | `model` | The public aliases (opus, sonnet, fable, haiku) plus "Agent's default". |
-| Effort | `modelSettings.<model id>.effortLevel` | Effort is stored PER MODEL (Darryl's file: Opus 5.5 medium, Opus 5 high, Sonnet 5 medium). The control edits the entry for the default model; other models' entries are shown read-only and left alone. **Verify** how an alias maps to the `modelSettings` key (`claude-opus-5-5`), and what the top-level `effortLevel` key does beside it, before building. |
+| Effort | `modelSettings.<model id>.effortLevel` | Effort is stored PER MODEL ID, so the section has a row per model: Opus, Sonnet, Fable, Haiku, written under the id each alias resolves to on a first-party login (`claude-opus-5-5`, `claude-sonnet-5-5`, `claude-fable-5-2`, `claude-haiku-5-5`: `CLAUDE_EFFORT_MODELS`, re-check per Claude release). An id key wins over an alias key, which is why the id is written. Other entries in the file are shown read-only. Levels kept from settings: `low`, `medium`, `high`, `xhigh` (`max` is never persisted). The top-level `effortLevel` in user settings is legacy (it applies only to older models) and is left alone. Clearing removes `effortLevel`, and the model's entry only when nothing else is in it. |
 | Keep transcripts | `cleanupPeriodDays` | Claude deletes transcripts after **30 days** by default, and resume, maiLink and the Loom read them. maiTerm's default is **500 days** (§4). Minimum 1. |
 
 ### 3.2 Codex — `~/.codex/config.toml`
@@ -77,8 +90,8 @@ CLIs, and a wrong key is silently ignored.
 | Setting | Key | Notes |
 |---|---|---|
 | Default model | `model` | Free text with suggestions (Codex's model names change too often for a fixed list). |
-| Reasoning effort | `model_reasoning_effort` | Codex's levels. |
-| Approvals reviewer | `approvals_reviewer` | e.g. `auto_review` (Darryl's value). **Verify** the allowed values. |
+| Reasoning effort | `model_reasoning_effort` | `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (Codex's own list; `none` left out). Codex starts on ANY string here, so the list is maiTerm's check, not Codex's. |
+| Approvals reviewer | `approvals_reviewer` | `user` or `auto_review`. Codex refuses to START on any other value ("failed to load bootstrap configuration"). |
 
 ### 3.3 Antigravity — `~/.gemini/antigravity-cli/settings.json`
 
@@ -87,7 +100,7 @@ CLIs, and a wrong key is silently ignored.
 | Agent mode | `agentMode` | `""` (Default), `accept-edits`, `plan`, `auto`. Note `""` is itself a saved choice ("Default"), distinct from absent ("Auto where available"). |
 | Show thinking | `showThinking` | bool, off by default. |
 | Queued messages | `queuedMessages` | `queue` / `send-immediately`. |
-| Model, effort | **unknown keys** | `agy` has `--model` and `--effort` flags; find the settings keys (set them in `/config` and read the file back) before offering these. |
+| Model, effort | **not offered** | `agy` has `--model`/`--effort` flags, but 1.5.14's changelog names no `settings.json` key for them and `/model` doesn't save there (only the Orchestrator's planner/executor, under `"orchestrator"`). |
 
 ## 4. One default maiTerm applies itself
 
@@ -106,10 +119,10 @@ values can still be set (they wait in the file). Each control shows the on-disk 
 under the section says changes apply to new sessions and reach bridged SSH hosts on their next
 connect.
 
-## 6. Open questions to settle while building
+## 6. Questions settled while building
 
-1. The `modelSettings` alias→id mapping and the top-level `effortLevel` (§3.1).
-2. Antigravity's model and effort keys (§3.3).
+1. **Settled (2026-11-22):** effort per model id, the top-level `effortLevel` left alone (§3.1).
+2. **Settled:** Antigravity's model and effort are not offered (§3.3).
 3. **Settled: Hive workers and reviewers get the advisor** through `--advisor` (§1). The
    Advisor control should say so: the choice also applies to every Hive agent, so it
    multiplies the advisor's cost and time by the number of workers. When this section's reader

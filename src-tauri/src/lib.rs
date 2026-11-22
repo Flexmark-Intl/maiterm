@@ -464,8 +464,13 @@ pub fn run() {
             if instance::global_write_refusal().is_none() {
                 commands::deshittify::seed_default_rules();
                 // Agent Defaults' one default of its own: Claude keeps transcripts 500 days.
-                if let Some(p) = agent_defaults::Paths::real() {
-                    agent_defaults::seed_retention(&p);
+                // Which file depends on the accounts, so only once they are known: state that
+                // didn't load means "no idea", and the wrong file would be marked settled.
+                if state::state_loaded_successfully() {
+                    let paths = agent_defaults::Paths::real(&app_state.app_data.read().preferences);
+                    if let Some(p) = paths {
+                        agent_defaults::seed_retention(&p);
+                    }
                 }
             }
 

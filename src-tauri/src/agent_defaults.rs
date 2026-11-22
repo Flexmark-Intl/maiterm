@@ -7,8 +7,11 @@
 //!   runtime's current default, so a later upstream change of default reaches the user.
 //! - **Only our keys are touched**, everything else is kept (TOML through `toml_edit`).
 //! - **An unreadable file is never overwritten**: its runtime's part shows the error instead.
-//! - **Writes are serialized with maiTerm's other config writers** (`util::json_file`) and
-//!   redone when the file changed under them: live agents rewrite these files too.
+//! - **Writes take maiTerm's config write lock** (`util::json_file`) and are redone when the
+//!   file changed under them: live agents rewrite these files too. Not every other maiTerm
+//!   writer of these files takes that lock yet (the hook installer, Deshittify, the Codex
+//!   registrar and the MCP proxy's Codex entries), so one of them can still overwrite a value
+//!   written here in the same instant.
 //!
 //! Every function takes the file's path, so tests run on scratch files and never on the
 //! human's own config. Keys and values were checked against Claude Code 2.1.330, Codex 0.166.0
@@ -72,10 +75,16 @@ pub struct Paths {
 }
 
 impl Paths {
-    /// The human's own files. Claude's is `~/.claude/settings.json`, as Deshittify's: every
-    /// managed account root symlinks it, so one write reaches every account.
-    pub fn real() -> Option<Self> {
-        dirs::home_dir().map(|h| Self::under(&h))
+    /// The human's own files: Claude's is the `settings.json` the human's tabs read
+    /// (`claude_settings_in`).
+    pub fn real(prefs: &crate::state::Preferences) -> Option<Self> {
+        let home = dirs::home_dir()?;
+        let managed = crate::accounts::active_accounts(prefs)
+            .into_iter()
+            .any(|(rt, _)| rt == crate::accounts::Runtime::Claude);
+        let mut p = Self::under(&home);
+        p.claude = claude_settings_in(&home, managed, crate::accounts::user_claude_root());
+        Some(p)
     }
 
     pub fn under(home: &Path) -> Self {
@@ -88,13 +97,33 @@ impl Paths {
     }
 }
 
+/// The `settings.json` the human's Claude tabs read, as the Hive launch picks its root
+/// (`hive::launch::launch_config_root`): with a managed Claude account, `~/.claude`'s, which
+/// every account root symlinks, so one write reaches every account; otherwise the user's own
+/// exported `CLAUDE_CONFIG_DIR` when there is one, and `~/.claude` without. Never `~/.claude`'s
+/// beside a user's own root: their tabs don't read it.
+fn claude_settings_in(home: &Path, managed_account: bool, users_own: Option<&Path>) -> PathBuf {
+    match users_own {
+        Some(root) if !managed_account => root.join("settings.json"),
+        _ => home.join(".claude").join("settings.json"),
+    }
+}
+
 /// Read-edit-replace `path` under maiTerm's config write lock, creating it (and its folder)
 /// when absent. `edit` gets the current text (None: no file) and returns the new text, or None
 /// for "nothing to change". Redone when the file changed while it was being edited. Through a
 /// symlink to the file it names.
 fn edit_text(path: &Path, mut edit: impl FnMut(Option<&str>) -> Result<Option<String>, String>) -> Result<bool, String> {
     let _serial = crate::util::json_file::write_lock();
-    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = match fs::canonicalize(path) {
+        Ok(t) => t,
+        // A link whose target is gone (a dotfiles checkout not there yet): writing would put a
+        // plain file where the user's link was, and Claude would stop reading their real one.
+        Err(_) if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) => {
+            return Err(format!("{} is a link to a file that isn't there. maiTerm won't replace the link.", path.display()));
+        }
+        Err(_) => path.to_path_buf(),
+    };
     for _ in 0..5 {
         let before = crate::util::json_file::stamp(&target);
         let raw = match fs::read_to_string(&target) {
@@ -236,13 +265,30 @@ pub fn status(p: &Paths) -> Status {
     Status { claude: claude_status(&p.claude), codex: codex_status(&p.codex), agy: agy_status(&p.agy) }
 }
 
-fn env_set(settings: &Value, key: &str) -> bool {
-    match settings.get("env").and_then(|e| e.get(key)) {
-        Some(Value::String(s)) => !s.is_empty() && s != "0" && !s.eq_ignore_ascii_case("false"),
-        Some(Value::Number(n)) => n.as_i64() != Some(0),
-        Some(Value::Bool(b)) => *b,
-        _ => false,
-    }
+/// `env[key]` as the string Claude puts in the process environment (None: absent or empty).
+fn env_text(settings: &Value, key: &str) -> Option<String> {
+    let t = match settings.get("env")?.get(key)? {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        _ => return None,
+    };
+    (!t.is_empty()).then_some(t)
+}
+
+/// On the way Claude 2.1.330 reads a switch like the advisor's or `DO_NOT_TRACK`: "1", "true",
+/// "yes" or "on", any case.
+fn env_on(settings: &Value, key: &str) -> bool {
+    env_text(settings, key).is_some_and(|t| ["1", "true", "yes", "on"].contains(&t.trim().to_ascii_lowercase().as_str()))
+}
+
+/// Claude stops fetching feature flags when `DISABLE_TELEMETRY` or
+/// `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set to ANYTHING ("0" included), or
+/// `DO_NOT_TRACK` is on.
+fn flags_off(settings: &Value) -> bool {
+    env_text(settings, "DISABLE_TELEMETRY").is_some()
+        || env_text(settings, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC").is_some()
+        || env_on(settings, "DO_NOT_TRACK")
 }
 
 fn claude_status(path: &Path) -> ClaudePart {
@@ -255,10 +301,8 @@ fn claude_status(path: &Path) -> ClaudePart {
         }
     };
     part.advisor = shown(s.get("advisorModel")).filter(|a| !a.is_empty());
-    part.advisor_switch = env_set(&s, ADVISOR_TOOL_ENV);
-    part.flags_off = ["DISABLE_TELEMETRY", "DO_NOT_TRACK", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"]
-        .iter()
-        .any(|k| env_set(&s, k));
+    part.advisor_switch = env_on(&s, ADVISOR_TOOL_ENV);
+    part.flags_off = flags_off(&s);
     part.model = shown(s.get("model"));
     part.retention_days = shown(s.get("cleanupPeriodDays"));
     let table = s.get("modelSettings").and_then(Value::as_object);
@@ -457,11 +501,19 @@ fn set_codex(path: &Path, key: &str, value: Option<&str>) -> Result<bool, String
         let current = doc.get(toml_key).and_then(|i| i.as_str()).map(str::to_string);
         match value {
             Some(v) if current.as_deref() == Some(v) => return Ok(None),
-            // A top-level key: `insert` on the root table puts a new one before the first
-            // [table], where Codex reads it, and keeps an existing one where it was.
-            Some(v) => {
-                doc.insert(toml_key, toml_edit::value(v));
-            }
+            // An existing key keeps its place and its comments; a new one goes in as a
+            // top-level key (`insert` on the root table puts it before the first [table],
+            // where Codex reads it).
+            Some(v) => match doc.get_mut(toml_key).and_then(|i| i.as_value_mut()) {
+                Some(old) => {
+                    let decor = old.decor().clone();
+                    *old = v.into();
+                    *old.decor_mut() = decor;
+                }
+                None => {
+                    doc.insert(toml_key, toml_edit::value(v));
+                }
+            },
             None => {
                 if doc.remove(toml_key).is_none() {
                     return Ok(None);
@@ -503,7 +555,10 @@ fn set_agy(path: &Path, key: &str, value: Option<&str>) -> Result<bool, String> 
 
 // ─── The one default maiTerm applies itself ───────────────────────────────
 
-const SEED_RETENTION: &str = "claude_retention";
+/// Settled per FILE: a user who later points their tabs at another Claude root gets it there too.
+fn seed_retention_id(claude: &Path) -> String {
+    format!("claude_retention {}", claude.display())
+}
 
 fn seeded(path: &Path) -> Vec<String> {
     fs::read_to_string(path)
@@ -532,7 +587,8 @@ fn mark_seeded(path: &Path, id: &str) -> Result<(), String> {
 /// transcript sweep at all; giving it a period would start one over the shared `projects/`.
 pub fn seed_retention(p: &Paths) {
     // No Claude here (yet): nothing to seed, and no `~/.claude` of ours. Tried next launch.
-    if seeded(&p.seeded).iter().any(|s| s == SEED_RETENTION) || !dir_exists(&p.claude) {
+    let id = seed_retention_id(&p.claude);
+    if seeded(&p.seeded).contains(&id) || !dir_exists(&p.claude) {
         return;
     }
     let result = edit_json(&p.claude, |s| {
@@ -546,7 +602,7 @@ pub fn seed_retention(p: &Paths) {
             if wrote {
                 log::info!("Agent Defaults: Claude keeps transcripts {RETENTION_SEED_DAYS} days (was its default {CLAUDE_RETENTION_DEFAULT_DAYS})");
             }
-            if let Err(e) = mark_seeded(&p.seeded, SEED_RETENTION) {
+            if let Err(e) = mark_seeded(&p.seeded, &id) {
                 log::warn!("Agent Defaults: could not record the retention default as settled: {e}");
             }
         }
@@ -656,6 +712,9 @@ mod tests {
         let (_h, p) = scratch();
         let before = "# mine\nmodel = \"gpt-6\"  # pinned\n\n[features]\nimage_generation = true\n";
         write(&p.codex, before);
+        assert!(set(&p, Runtime::Codex, "model", Some("gpt-7")).unwrap());
+        assert!(fs::read_to_string(&p.codex).unwrap().contains("model = \"gpt-7\"  # pinned\n"), "the comment stays");
+        write(&p.codex, before);
         assert!(set(&p, Runtime::Codex, "effort", Some("high")).unwrap());
         assert!(set(&p, Runtime::Codex, "reviewer", Some("auto_review")).unwrap());
         let text = fs::read_to_string(&p.codex).unwrap();
@@ -694,12 +753,47 @@ mod tests {
     }
 
     #[test]
+    fn claude_settings_are_the_ones_the_humans_tabs_read() {
+        let home = Path::new("/h");
+        let own = Path::new("/own");
+        assert_eq!(claude_settings_in(home, false, None), Path::new("/h/.claude/settings.json"));
+        assert_eq!(claude_settings_in(home, false, Some(own)), Path::new("/own/settings.json"));
+        // A managed account's root symlinks ~/.claude's, whatever the user exported.
+        assert_eq!(claude_settings_in(home, true, Some(own)), Path::new("/h/.claude/settings.json"));
+    }
+
+    #[test]
+    fn switches_read_on_and_off_as_claude_reads_them() {
+        let s = |env: Value| json!({ "env": env });
+        assert!(!env_on(&s(json!({ ADVISOR_TOOL_ENV: "off" })), ADVISOR_TOOL_ENV));
+        assert!(!env_on(&s(json!({ ADVISOR_TOOL_ENV: 2 })), ADVISOR_TOOL_ENV));
+        assert!(env_on(&s(json!({ ADVISOR_TOOL_ENV: "Yes" })), ADVISOR_TOOL_ENV));
+        assert!(env_on(&s(json!({ ADVISOR_TOOL_ENV: 1 })), ADVISOR_TOOL_ENV));
+        assert!(flags_off(&s(json!({"DISABLE_TELEMETRY": "0"}))), "set at all is set");
+        assert!(!flags_off(&s(json!({"DISABLE_TELEMETRY": ""}))));
+        assert!(!flags_off(&s(json!({"DO_NOT_TRACK": "0"}))));
+        assert!(flags_off(&s(json!({"DO_NOT_TRACK": "true"}))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_missing_file_is_never_replaced() {
+        let (home, p) = scratch();
+        fs::create_dir_all(p.claude.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(home.join("dotfiles/settings.json"), &p.claude).unwrap();
+        assert!(set(&p, Runtime::Claude, "model", Some("opus")).is_err());
+        seed_retention(&p);
+        assert!(fs::symlink_metadata(&p.claude).unwrap().file_type().is_symlink());
+        assert!(seeded(&p.seeded).is_empty());
+    }
+
+    #[test]
     fn retention_is_seeded_once_only_where_nothing_sets_it() {
         let (_h, p) = scratch();
         write(&p.claude, r#"{"cleanupPeriodDays":548}"#);
         seed_retention(&p);
         assert_eq!(json_at(&p.claude)["cleanupPeriodDays"], 548, "the user's own value stays");
-        assert_eq!(seeded(&p.seeded), vec![SEED_RETENTION]);
+        assert_eq!(seeded(&p.seeded), vec![seed_retention_id(&p.claude)]);
 
         let (_h2, q) = scratch();
         write(&q.claude, r#"{"model":"opus"}"#);
