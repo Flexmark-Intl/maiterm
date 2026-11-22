@@ -18,9 +18,11 @@ share the mechanics: §2.
   every runtime).
 - **Not maiTerm state.** No `Preferences` field, no `AppData` field, nothing in
   `preference_meta`, no MCP tool. An agent that wants a different model asks its human.
-- **Not Hive's launch settings.** The Hive launch builder (`hive_launch_command`) passes its own
-  model and effort as flags, which override these. Workers do inherit what the builder leaves
-  unset: the advisor included (§6).
+- **Not Hive's launch settings.** The Hive launch builder (`hive_launch_args`) passes `--model`
+  and `--effort` on every launch, coordinator and workers alike, so those two defaults never
+  reach a Hive agent. The coordinator loads every settings source like a normal tab, so it gets
+  the rest (the advisor, retention). Workers launch with `--setting-sources project` (a reviewer
+  `local`) and never read user settings at all: **no Agent Default reaches a worker** (§6).
 
 ## 2. Mechanics (borrowed from Deshittify, `commands/deshittify.rs`)
 
@@ -105,6 +107,10 @@ connect.
 
 1. The `modelSettings` alias→id mapping and the top-level `effortLevel` (§3.1).
 2. Antigravity's model and effort keys (§3.3).
-3. Hive workers inherit the advisor from `settings.json` (they run under the human's settings).
-   Every worker consulting Fable multiplies cost and time: should the launch builder pass an
-   explicit advisor choice for workers? Ask "Hive Feature" what the builder sets today.
+3. Hive workers get no Agent Default (§1). An advisor for workers would have to be the Hive's
+   own choice, written into the worker's generated `--settings` file or passed as `--advisor`
+   by the launch builder: a Hive change, and a cost one (every worker consulting the advisor).
+4. Workers also run with Claude's default 30-day transcript retention, since they don't read
+   `cleanupPeriodDays`. Check whether a worker's transcript cleanup can delete the human's older
+   transcripts in the same config root (2026-11-22: 3,321 transcripts older than 45 days still
+   on disk, so nothing suggests it does today).
