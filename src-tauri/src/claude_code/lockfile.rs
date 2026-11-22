@@ -672,7 +672,7 @@ fn command_hook_is_ours_to_sweep(
 ///   PermissionRequest, PostToolUseFailure, PreModelSwitch, SubagentStop, PreCompact, StopFailure (http)
 ///
 /// We identify our entries by matching the hook URL, so we don't clobber user hooks.
-fn write_hook_settings(port: u16, auth: &str) -> Result<(), String> {
+fn write_hook_settings(port: u16, auth: &str) -> Result<bool, String> {
     let path = claude_user_settings_path().ok_or("Could not determine home directory")?;
     let hooks_url = hook_url_marker(port);
     let our_hooks = build_our_hooks(port, auth);
@@ -685,7 +685,7 @@ fn write_hook_settings(port: u16, auth: &str) -> Result<(), String> {
     // Deshittify and the `claude` CLI write it too). A file that doesn't parse is refused, never
     // read as `{}`: one trailing comma would otherwise replace every setting the user has with
     // our hooks.
-    crate::util::json_file::edit_json_object(&path, true, |settings| {
+    let wrote = crate::util::json_file::edit_json_object(&path, true, |settings| {
         let before = settings.clone();
 
         // Sweep: remove any maiTerm hook entries whose port has no live lockfile.
@@ -789,8 +789,10 @@ fn write_hook_settings(port: u16, auth: &str) -> Result<(), String> {
         Ok(*settings != before)
     })?;
 
-    log::info!("Registered Claude Code hooks in ~/.claude/settings.json (port {})", port);
-    Ok(())
+    if wrote {
+        log::info!("Registered Claude Code hooks in ~/.claude/settings.json (port {})", port);
+    }
+    Ok(wrote)
 }
 
 /// True when every hook entry we'd write for (port, auth) is already present
@@ -912,12 +914,16 @@ pub fn ensure_hook_settings(port: u16, auth: &str) -> Result<bool, String> {
         return Ok(false);
     }
 
-    write_hook_settings(port, auth)?;
-    log::info!(
-        "Re-asserted Claude Code hooks in ~/.claude/settings.json (port {}) — entries were missing or had drifted",
-        port
-    );
-    Ok(true)
+    // A drift the write can't change (a non-array `hooks.<event>`, say) writes nothing: say
+    // nothing then, rather than claim a repair every 30 s.
+    let wrote = write_hook_settings(port, auth)?;
+    if wrote {
+        log::info!(
+            "Re-asserted Claude Code hooks in ~/.claude/settings.json (port {}) — entries were missing or had drifted",
+            port
+        );
+    }
+    Ok(wrote)
 }
 
 /// Collect ports from all live lockfiles (PIDs that are still running).

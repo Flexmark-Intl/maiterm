@@ -109,7 +109,7 @@ impl Registrar for CodexRegistrar {
             // Local install: no baked port — the shim uses the per-process $MAITERM_PORT (each
             // tab spawned by the owning maiTerm instance).
             match edit_hooks_json(&hooks_path, true, |existing| Some(build_hooks_json(existing, &shim_str, None))) {
-                Ok(_) => wrote_hooks = true,
+                Ok(wrote) => wrote_hooks = wrote,
                 // Loud: an unparseable hooks.json means Codex reports nothing to maiTerm for
                 // the rest of the session, and we deliberately will not repair it by clobbering.
                 Err(e) => log::error!("Codex install: not writing hooks — {}", e),

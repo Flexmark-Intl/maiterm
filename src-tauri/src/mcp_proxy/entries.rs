@@ -696,24 +696,28 @@ pub fn adopt_native(id: &str, url: &str) -> Result<Vec<String>, String> {
     if let Some(home) = dirs::home_dir() {
         let path = home.join(".codex").join("config.toml");
         let mut gone = Vec::new();
-        crate::claude_code::codex::edit_document(&path, false, |doc| {
-            gone.clear();
-            if let Some(servers) = doc.get_mut("mcp_servers").and_then(|s| s.as_table_like_mut()) {
-                let doomed: Vec<String> = servers
-                    .iter()
-                    .filter(|(n, e)| {
-                        codex_marker(e).is_none()
-                            && (*n == name || e.as_table_like().and_then(|t| t.get("url")).and_then(|u| u.as_str()).is_some_and(|u| same_url(u, url)))
-                    })
-                    .map(|(n, _)| n.to_string())
-                    .collect();
-                for n in doomed {
-                    servers.remove(&n);
-                    gone.push(format!("Codex: {n}"));
+        // A link to a missing config.toml is no Codex config to adopt from: skipped, as before,
+        // rather than failing an adopt whose Claude half is already done.
+        if path.exists() {
+            crate::claude_code::codex::edit_document(&path, false, |doc| {
+                gone.clear();
+                if let Some(servers) = doc.get_mut("mcp_servers").and_then(|s| s.as_table_like_mut()) {
+                    let doomed: Vec<String> = servers
+                        .iter()
+                        .filter(|(n, e)| {
+                            codex_marker(e).is_none()
+                                && (*n == name || e.as_table_like().and_then(|t| t.get("url")).and_then(|u| u.as_str()).is_some_and(|u| same_url(u, url)))
+                        })
+                        .map(|(n, _)| n.to_string())
+                        .collect();
+                    for n in doomed {
+                        servers.remove(&n);
+                        gone.push(format!("Codex: {n}"));
+                    }
                 }
-            }
-            !gone.is_empty()
-        })?;
+                !gone.is_empty()
+            })?;
+        }
         removed.extend(gone);
     }
     if let Some(path) = crate::claude_code::agy::mcp_config_path() {

@@ -1,7 +1,10 @@
-//! Editing a config file other processes keep writing (`.claude.json`, `history.jsonl`): live
-//! agents append and rewrite these while maiTerm edits them, so every edit is change-detecting.
-//! Shared by Move project (relocate/agents.rs), the Hive's trust writes (hive/trust.rs) and the
-//! account roots' merge (accounts/mod.rs).
+//! Editing a config file other processes keep writing (`.claude.json`, `history.jsonl`, every
+//! agent's settings file): live agents append and rewrite these while maiTerm edits them, so
+//! every edit is change-detecting. Shared by Move project (relocate/agents.rs), the Hive's trust
+//! writes (hive/trust.rs), the account roots' merge (accounts/mod.rs), and — through `edit_text`
+//! / `edit_json_object`, the ONE path for them — every maiTerm writer of an agent's settings
+//! file: the hook installer, Deshittify, Agent Defaults, the Codex registrar, the MCP proxy's
+//! entries and Antigravity's.
 //!
 //! maiTerm's own writers are serialized (`write_lock`), and each write goes through its own temp
 //! file: eight Hive workers restarted at once each wrote trust into the same `.claude.json` from
