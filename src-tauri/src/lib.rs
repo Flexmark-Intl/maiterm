@@ -1,4 +1,5 @@
 mod accounts;
+mod agent_defaults;
 mod agent_files;
 mod agent_requests;
 mod browser_link;
@@ -462,6 +463,10 @@ pub fn run() {
             // state-loaded gate.
             if instance::global_write_refusal().is_none() {
                 commands::deshittify::seed_default_rules();
+                // Agent Defaults' one default of its own: Claude keeps transcripts 500 days.
+                if let Some(p) = agent_defaults::Paths::real() {
+                    agent_defaults::seed_retention(&p);
+                }
             }
 
             // Account config roots no account claims (docs/login.md §10). Removing an account
@@ -1201,6 +1206,8 @@ pub fn run() {
             commands::claude_code::claude_code_respond,
             commands::claude_code::claude_code_notify_selection,
             commands::claude_code::refresh_agent_integrations,
+            commands::agent_defaults::agent_defaults_status,
+            commands::agent_defaults::agent_defaults_set,
             commands::deshittify::deshittify_status,
             commands::deshittify::deshittify_set_rule,
             commands::deshittify::deshittify_set_rules,
