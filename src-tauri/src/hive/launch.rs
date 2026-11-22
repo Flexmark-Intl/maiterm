@@ -423,6 +423,22 @@ pub(crate) fn launch_advisor(root: Option<&Path>) -> String {
     advisor_from(dir.map(|d| d.join("settings.json")))
 }
 
+/// Claude 2.1.330 turns the advisor tool on only under a server feature flag, which it doesn't
+/// fetch while `DISABLE_TELEMETRY`, `DO_NOT_TRACK` or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`
+/// is set (Deshittify sets the first), so `--advisor` alone silently does nothing there. This
+/// variable bypasses the flag (docs/agent-defaults.md §3.1); the human's own tabs get it from
+/// their settings' `env`, which a worker's setting sources leave out.
+pub const ADVISOR_TOOL_ENV: &str = "CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL";
+
+/// A worker launch's advisor: `--advisor` and, with it, `ADVISOR_TOOL_ENV` on the launch line.
+pub(crate) fn set_advisor(record: &mut LaunchRecord, model: String) {
+    record.env.retain(|(k, _)| k != ADVISOR_TOOL_ENV);
+    if !model.is_empty() {
+        record.env.push((ADVISOR_TOOL_ENV.to_string(), "1".to_string()));
+    }
+    record.advisor = model;
+}
+
 /// The advisor in the `settings.json` given, as `launch_advisor` takes it.
 fn advisor_from(files: impl IntoIterator<Item = PathBuf>) -> String {
     let Some(v) = files.into_iter().find_map(|f| fs::read(f).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())) else {
@@ -976,7 +992,7 @@ fn prepare_worker(hive: &Hive, paths: &HivePaths, tab_id: &str, tasks: &[crate::
 
     let root = launch_config_root(prefs);
     let mut record = worker_record(hive, paths, &w);
-    record.advisor = launch_advisor(root.as_deref());
+    set_advisor(&mut record, launch_advisor(root.as_deref()));
     if record != existing {
         write_record(&task, &record)?;
     }
@@ -1131,8 +1147,12 @@ pub(crate) mod tests {
         assert_eq!(advisor_from([t.join("none.json")]), "");
 
         let mut r = worker_record(&sample_hive(), &sample_paths(), &WorkerRecord { task_id: "t1".into(), ..WorkerRecord::default() });
+        set_advisor(&mut r, String::new());
         assert!(flag_values(&hive_launch_args(&r, None), "--advisor").is_empty(), "none when unset");
-        r.advisor = "fable".into();
+        assert!(!r.env.iter().any(|(k, _)| k == ADVISOR_TOOL_ENV), "nor the tool's switch");
+        set_advisor(&mut r, "fable".into());
+        set_advisor(&mut r, "fable".into());
+        assert_eq!(r.env.iter().filter(|(k, v)| k == ADVISOR_TOOL_ENV && v == "1").count(), 1, "the switch on the launch line, once");
         for resume in [None, Some("sid-1")] {
             assert_eq!(flag_values(&hive_launch_args(&r, resume), "--advisor"), vec!["fable"]);
         }

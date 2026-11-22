@@ -1265,7 +1265,12 @@ isn't set up. A code role's brief keeps the "Tools this Hive has" line.
 human's `advisorModel`, so each worker and reviewer launch reads it from the `settings.json` the
 human's own tabs read (the launch root's, or `~/.claude`'s with no root) and passes `--advisor <model>`
 (`launch::launch_advisor`); none when it is unset. Claude skips an advisor less capable than the
-worker's model with a log line. The coordinator reads it from user settings like any tab. Giving
+worker's model with a log line. With it goes `CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1` on
+the launch line: Claude 2.1.330 enables the tool only under a server flag it never fetches with
+telemetry off (Deshittify's `DISABLE_TELEMETRY`), and `--advisor` alone then does nothing
+(measured 2026-11-22, `--setting-sources project`, `--debug-file`: no `[AdvisorTool]` line without
+it, "Server-side tool enabled with claude-fable-5-2" with it). The coordinator reads both from
+user settings like any tab. Giving
 workers skills (a copy under their own settings) is open.
 
 **Localhost** is closed by default (measured, spike 10). Two settings open it, and both open
