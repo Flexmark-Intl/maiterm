@@ -77,7 +77,7 @@ The Queen can change any setting you can: workers at once, models and effort, se
 - **What workers may use** — websites, local database sockets, tools (MCP servers, CLIs) and the hosts paid generators reach. **Queen** by default, so when a worker is stuck on one she grants it at once instead of the Hive waiting hours for you; you're told each time, and her reason is kept in her decision log.
 - **Changing other Hive settings** — everything else. **Ask me** by default, so each change is a card.
 
-Raising the budget and changing a checkpoint always come to you as a card, whoever holds either. One request can mix the two: what the checkpoints hand her applies, the rest goes on one card, and everything is checked before anything is saved, so a change applies whole or not at all. A change reaches each agent at its next launch; a worker already running keeps what it started with until it's restarted.
+Raising the budget, switching **Push after each land** on and changing a checkpoint always come to you as a card, whoever holds either; switching push off follows *Changing other Hive settings*. One request can mix the two: what the checkpoints hand her applies, the rest goes on one card, and everything is checked before anything is saved, so a change applies whole or not at all. A change reaches each agent at its next launch; a worker already running keeps what it started with until it's restarted.
 
 When you answer something yourself, the Queen can record it as a **precedent** and cite it the next time the same question comes up, so you aren't asked twice. Precedents, and every decision she made, are under **Memory → Precedents** and **Memory → Decisions**, where you can edit a precedent, make it apply to every Hive, or override a decision.
 
@@ -108,7 +108,7 @@ When a reviewed worker's work is ready, the Queen lands it — the exact commits
 
 While *Landing* is **Ask me**, a land that changes agent or execution configuration — `CLAUDE.md`, `.claude/`, git hooks, CI, `package.json` scripts, anything that would run on your machine outside any sandbox — asks you first. Hand *Landing* to the Queen and she decides those lands too, told to look hard at such a diff.
 
-Landing never touches your uncommitted work. **Land log** lists every land, undo and post-land check, newest first, and **Undo…** on a land writes a revert commit and lands it like any other: history is never rewritten. **Push after each land** pushes when it's on; the Queen never pushes by herself. It's one of the settings she can change, so with *Changing other Hive settings* left on **Ask me** (the default), turning it on is yours.
+Landing never touches your uncommitted work. **Land log** lists every land, undo and post-land check, newest first, and **Undo…** on a land writes a revert commit and lands it like any other: history is never rewritten. **Push after each land** pushes when it's on; the Queen never pushes by herself. Turning it on is always yours: even with *Changing other Hive settings* handed to her, she can only ask for it with a card. She can switch it off under that checkpoint.
 
 ## Shared memory
 

@@ -30,7 +30,7 @@ None of this is stored as a maiTerm preference. Each toggle reads the agent's re
 
 ## Default-on rules
 
-**Disable Remote Control**, **Ignore artifact comments** and **Stop asking to write memory** are the rules maiTerm turns on without being asked. Each is applied once, the first time a maiTerm with that rule launches; after that it's like every other rule. Switch one off and it stays off — maiTerm remembers the rule is settled (in `~/.maiterm/`, so a backup restore or a second maiTerm build doesn't forget) and never re-asserts it. If you'd already switched Remote Control on yourself, the default leaves your choice alone.
+**Disable Remote Control**, **Ignore artifact comments** and **Stop asking to write memory** are the rules maiTerm turns on without being asked. Each is applied once, the first time a maiTerm with that rule launches; after that it's like every other rule. Switch one off and it stays off — maiTerm remembers the rule is settled (in `~/.maiterm/`, so a backup restore or a second maiTerm build doesn't forget) and never re-asserts it. If you'd already chosen otherwise yourself, the default leaves your choice alone: Remote Control switched on, or `CLAUDE_CODE_ARTIFACT_COMMENTS` or `CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT` set on in Claude Code's `settings.json`. maiTerm reads those values as Claude Code does — `1`, `true`, `yes` or `on` is on, `0`, `false`, `no` or `off` is off, in any case — and a value Claude Code reads as neither counts as no choice.
 
 ## Your repo's own hooks still run
 
