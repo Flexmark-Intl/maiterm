@@ -94,6 +94,8 @@ pub struct HiveDeleteResult {
     /// Where the memory folder stayed, when it did.
     pub memory_kept: Option<String>,
     pub trust_removed: usize,
+    /// Workers' Claude transcripts removed (`worker_transcripts`).
+    pub transcripts_removed: usize,
     pub requests_failed: usize,
     /// The Hive's folder, when anything stayed in it.
     pub folder_left: Option<String>,
@@ -343,6 +345,10 @@ pub(crate) fn going(paths: &HivePaths) -> Vec<String> {
     if fs::symlink_metadata(paths.coordinator_home()).is_ok() {
         out.push(format!("The queen's home and brief ({})", paths.root.join("coordinator").display()));
     }
+    let chats = worker_transcripts(paths, &super::retire::transcript_roots()).len();
+    if chats > 0 {
+        out.push(format!("The workers' chats: {chats} Claude transcript{}. The queen's chat stays", if chats == 1 { "" } else { "s" }));
+    }
     let chapters = entries_in(&paths.chapters());
     if chapters > 0 {
         out.push(format!(
@@ -360,7 +366,81 @@ pub(crate) struct Disk {
     pub removed: usize,
     pub kept: Vec<String>,
     pub trust_removed: usize,
+    pub transcripts_removed: usize,
     pub folder_left: bool,
+}
+
+/// The workers' Claude transcripts a delete removes (Darryl, 2026-11-22: a worker's chat goes once
+/// its Hive is finished, and deletion is the one point after which no worker is resumed or read
+/// back). A worker runs no retention sweep of its own (docs/agent-defaults.md §6), so without this
+/// they live for the human's retention. Never fixed with a `cleanupPeriodDays` in a worker's
+/// settings: that turns the sweep on over the whole shared `projects/` folder and deletes the
+/// human's own older chats.
+///
+/// Taken from each worker task's `sessions.json`, which a worker's hooks feed, so each path must
+/// pass every check: a real `.jsonl` under a Claude `projects/` root (`readable_transcript`),
+/// named for its own session, in a project folder of a cwd under this Hive's folder (Claude's
+/// slug of the Hive root, `relocate::agents::claude_slug`) but not the queen's home, and not one
+/// of the queen's sessions. Blocks.
+pub(crate) fn worker_transcripts(paths: &HivePaths, roots: &[PathBuf]) -> Vec<PathBuf> {
+    use super::launch::read_sessions;
+    use crate::relocate::agents::claude_slug;
+    let slugs = |p: &Path| -> Vec<String> {
+        let mut out = vec![format!("{}-", claude_slug(&p.to_string_lossy()))];
+        if let Ok(real) = fs::canonicalize(p) {
+            let s = format!("{}-", claude_slug(&real.to_string_lossy()));
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+        out
+    };
+    let (hive_slugs, queen_slugs) = (slugs(&paths.root), slugs(&paths.root.join("coordinator")));
+    let queen_task = paths.coordinator_task();
+    let queens: Vec<String> = read_sessions(&queen_task).into_iter().map(|e| e.session_id).collect();
+    let mut out: Vec<PathBuf> = Vec::new();
+    for task in fs::read_dir(paths.tasks()).into_iter().flatten().flatten().map(|e| e.path()) {
+        if task == queen_task {
+            continue;
+        }
+        for e in read_sessions(&task) {
+            if e.session_id.is_empty() || queens.contains(&e.session_id) {
+                continue;
+            }
+            let Some(file) = e.transcript_path.as_deref().and_then(|p| super::retire::readable_transcript(p, roots)) else {
+                continue;
+            };
+            let own = file.file_stem().is_some_and(|s| s.to_string_lossy() == e.session_id);
+            let project = file.parent().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let in_hive = hive_slugs.iter().any(|s| project.starts_with(s.as_str())) && !queen_slugs.iter().any(|s| project.starts_with(s.as_str()));
+            if own && in_hive && !out.contains(&file) {
+                out.push(file);
+            }
+        }
+    }
+    out
+}
+
+/// Removes `worker_transcripts`, each with the folder Claude keeps beside it for that session
+/// (its subagents' and tool results' files). Returns how many went, and what couldn't.
+fn remove_worker_transcripts(paths: &HivePaths) -> (usize, Vec<String>) {
+    let (mut removed, mut errors) = (0, Vec::new());
+    for file in worker_transcripts(paths, &super::retire::transcript_roots()) {
+        match fs::remove_file(&file) {
+            Ok(()) => removed += 1,
+            Err(e) => {
+                errors.push(format!("a worker's chat {}: {e}", file.display()));
+                continue;
+            }
+        }
+        let beside = file.with_extension("");
+        if fs::symlink_metadata(&beside).is_ok_and(|m| m.is_dir()) {
+            if let Err(e) = fs::remove_dir_all(&beside) {
+                errors.push(format!("{}: {e}", beside.display()));
+            }
+        }
+    }
+    (removed, errors)
 }
 
 /// The Hive's disk, gone but for what holds work (§11.2): memory is work, so it stays in place
@@ -436,6 +516,11 @@ pub(crate) fn remove_disk(hive: &Hive, paths: &HivePaths, workers: &[WorkerRecor
     for (why, p) in unaccounted(hive, paths, workers) {
         kept(why, p, &mut out);
     }
+
+    // Before `tasks/` goes: its session lists name the files.
+    let (chats, failed) = remove_worker_transcripts(paths);
+    out.transcripts_removed = chats;
+    out.kept.extend(failed);
 
     out.trust_removed = super::trust::remove_all_trust(paths);
     // A key that couldn't be undone keeps its record, so it can be undone later.
@@ -600,10 +685,11 @@ pub(crate) async fn delete_hive<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         super::feed::forget_meta(t);
     }
     log::info!(
-        "hive {}: deleted from workspace {}: {} worktrees removed, kept {:?}, branches kept {:?}",
+        "hive {}: deleted from workspace {}: {} worktrees and {} worker chats removed, kept {:?}, branches kept {:?}",
         caller.hive.id,
         caller.workspace_id,
         disk.removed,
+        disk.transcripts_removed,
         disk.kept,
         branches
     );
@@ -614,6 +700,7 @@ pub(crate) async fn delete_hive<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         gallery_kept: !delete_gallery && fs::symlink_metadata(caller.paths.gallery()).is_ok(),
         memory_kept: (!delete_memory && fs::symlink_metadata(caller.paths.memory()).is_ok()).then(|| caller.paths.memory().to_string_lossy().to_string()),
         trust_removed: disk.trust_removed,
+        transcripts_removed: disk.transcripts_removed,
         requests_failed,
         folder_left: disk.folder_left.then(|| caller.paths.root.to_string_lossy().to_string()),
         dropped_tabs: tabs.into_iter().chain(job_tabs).collect(),
@@ -669,4 +756,53 @@ pub async fn hive_delete(
     let ctx = super::tools::app_ctx(state.inner(), &app, &caller);
     // Memory is kept unless the human ticked it: a window that doesn't send it keeps it.
     delete_hive(&ctx, &caller, delete_gallery, delete_memory.unwrap_or(false)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::relocate::agents::claude_slug;
+
+    #[test]
+    fn only_a_workers_own_chat_in_this_hive_is_deleted() {
+        let t = std::env::temp_dir().join(format!("hive-delete-chats-{}", uuid::Uuid::new_v4()));
+        let paths = HivePaths::new(t.join("hive").join("h1"));
+        fs::create_dir_all(&paths.root).unwrap();
+        let projects = t.join("projects");
+        let chat = |cwd: &Path, sid: &str| -> String {
+            let dir = projects.join(claude_slug(&cwd.to_string_lossy()));
+            fs::create_dir_all(&dir).unwrap();
+            let f = dir.join(format!("{sid}.jsonl"));
+            fs::write(&f, "{}\n").unwrap();
+            f.to_string_lossy().to_string()
+        };
+        let sessions = |task: &Path, list: &[(&str, &str)]| {
+            fs::create_dir_all(task).unwrap();
+            let v: Vec<serde_json::Value> = list.iter().map(|(sid, p)| json!({"session_id": sid, "transcript_path": p, "started_at": "x"})).collect();
+            fs::write(task.join(super::super::launch::SESSIONS_FILE), serde_json::to_vec(&v).unwrap()).unwrap();
+        };
+        let wt = paths.root.join("wt.noindex").join("api").join("web");
+        let mine = chat(&wt, "w-1");
+        let resumed = chat(&wt, "w-2");
+        let queen_home = paths.root.join("coordinator").join("home");
+        let queens = chat(&queen_home, "q-1");
+        let queen_named_by_worker = chat(&wt, "q-2");
+        let humans = chat(Path::new("/Users/someone/project"), "h-1");
+        let misnamed = chat(&wt, "other");
+        let outside = t.join("elsewhere.jsonl");
+        fs::write(&outside, "{}\n").unwrap();
+
+        sessions(&paths.coordinator_task(), &[("q-1", &queens), ("q-2", &queen_named_by_worker)]);
+        sessions(
+            &paths.task("t1"),
+            &[("w-1", &mine), ("w-2", &resumed), ("q-1", &queens), ("q-2", &queen_named_by_worker), ("h-1", &humans), ("w-3", &misnamed), ("w-4", &outside.to_string_lossy())],
+        );
+        sessions(&paths.task("t2"), &[("w-1", &mine)]);
+
+        let roots = vec![crate::share::canon(&fs::canonicalize(&projects).unwrap())];
+        let found = worker_transcripts(&paths, &roots);
+        let want: Vec<PathBuf> = [&mine, &resumed].iter().map(|p| crate::share::canon(&fs::canonicalize(p).unwrap())).collect();
+        assert_eq!(found, want, "a worker's own sessions, each once; never the queen's, the human's, a misnamed file or one outside Claude's folder");
+        let _ = fs::remove_dir_all(&t);
+    }
 }

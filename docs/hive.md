@@ -1262,8 +1262,8 @@ the reader's own MCP config names it), what it spends and how long its results l
 isn't set up. A code role's brief keeps the "Tools this Hive has" line.
 
 **Workers consult the human's advisor** (Darryl, 2026-11-22). Those same setting sources hide the
-human's `advisorModel`, so each worker and reviewer launch reads it from the launch root's
-`settings.json` (else `~/.claude/settings.json`) and passes `--advisor <model>`
+human's `advisorModel`, so each worker and reviewer launch reads it from the `settings.json` the
+human's own tabs read (the launch root's, or `~/.claude`'s with no root) and passes `--advisor <model>`
 (`launch::launch_advisor`); none when it is unset. Claude skips an advisor less capable than the
 worker's model with a log line. The coordinator reads it from user settings like any tab. Giving
 workers skills (a copy under their own settings) is open.
@@ -3005,7 +3005,7 @@ is the record's, and maiTerm still receives the tab's hook events.
 | Share export | Hive workspaces are **excluded**: the share file is built from an allowlist (`docs/workspace-share.md`), and neither `Workspace.hive` nor `Tab.hive_role` is on it, so a Hive never reaches a `.maiterm-workspace` |
 | Turn back into a workspace | §3.3: clears `hive_role` on every tab and runs `heal_pane_active_tab` |
 | The goal is met (decided 2026-10-23) | §11.4 |
-| Delete the Hive | A sheet lists every branch not landed, every dirty worktree and the gallery's size. Clean worktrees are removed; **dirty ones are kept and listed**; no branch is deleted; the gallery stays unless ticked. Same rule as Claude's worktree cleanup: never delete work |
+| Delete the Hive | A sheet lists every branch not landed, every dirty worktree and the gallery's size. Clean worktrees are removed; **dirty ones are kept and listed**; no branch is deleted; the gallery stays unless ticked. Same rule as Claude's worktree cleanup: never delete work. **The workers' Claude transcripts go** (Darryl, 2026-11-22: a worker runs no retention sweep, so they would live for the human's retention). Deletion is the one point after which no worker is resumed or read back (`get_task_transcript`); Done isn't, since a Done Hive wakes. Each path comes from a worker task's `sessions.json` and must be a `.jsonl` under a Claude `projects/` folder, named for its session, in a project folder under this Hive's but not the queen's home, and not one of the queen's sessions (`delete::worker_transcripts`). The queen's chat stays. Never a `cleanupPeriodDays` in a worker's settings: that sweeps the whole shared `projects/` folder |
 
 ### 11.3 A crashed worker, and restarting one
 

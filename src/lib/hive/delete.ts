@@ -57,6 +57,7 @@ export function removedLines(p: HiveDeletePreview, deleteGallery: boolean, delet
 /** The toast after a delete: what went, and what stayed. */
 export function deleteSummary(r: HiveDeleteResult): string {
   const parts = [`${plural(r.worktrees_removed, 'clean worktree')} removed`];
+  if (r.transcripts_removed) parts.push(`${plural(r.transcripts_removed, 'worker chat')} deleted`);
   if (r.kept.length) parts.push(`${plural(r.kept.length, 'item')} kept on disk (work in it)`);
   if (r.branches.length) parts.push(`${plural(r.branches.length, 'branch', 'branches')} kept`);
   parts.push(r.gallery_kept ? 'the gallery kept' : 'no gallery kept');

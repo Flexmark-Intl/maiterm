@@ -7,7 +7,7 @@ const preview = (over: Partial<HiveDeletePreview> = {}): HiveDeletePreview => ({
 });
 
 const result = (over: Partial<HiveDeleteResult> = {}): HiveDeleteResult => ({
-  worktrees_removed: 0, kept: [], branches: [], gallery_kept: false, trust_removed: 0, requests_failed: 0, folder_left: null, dropped_tabs: [], active_tabs: [], ...over,
+  worktrees_removed: 0, kept: [], branches: [], gallery_kept: false, trust_removed: 0, transcripts_removed: 0, requests_failed: 0, folder_left: null, dropped_tabs: [], active_tabs: [], ...over,
 });
 
 describe('delete sheet', () => {
@@ -55,5 +55,6 @@ describe('delete sheet', () => {
     expect(deleteSummary(result({ worktrees_removed: 3, kept: ['web: /wt (1 untracked file)'], branches: ['web: a', 'web: b'], gallery_kept: true, folder_left: '/h' })))
       .toBe('3 clean worktrees removed, 1 item kept on disk (work in it), 2 branches kept, the gallery kept. What stayed is in /h.');
     expect(deleteSummary(result({ worktrees_removed: 1 }))).toBe('1 clean worktree removed, no gallery kept.');
+    expect(deleteSummary(result({ worktrees_removed: 1, transcripts_removed: 4 }))).toBe('1 clean worktree removed, 4 worker chats deleted, no gallery kept.');
   });
 });

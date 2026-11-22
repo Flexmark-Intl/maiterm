@@ -1373,6 +1373,8 @@ export interface HiveDeleteResult {
   /** Where the memory folder stayed, when it did. */
   memory_kept?: string | null;
   trust_removed: number;
+  /** Workers' Claude transcripts removed; the queen's chat stays. */
+  transcripts_removed: number;
   requests_failed: number;
   folder_left?: string | null;
   dropped_tabs: string[];
