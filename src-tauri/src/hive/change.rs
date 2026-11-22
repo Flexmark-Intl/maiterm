@@ -819,11 +819,11 @@ pub(crate) async fn approved_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         Ok((done, c)) => {
             let (hive, lines) = (done.hive, done.lines);
             log_line(caller, "coordinator, approved by the human", &lines, None);
-            // What applied stands; a part the Hive's changes meanwhile refused is said with it.
-            let not = done.failed.as_ref().map(|e| format!("; not applied: {e}")).unwrap_or_default();
+            // What applied stands; the budget, `commit`'s one later step, is said when it failed.
+            let not = done.failed.as_ref().map(|e| format!("; the budget wasn\u{2019}t changed: {e}")).unwrap_or_default();
             ctx.window.settle_request(request_id, true, format!("applied: {}{not}", lines.join("; ")));
             let running = relaunch_note(caller, &c).await.map(|s| format!("\n{s}")).unwrap_or_default();
-            let not = done.failed.map(|e| format!("\nNot applied, as the Hive changed meanwhile: {e}")).unwrap_or_default();
+            let not = done.failed.map(|e| format!("\nThe budget wasn\u{2019}t changed: {e}")).unwrap_or_default();
             tell_coordinator(ctx, caller, format!("[maiTerm] Your human approved your settings change:{}{running}{not}", bulleted(&lines))).await;
             ctx.window.poll_waiters(&caller.workspace_id);
             let moved: Vec<String> = lines.iter().filter_map(|l| l.strip_prefix("Checkpoint, ").map(str::to_string)).collect();

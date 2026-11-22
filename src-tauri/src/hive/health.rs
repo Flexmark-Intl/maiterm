@@ -7,7 +7,8 @@
 //! notice (⟦HIVE CHECK⟧) with what to do: a worker failed or stopped, a prompt on its screen, a
 //! blocker on its task, or nothing from it for the whole interval (a reported worker nobody has
 //! landed or reviewed included). A Hive whose unfinished workers all worked within the interval
-//! gets nothing, so a healthy Hive spends no turn. Workers waiting on another's work are expected
+//! gets nothing, so a healthy Hive spends no turn, and each worker's concern is told once, again
+//! only when it changes (`TOLD`), so a stall the queen knows of or can't act on isn't repeated. Workers waiting on another's work are expected
 //! to wait, and landed or retired ones are done.
 //!
 //! The event-driven checks stay (`quiet`: a worker quiet after its turn ended, told once); this is
@@ -28,6 +29,38 @@ pub const MAX_MINUTES: u32 = 240;
 
 /// Hive id → when its queen was last sent a check (ms).
 static LAST_SENT: LazyLock<Mutex<HashMap<String, i64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Worker task id → the concern last reported for it (`signature`). A concern is told once, and
+/// again only when it changes: a worker the queen stopped, a land held for the human, a blocker
+/// the human hasn't answered or one long tool call would otherwise cost her a turn every interval
+/// about something she already knows or can't act on (the review).
+static TOLD: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// What a worker's concern is, without its minutes: told again only when this changes.
+pub fn signature(w: &WorkerRecord, s: &Seen, now: i64, every_ms: i64) -> String {
+    let idle = s.last_active.map_or(true, |t| now - t >= every_ms);
+    format!("{}|{}|{}|{}|{}", w.phase, s.prompt, s.blocker, idle, s.last_active.is_some())
+}
+
+/// The workers whose concern wasn't told yet, as it stands now; the rest are remembered as told.
+/// A worker with no concern is forgotten, so its next stall is told.
+fn untold(workers: Vec<(WorkerRecord, Seen)>, now: i64, every_ms: i64) -> Vec<(WorkerRecord, Seen)> {
+    let mut told = TOLD.lock().unwrap_or_else(|e| e.into_inner());
+    workers
+        .into_iter()
+        .filter_map(|(w, s)| {
+            if concern(&w, &s, now, every_ms).is_none() {
+                told.remove(&w.task_id);
+                return Some((w, s));
+            }
+            let sig = signature(&w, &s, now, every_ms);
+            if told.get(&w.task_id) == Some(&sig) {
+                return None;
+            }
+            told.insert(w.task_id.clone(), sig);
+            Some((w, s))
+        })
+        .collect()
+}
 
 /// What the check knows of one worker beyond its record.
 #[derive(Debug, Clone, Default)]
@@ -134,6 +167,7 @@ async fn check_one(state: &Arc<crate::state::AppState>, handle: &tauri::AppHandl
         })
         .collect();
     let minutes = caller.hive.settings.autonomy.health_check_minutes;
+    let seen = untold(seen, now, i64::from(minutes) * 60_000);
     let Some(text) = check_text(&seen, now, minutes) else { return };
     log::info!("hive {}: {minutes}-minute check: telling the queen", caller.hive.id);
     let ctx = super::tools::app_ctx(state, handle, caller);
@@ -198,6 +232,22 @@ mod tests {
         assert!(t.contains("#5 w5 (running): nothing from it since maiTerm started."), "{t}");
         assert!(!t.contains("#6 w6") && t.contains("1 other worker is working"), "{t}");
         assert!(t.contains("hiveChangeSettings") && t.contains("hiveRestartWorker") && t.contains("end your turn without a reply"), "{t}");
+    }
+
+    /// A held land, a stopped worker or an unanswered blocker is told once, not every interval;
+    /// a change in it (or a fresh stall after it recovered) is told again.
+    #[test]
+    fn a_concern_is_told_once_until_it_changes() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let held = WorkerRecord { task_id: id.clone(), ..w(1, crate::hive::worker::PHASE_LANDING) };
+        let idle = |mins: i64| Seen { last_active: Some(NOW - mins * MIN), ..Default::default() };
+        let every = 15 * MIN;
+        assert_eq!(untold(vec![(held.clone(), idle(20))], NOW, every).len(), 1, "told the first time");
+        assert!(untold(vec![(held.clone(), idle(35))], NOW, every).is_empty(), "not again: only its minutes grew");
+        let blocked = Seen { blocker: true, ..idle(50) };
+        assert_eq!(untold(vec![(held.clone(), blocked)], NOW, every).len(), 1, "a new blocker changes the concern");
+        assert_eq!(untold(vec![(held.clone(), idle(1))], NOW, every).len(), 1, "busy again: forgotten, and passed through as fine");
+        assert_eq!(untold(vec![(held, idle(20))], NOW, every).len(), 1, "so its next stall is told");
     }
 
     #[test]

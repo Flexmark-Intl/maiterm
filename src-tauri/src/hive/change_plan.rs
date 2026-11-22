@@ -131,8 +131,12 @@ async fn gather<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, hive: &Hive, c
         }
         // A removal needs no check, only its canonical form when it still exists.
         for f in removes {
-            if let Ok(p) = std::fs::canonicalize(crate::share::expand_tilde(&f)) {
-                m.entry(f).or_insert_with(|| p.to_string_lossy().to_string());
+            // A folder already deleted can't be canonicalized: its parent's canonical form plus
+            // its name finds it as stored (`/tmp/x` for a kept `/private/tmp/x`).
+            let p = crate::share::expand_tilde(&f);
+            let canon = std::fs::canonicalize(&p).ok().or_else(|| Some(crate::share::canon(p.parent()?).join(p.file_name()?)));
+            if let Some(c) = canon {
+                m.entry(f).or_insert_with(|| c.to_string_lossy().to_string());
             }
         }
         Ok(m)
