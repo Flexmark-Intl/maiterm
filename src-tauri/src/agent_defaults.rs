@@ -959,7 +959,7 @@ for i,l in enumerate(lines):
     if starts[i] and re.match(r"^\s*\[",l):
         end=i
         break
-one=re.compile(r"^(\s*\S+\s*=\s*)(\"(?:[^\"\\]|\\.)*\"|"+Q+"[^"+Q+"]*"+Q+r")(\s*(?:#.*)?)$")
+one=re.compile(r"^(\s*[^\s=#]+\s*=\s*)(\"(?:[^\"\\]|\\.)*\"|"+Q+"[^"+Q+"]*"+Q+r")(\s*(?:#.*)?)$")
 for k,v in ops:
     e=re.escape(k)
     key=re.compile(r"^\s*("+e+"|\""+e+"\"|"+Q+e+Q+r")\s*=")
@@ -1330,6 +1330,7 @@ mod tests {
         assert!(load_managed(&p.managed).unwrap().keys.is_empty());
     }
 
+    #[cfg(unix)]
     /// Run the remote script with `home` as HOME. None when this machine has no python3.
     fn run_remote(p: &Paths, home: &Path) -> Option<()> {
         std::process::Command::new("python3").arg("-c").arg("pass").output().ok()?.status.success().then_some(())?;
@@ -1343,6 +1344,8 @@ mod tests {
         Some(())
     }
 
+    // The host scripts run on a Unix host; on Windows python3 reads USERPROFILE, not HOME.
+    #[cfg(unix)]
     #[test]
     fn hosts_get_the_recorded_values_and_nothing_else() {
         let (_h, p) = scratch();
@@ -1399,6 +1402,8 @@ mod tests {
         assert_eq!(fs::read_to_string(&r.codex).unwrap(), codex_before);
     }
 
+    // The host scripts run on a Unix host; on Windows python3 reads USERPROFILE, not HOME.
+    #[cfg(unix)]
     #[test]
     fn a_host_file_that_does_not_parse_or_an_absent_agent_is_left_alone() {
         let (_h, p) = scratch();
@@ -1419,6 +1424,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     /// Run the Codex merge on `toml` with `ops`, with and without tomllib (a shadow module that
     /// fails to import stands in for Python < 3.11). Each run's result: None when python3 is missing.
     fn codex_merge(toml: &str, ops: Value) -> Option<[String; 2]> {
@@ -1443,6 +1449,8 @@ mod tests {
         Some([run(false), run(true)])
     }
 
+    // The host scripts run on a Unix host; on Windows python3 reads USERPROFILE, not HOME.
+    #[cfg(unix)]
     #[test]
     fn the_codex_merge_reads_only_real_top_level_keys() {
         let ops = json!([["model", "b"], ["approvals_reviewer", null]]);
@@ -1458,6 +1466,8 @@ mod tests {
         assert_eq!(out, ["'model' = \"b\"\n".to_string(), "'model' = \"b\"\n".to_string()]);
     }
 
+    // The host scripts run on a Unix host; on Windows python3 reads USERPROFILE, not HOME.
+    #[cfg(unix)]
     #[test]
     fn the_codex_merge_leaves_what_it_cannot_edit_safely() {
         for toml in [

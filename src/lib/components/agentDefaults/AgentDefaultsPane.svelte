@@ -142,7 +142,8 @@
   }
 
   /** Write the advisor again: its switch goes with it. A select can't re-pick the value it
-   *  already shows, so the "not running" warning offers this instead. */
+   *  already shows, so the "not running" warning offers this instead — only when the value
+   *  hosts are given is this one already (it re-records it) and one maiTerm offers. */
   async function setSwitch(advisor: string | null) {
     if (busy || advisor === null) return;
     busy = 'claude:advisor';
@@ -203,6 +204,17 @@
       input.value = current ?? '';
       input.blur();
     }
+  }
+
+  /** The file's effort rows, plus one for a setting still recorded for a model whose entry
+   *  is gone here (an older build's model list), so it can be unticked. */
+  function effortRows(rows: AgentDefaultsStatus['claude']['effort']): AgentDefaultsStatus['claude']['effort'] {
+    const extra = Object.keys(status?.managed ?? {})
+      .filter((k) => k.startsWith('claude.effort:'))
+      .map((k) => k.slice('claude.effort:'.length))
+      .filter((id) => !rows.some((r) => r.model_id === id))
+      .map((id) => ({ model_id: id, label: null, level: null }));
+    return [...rows, ...extra];
   }
 
   const advisorStuck = $derived(
@@ -330,8 +342,10 @@
                 <p class="warn">
                   Not running: telemetry is off in Claude's settings, and the advisor then needs
                   a switch that isn't set.
-                  {#if status?.enabled && isManaged('claude', 'advisor') && !c.error}
+                  {#if status?.enabled && isManaged('claude', 'advisor') && !c.error && !drift('claude', 'advisor', c.advisor) && CLAUDE_ADVISORS.some((o) => o.value === c.advisor)}
                     <button class="link" disabled={busy !== null} onclick={() => setSwitch(c.advisor)}>Set it</button>.
+                  {:else if isManaged('claude', 'advisor')}
+                    Pick an advisor here (with the section on) and maiTerm sets the switch with it.
                   {:else}
                     Tick the advisor (with the section on) and maiTerm sets it with the advisor.
                   {/if}
@@ -357,7 +371,7 @@
               <p class="hint">Claude keeps effort per model, so each model has its own.</p>
             </div>
             <div class="effort">
-              {#each c.effort as row (row.model_id)}
+              {#each effortRows(c.effort) as row (row.model_id)}
                 <div class="effort-row">
                   {#if row.label || isManaged('claude', `effort:${row.model_id}`)}
                     <!-- An entry recorded for a model this build no longer offers can still be unticked. -->
