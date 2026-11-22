@@ -104,11 +104,12 @@ CLIs, and a wrong key is silently ignored.
 
 ## 4. One default maiTerm applies itself
 
-**Keep transcripts: 500 days**, applied once per user account like Deshittify's default-on
-rules (`seed_default_rules`, marker file `~/.maiterm/deshittify-seeded` or a sibling of it):
-only when `cleanupPeriodDays` is ABSENT. A value the user already set (Darryl's 548) is a choice
-and is left alone; once seeded, a change in either direction sticks. Nothing else in this
-section is applied without the human choosing it.
+**Keep transcripts: 500 days**, applied once per Claude settings FILE (marker lines in
+`~/.maiterm/agent-defaults-seeded`, `claude_retention <path>`), at every launch until settled,
+first launch included: only when `cleanupPeriodDays` is ABSENT. A value the user already set
+(Darryl's 548) is a choice and is left alone; once seeded, a change in either direction sticks. An
+unreadable file, a link to a missing file, or no Claude folder yet leaves it unsettled, to be tried
+next launch. Nothing else in this section is applied without the human choosing it.
 
 ## 5. UI
 
@@ -116,8 +117,8 @@ A Preferences section beside Deshittification: three collapsible parts headed Cl
 Antigravity. A part whose CLI isn't installed is shown collapsed with "not installed"; its
 values can still be set (they wait in the file). Each control shows the on-disk value, with
 "Agent's default" for absent. No section-level switch: these are values, not rules. A line
-under the section says changes apply to new sessions and reach bridged SSH hosts on their next
-connect.
+under the section says changes apply to new sessions. (Reaching bridged SSH hosts: §2.1, not
+built yet.)
 
 ## 6. Questions settled while building
 

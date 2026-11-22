@@ -464,13 +464,12 @@ pub fn run() {
             if instance::global_write_refusal().is_none() {
                 commands::deshittify::seed_default_rules();
                 // Agent Defaults' one default of its own: Claude keeps transcripts 500 days.
-                // Which file depends on the accounts, so only once they are known: state that
-                // didn't load means "no idea", and the wrong file would be marked settled.
-                if state::state_loaded_successfully() {
-                    let paths = agent_defaults::Paths::real(&app_state.app_data.read().preferences);
-                    if let Some(p) = paths {
-                        agent_defaults::seed_retention(&p);
-                    }
+                // No state-loaded gate: a first launch has no state file and must be seeded
+                // too, and the seed is settled per FILE, so a launch that picks the wrong one
+                // (state unreadable, accounts unknown) leaves the right one for the next.
+                let paths = agent_defaults::Paths::real(&app_state.app_data.read().preferences);
+                if let Some(p) = paths {
+                    agent_defaults::seed_retention(&p);
                 }
             }
 

@@ -578,8 +578,9 @@ fn mark_seeded(path: &Path, id: &str) -> Result<(), String> {
     fs::write(path, ids.join("\n") + "\n").map_err(|e| format!("Cannot write {}: {e}", path.display()))
 }
 
-/// Keep Claude transcripts `RETENTION_SEED_DAYS` days instead of Claude's 30, once per user
-/// account, only where nothing sets `cleanupPeriodDays`: a value already there is the user's
+/// Keep Claude transcripts `RETENTION_SEED_DAYS` days instead of Claude's 30, once per settings
+/// file (a user who moves their tabs to another Claude root gets it there too), only where
+/// nothing sets `cleanupPeriodDays`: a value already there is the user's
 /// choice. Once settled (seeded, or a value seen), it is never applied again, so a change in
 /// either direction sticks. An unreadable file is skipped and tried again next launch.
 ///
