@@ -126,6 +126,25 @@ fn opts() -> Opts {
     Opts { lock_wait: Duration::from_secs(20), checker: Arc::new(NoChecker), before_advance: None, after_advance: None }
 }
 
+/// The Hive's Landing checkpoint set to Ask me: every land goes to the human's card, and only
+/// then does the config rule (§8.1) send a land to a card of its own.
+fn ask_landing(h: &mut Hive) {
+    h.checkpoints.insert("landing".into(), "ask".into());
+}
+
+/// A `before_advance` seam that commits `text` to `file` in `repo`'s checked-out Base the first
+/// time `folder` reaches step 2, and never again.
+fn base_commits_once(repo: PathBuf, folder: &'static str, file: &'static str, text: &'static str) -> Opts {
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut o = opts();
+    o.before_advance = Some(Arc::new(move |f: &str| {
+        if f == folder && !done.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            commit(&repo, file, text);
+        }
+    }));
+    o
+}
+
 /// The land a test's `hold_lock` stands in for.
 const HOLDER: &str = "L-h01d0000";
 
@@ -1304,28 +1323,41 @@ fn a_cards_line_says_what_the_land_waits_on() {
 // ── The human's approval (plan 6d) ──
 
 #[tokio::test]
-async fn agent_config_files_one_card_and_its_approval_lands_the_stored_tested_commit() {
-    let rig = Rig::new("config-card", &["web"]);
-    git(rig.repo("web"), &["checkout", "-q", "--detach"]);
-    let w = rig.reported("hook", &["web"], ".claude/settings.json", "{\"hooks\":{}}\n");
-    let before = rig.main_tip("web");
+async fn under_landing_ask_a_config_card_after_step_1_holds_no_lock_and_its_approval_lands_the_stored_tested_commit() {
+    let rig = Rig::with("config-card", &["web"], ask_landing);
+    const CFG: &str = ".claude/settings.json";
+    commit(rig.repo("web"), CFG, "{\n\"a\":1,\n\n\n\n\"z\":1\n}\n");
+    let w = rig.reported("hook", &["web"], CFG, "{\n\"a\":2,\n\n\n\n\"z\":1\n}\n");
     let out = rig.land(&w).await.unwrap();
     assert_eq!(out["state"], STATE_AWAITING_HUMAN, "{out}");
-    assert!(out["result"].as_str().unwrap().contains("`.claude/settings.json`"), "{out}");
-    assert_eq!(rig.main_tip("web"), before, "nothing landed");
+    // Landing = Ask me: one card before step 1, naming the config change its approval covers.
+    let (req, d1) = rig.last_card();
+    assert_eq!(req.args["why"], "ask");
+    assert!(req.effects.iter().any(|e| e == "Changes agent or execution config in web: `.claude/settings.json`."), "{:?}", req.effects);
+
+    // Approved, then Base changes that config file under step 2: the change that would land isn't
+    // the one approved, so a config card asks again with step 1 done on the new Base.
+    let o = base_commits_once(rig.repo("web").to_path_buf(), "web", CFG, "{\n\"a\":1,\n\n\n\n\"z\":2\n}\n");
+    let out = approval::approved(&rig.ctx(), &rig.caller, &d1, &o).await;
+    assert!(matches!(out, driver::Outcome::Awaiting(_)), "{out:?}");
+    let before = rig.main_tip("web");
+    assert_eq!(fs::read_to_string(rig.repo("web").join(CFG)).unwrap(), "{\n\"a\":1,\n\n\n\n\"z\":2\n}\n", "the worker's change didn't land");
     rig.assert_no_leftovers();
     let r = rig.record(&w.task_id);
     assert_eq!(r.phase, worker::PHASE_LANDING);
     let land = r.land.clone().unwrap();
-    assert_eq!((land.approval.as_deref(), land.request.as_deref()), (Some("config"), Some("r_1")));
-    assert!(land.repos[0].status == REPO_TESTED && land.repos[0].tested.is_some() && land.repos[0].base_before.is_some(), "its step 1 stands");
+    assert_eq!((land.approval.as_deref(), land.request.as_deref()), (Some("config"), Some("r_2")));
+    assert!(land.repos[0].status == REPO_TESTED && land.repos[0].tested.is_some() && land.repos[0].base_before.as_deref() == Some(before.as_str()), "its step 1 stands");
     assert!(!in_flight(&r) && held(&r), "it holds no lock while it waits");
+    let settled = rig.seen.lock().unwrap().settled.clone();
+    assert!(settled.len() == 1 && settled[0].0 == "r_1" && !settled[0].1, "{settled:?}");
 
     let (req, d) = rig.last_card();
+    assert_eq!(req.args["why"], "config");
     assert_eq!((req.tab_id.as_str(), req.kind, req.reason.as_deref()), ("coord", "hive_land", Some("Ship it.")));
     assert_eq!(req.summary, "Land “Title hook” into main in web");
     assert!(req.effects.iter().any(|e| e == "Changes agent or execution config in web: `.claude/settings.json`."), "{:?}", req.effects);
-    assert!(req.effects.iter().any(|e| e.starts_with("web: 1 file changed, 1 insertion(+), at the reviewed commit")), "{:?}", req.effects);
+    assert!(req.effects.iter().any(|e| e.starts_with("web: 1 file changed, 1 insertion(+), 1 deletion(-), at the reviewed commit")), "{:?}", req.effects);
     assert!(req.effects.iter().any(|e| e.contains("No reviewer looked at it")), "{:?}", req.effects);
     assert_eq!((req.args["land_id"].as_str(), req.args["task_id"].as_str()), (Some(land.id.as_str()), Some(w.task_id.as_str())));
     assert_eq!(req.args["repos"]["web"]["pinned"], land.repos[0].pinned.as_str());
@@ -1343,20 +1375,23 @@ async fn agent_config_files_one_card_and_its_approval_lands_the_stored_tested_co
     assert_eq!(rig.main_tip("web"), stand_in);
     assert_eq!(rig.record(&w.task_id).phase, worker::PHASE_LANDED);
     let e = &rig.log()[0];
-    assert_eq!((e.by.as_str(), e.request.as_deref(), e.kind.as_str()), ("human", Some("r_1"), "land"));
+    assert_eq!((e.by.as_str(), e.request.as_deref(), e.kind.as_str()), ("human", Some("r_2"), "land"));
     let settled = rig.seen.lock().unwrap().settled.clone();
-    assert_eq!(settled.len(), 1);
-    assert!(settled[0].1 && settled[0].0 == "r_1", "{settled:?}");
+    assert_eq!(settled.len(), 2);
+    assert!(settled[1].1 && settled[1].0 == "r_2", "{settled:?}");
     assert!(rig.told().iter().any(|t| t.starts_with("⟦HIVE LAND · Title hook⟧ The human approved worker #1 hook's land")), "{:?}", rig.told());
     // The same card again carries nothing out.
     assert_eq!(approval::approved(&rig.ctx(), &rig.caller, &d, &opts()).await, driver::Outcome::Gone);
-    assert!(!rig.seen.lock().unwrap().settled[1].1);
+    assert!(!rig.seen.lock().unwrap().settled[2].1);
     rig.assert_no_leftovers();
 }
 
 #[tokio::test]
-async fn the_config_rule_asks_for_these_and_lets_a_version_bump_through() {
-    let rig = Rig::with("config-list", &["web"], |h| h.settings.land.config_paths = vec!["deploy/*.sh".into()]);
+async fn the_config_rule_names_these_on_the_card_and_lets_a_version_bump_through() {
+    let rig = Rig::with("config-list", &["web"], |h| {
+        ask_landing(h);
+        h.settings.land.config_paths = vec!["deploy/*.sh".into()];
+    });
     let pkg = |v: &str, scripts: &str| format!(r#"{{"name":"a","version":"{v}","scripts":{{{scripts}}}}}"#);
     commit(rig.repo("web"), "package.json", &pkg("1.0.0", r#""test":"vitest""#));
     git(rig.repo("web"), &["checkout", "-q", "--detach"]);
@@ -1370,23 +1405,63 @@ async fn the_config_rule_asks_for_these_and_lets_a_version_bump_through() {
         ("broken", "package.json".into(), "{not json".into(), true),
         ("custom", "deploy/go.sh".into(), "rsync\n".into(), true),
     ];
-    for (slug, file, text, card) in cases {
+    // Landing = Ask me puts every land on a card; the config rule says on it which config each
+    // changes. The version bump's card names none, and its approval lands it without another.
+    for (slug, file, text, caught) in cases {
         let w = rig.reported(slug, &["web"], &file, &text);
         let out = rig.land(&w).await.unwrap();
-        assert_eq!(out["state"], if card { STATE_AWAITING_HUMAN } else { STATE_LANDED }, "{slug}: {out}");
-        if card {
-            let (req, d) = rig.last_card();
-            assert!(req.effects.iter().any(|e| e.contains(&format!("`{file}`"))), "{slug}: {:?}", req.effects);
+        assert_eq!(out["state"], STATE_AWAITING_HUMAN, "{slug}: {out}");
+        let (req, d) = rig.last_card();
+        assert_eq!(req.args["why"], "ask", "{slug}");
+        let named = req.effects.iter().any(|e| e == &format!("Changes agent or execution config in web: `{file}`."));
+        assert_eq!(named, caught, "{slug}: {:?}", req.effects);
+        assert_eq!(req.effects.iter().any(|e| e.contains("execution config")), caught, "{slug}: {:?}", req.effects);
+        if caught {
             // Denied, so every case lands on the same Base.
             approval::closed(&rig.ctx(), &rig.caller, &d, "denied").await.unwrap();
+        } else {
+            let filed = rig.seen.lock().unwrap().filed.len();
+            let v = approval::approved(&rig.ctx(), &rig.caller, &d, &opts()).await.answer().unwrap();
+            assert_eq!(v["state"], STATE_LANDED, "{slug}: {v}");
+            assert_eq!(rig.seen.lock().unwrap().filed.len(), filed, "{slug}: no config card after the approval");
         }
     }
     assert_eq!(rig.log().len(), 1, "only the version bump landed");
 }
 
+/// Darryl, 2026-11-21: handed Landing (the default), the coordinator decides config changes too.
+/// No card; what landed still names its config files, and her undo of it is hers as well.
+#[tokio::test]
+async fn handed_landing_the_coordinator_lands_and_undoes_a_config_change_without_a_card() {
+    let rig = Rig::new("config-queen", &["web"]);
+    assert!(!crate::hive::checkpoints::asks(&rig.caller.hive, crate::hive::checkpoints::LANDING), "the default checkpoints hand Landing over");
+    git(rig.repo("web"), &["checkout", "-q", "--detach"]);
+    let w = rig.reported("hook", &["web"], ".claude/settings.json", "{\"hooks\":{}}\n");
+    let pinned = rig.tips(&w)["web"].as_str().unwrap().to_string();
+    let out = rig.land(&w).await.unwrap();
+    assert_eq!(out["state"], STATE_LANDED, "{out}");
+    assert_eq!(rig.main_tip("web"), pinned);
+    assert!(rig.seen.lock().unwrap().filed.is_empty(), "no card");
+    assert_eq!(rig.record(&w.task_id).phase, worker::PHASE_LANDED);
+    let log = rig.log();
+    assert_eq!(log.len(), 1);
+    assert_eq!((log[0].by.as_str(), log[0].request.as_deref(), log[0].kind.as_str()), ("coordinator", None, "land"));
+    let id = log[0].id.clone();
+    let p = undo::preview(&rig.caller.hive, &rig.caller.paths, &id).unwrap();
+    assert_eq!(p.config_files, vec![".claude/settings.json".to_string()], "what landed still names its config");
+
+    let v = rig.undo(&id).await.unwrap();
+    assert_eq!(v["state"], undo::STATE_DONE, "{v}");
+    assert!(rig.seen.lock().unwrap().filed.is_empty(), "her undo files no card either");
+    assert!(git(rig.repo("web"), &["ls-tree", "--name-only", "-r", "refs/heads/main"]).lines().all(|l| l != ".claude/settings.json"));
+    let u = rig.log().last().cloned().unwrap();
+    assert_eq!((u.kind.as_str(), u.by.as_str(), u.request.as_deref()), ("undo", "coordinator", None));
+    rig.assert_no_leftovers();
+}
+
 #[tokio::test]
 async fn a_denial_or_a_lapse_puts_the_worker_back_and_the_coordinator_is_told() {
-    let rig = Rig::new("deny", &["web"]);
+    let rig = Rig::with("deny", &["web"], ask_landing);
     let w = rig.reported("no", &["web"], "CLAUDE.md", "x\n");
     rig.land(&w).await.unwrap();
     let (_, mut d) = rig.last_card();
@@ -1416,7 +1491,7 @@ async fn a_denial_or_a_lapse_puts_the_worker_back_and_the_coordinator_is_told() 
 
 #[tokio::test]
 async fn an_approval_after_base_moved_merges_again_and_a_changed_config_change_asks_again() {
-    let rig = Rig::new("moved-card", &["web"]);
+    let rig = Rig::with("moved-card", &["web"], ask_landing);
     let w = rig.reported("env", &["web"], ".envrc", "export A=1\n\n\n\nexport END=1\n");
     assert_eq!(rig.land(&w).await.unwrap()["state"], STATE_AWAITING_HUMAN);
     let (_, d) = rig.last_card();
@@ -1516,7 +1591,7 @@ async fn integration_mode_merges_exactly_the_approved_sha_no_ff_though_the_branc
 
 #[tokio::test]
 async fn a_waiting_card_is_filed_again_after_a_restart_under_its_id_and_deadline() {
-    let rig = Rig::new("refile", &["web"]);
+    let rig = Rig::with("refile", &["web"], ask_landing);
     let w = rig.reported("again", &["web"], ".mcp.json", "{}\n");
     rig.land(&w).await.unwrap();
     let (first, d) = rig.last_card();
@@ -1533,7 +1608,7 @@ async fn a_waiting_card_is_filed_again_after_a_restart_under_its_id_and_deadline
 
 #[tokio::test]
 async fn a_worker_stopped_while_its_card_waits_withdraws_the_card() {
-    let rig = Rig::new("withdraw", &["web"]);
+    let rig = Rig::with("withdraw", &["web"], ask_landing);
     let w = rig.reported("halt", &["web"], ".githooks/pre-push", "exit 0\n");
     rig.land(&w).await.unwrap();
     let (_, d) = rig.last_card();
@@ -1547,7 +1622,7 @@ async fn a_worker_stopped_while_its_card_waits_withdraws_the_card() {
 
 #[tokio::test]
 async fn a_partly_landed_land_whose_card_goes_with_a_new_report_keeps_what_landed() {
-    let rig = Rig::new("partial-card", &["web", "api"]);
+    let rig = Rig::with("partial-card", &["web", "api"], ask_landing);
     commit(rig.repo("api"), ".envrc", "export A=1\n\n\n\nexport END=1\n");
     let w = rig.reported("split", &["web", "api"], ".envrc", "export A=2\n\n\n\nexport END=1\n");
     let pins = rig.tips(&w);
@@ -1590,11 +1665,20 @@ async fn a_partly_landed_land_whose_card_goes_with_a_new_report_keeps_what_lande
     wrong["web"] = json!(new_api);
     let e = rig.land_with(&w, json!({ "commits": wrong }), opts()).await.unwrap_err();
     assert!(e.contains("already landed web at"), "{e}");
-    // api's new commit still changes .envrc: a new card for it alone, in the same land.
+    // Landing = Ask me: a new card for api alone, in the same land.
     assert_eq!(rig.land(&w).await.unwrap()["state"], STATE_AWAITING_HUMAN);
     let (req, d) = rig.last_card();
+    assert_eq!(req.args["why"], "ask");
     assert_eq!(req.args["land_id"], land.id.as_str(), "the same land");
     assert!(req.args["repos"].get("web").is_none() && req.effects.iter().any(|e| e == "Already landed: web."), "{:?}", req.effects);
+    assert!(req.effects.iter().any(|e| e == "Changes agent or execution config in api: `.envrc`."), "{:?}", req.effects);
+    // That card read api's .envrc change from the worker's fork; Base has changed the file since,
+    // so what step 1 makes isn't the change approved, and the config rule asks once more.
+    let out = approval::approved(&rig.ctx(), &rig.caller, &d, &opts()).await;
+    assert!(matches!(out, driver::Outcome::Awaiting(_)), "{out:?}");
+    let (req, d) = rig.last_card();
+    assert_eq!((req.args["why"].as_str(), req.args["land_id"].as_str()), (Some("config"), Some(land.id.as_str())));
+    assert_eq!(rig.main_tip("web"), web1);
     let v = approval::approved(&rig.ctx(), &rig.caller, &d, &opts()).await.answer().unwrap();
     assert_eq!(v["state"], STATE_LANDED, "{v}");
     assert_eq!(rig.main_tip("web"), web1, "web isn't landed twice");
@@ -1784,8 +1868,8 @@ async fn a_done_hives_coordinator_undoes_nothing_and_the_human_still_can() {
 }
 
 #[tokio::test]
-async fn the_coordinators_undo_of_config_files_a_card_and_the_humans_own_undo_goes_on_what_it_showed() {
-    let rig = Rig::new("undo-config", &["web"]);
+async fn under_landing_ask_the_coordinators_undo_of_config_files_a_card_and_the_humans_own_undo_goes_on_what_it_showed() {
+    let rig = Rig::with("undo-config", &["web"], ask_landing);
     git(rig.repo("web"), &["checkout", "-q", "--detach"]);
     let w = rig.reported("hook", &["web"], ".claude/settings.json", "{}\n");
     assert_eq!(rig.land(&w).await.unwrap()["state"], STATE_AWAITING_HUMAN);
@@ -2177,14 +2261,14 @@ async fn a_conflicting_member_and_a_config_member_leave_the_batch_and_land_alone
     assert_eq!(rb.phase, worker::PHASE_REPORTED);
     let told = rig.told().join("\n");
     assert!(told.contains("Worker #2 b didn't land") && told.contains("conflicts in web: `shared.txt`"), "{told}");
-    // c, alone, runs its own check and goes to the human's card.
+    // c, alone, runs its own check and, Landing being the coordinator's, lands with no card.
     assert_eq!(checker.runs(CHECK_LAND), 1);
     let rc = rig.record(&c.task_id);
-    assert_eq!((rc.phase.as_str(), rc.land.as_ref().unwrap().state.as_str()), (worker::PHASE_LANDING, STATE_AWAITING_HUMAN));
-    let filed = rig.seen.lock().unwrap().filed.clone();
-    assert_eq!(filed.len(), 1);
-    assert!(filed[0].effects.iter().any(|e| e.contains(".claude/settings.json")), "{:?}", filed[0].effects);
-    assert!(!git(rig.repo("web"), &["ls-tree", "--name-only", "-r", "refs/heads/main"]).contains(".claude"), "config never lands without the human");
+    assert_eq!(rc.phase, worker::PHASE_LANDED);
+    assert!(rig.seen.lock().unwrap().filed.is_empty(), "no card");
+    let line = rig.log().into_iter().find(|e| e.worker == "c").expect("c landed");
+    assert_eq!((line.kind.as_str(), line.by.as_str(), line.check.as_str()), ("land", "coordinator", "passed"), "alone, on its own check");
+    assert!(git(rig.repo("web"), &["ls-tree", "--name-only", "-r", "refs/heads/main"]).lines().any(|l| l == ".claude/settings.json"));
     rig.assert_no_leftovers();
 }
 
@@ -2583,26 +2667,29 @@ async fn land_cards_are_decisions_categorized_by_why_and_a_lapse_isnt_a_denial()
     assert_eq!(ds[0].outcome.as_deref(), Some("landed"));
     assert!(!ds[0].can_override(), "the human's own");
 
-    // The config rule on the coordinator's own land: its decision waits, the card is `config`.
-    let rig = Rig::new("card-config", &["web"]);
-    let w = rig.reported("hook", &["web"], ".claude/settings.json", "{}\n");
+    // The config rule's card (an approved config change that Base then changed) is `config`.
+    let rig = Rig::with("card-config", &["web"], ask_landing);
+    commit(rig.repo("web"), ".envrc", "export A=1\n\n\n\nexport END=1\n");
+    let w = rig.reported("hook", &["web"], ".envrc", "export A=2\n\n\n\nexport END=1\n");
     rig.land(&w).await.unwrap();
+    let first = rig.record(&w.task_id).land.unwrap().card_decision.unwrap();
+    assert_eq!(decisions_of(&rig).into_iter().find(|x| x.id == first).unwrap().category(), "landing");
+    let (_, d) = rig.last_card();
+    let o = base_commits_once(rig.repo("web").to_path_buf(), "web", ".envrc", "export A=1\n\n\n\nexport END=2\n");
+    assert!(matches!(approval::approved(&rig.ctx(), &rig.caller, &d, &o).await, driver::Outcome::Awaiting(_)));
     let land = rig.record(&w.task_id).land.unwrap();
+    assert_eq!(land.approval.as_deref(), Some("config"));
+    assert!(land.decision.is_none(), "no decision of the coordinator's own under Ask me");
     let ds = decisions_of(&rig);
-    assert_eq!(ds.len(), 2);
-    let coord = ds.iter().find(|d| Some(&d.id) == land.decision.as_ref()).unwrap();
     let card = ds.iter().find(|d| Some(&d.id) == land.card_decision.as_ref()).unwrap();
-    assert_eq!((coord.category(), coord.outcome.as_deref()), ("landing", Some("waiting for the human's approval (config)")));
+    assert_ne!(card.id, first);
     assert_eq!(card.category(), "config");
     let (_, d) = rig.last_card();
     approval::closed(&rig.ctx(), &rig.caller, &d, "denied").await.unwrap();
     let ds = decisions_of(&rig);
     let card = ds.iter().find(|x| Some(&x.id) == land.card_decision.as_ref()).unwrap();
-    let coord = ds.iter().find(|x| Some(&x.id) == land.decision.as_ref()).unwrap();
     assert_eq!((card.answered_by(), card.answered.as_ref().unwrap().answer.as_deref()), (Some("human"), Some("Don\u{2019}t land")));
-    for x in [card, coord] {
-        assert!(x.outcome.as_deref().is_some_and(|o| o.starts_with("refused: The human denied it")), "{:?}", x.outcome);
-    }
+    assert!(card.outcome.as_deref().is_some_and(|o| o.starts_with("refused: The human denied it")), "{:?}", card.outcome);
 
     // A card nobody answered lapses: no answer is logged.
     let w2 = rig.reported("late", &["web"], "AGENTS.md", "x\n");
@@ -2700,7 +2787,7 @@ async fn the_humans_undo_overrides_the_decision_that_landed_that_repo_when_a_res
 
 #[tokio::test]
 async fn a_denied_card_replaced_when_its_held_land_resumes_isnt_said_to_have_been_approved() {
-    let rig = Rig::new("card-denied-resumed", &["web", "api"]);
+    let rig = Rig::with("card-denied-resumed", &["web", "api"], ask_landing);
     commit(rig.repo("api"), ".envrc", "export A=1\n\n\n\nexport END=1\n");
     let w = rig.reported("split", &["web", "api"], ".envrc", "export A=2\n\n\n\nexport END=1\n");
     assert_eq!(rig.land(&w).await.unwrap()["state"], STATE_AWAITING_HUMAN);

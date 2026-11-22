@@ -451,8 +451,9 @@ pub(crate) async fn drive<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, id: 
                 Err(e) => return refuse(ctx, caller, u, e).await,
             }
             // The config rule (§8.1): the human's own Undo goes on if its confirmation named
-            // exactly these files; the coordinator's goes to a card.
-            if u.config_unapproved() {
+            // exactly these files; the coordinator's goes to a card while Landing is Ask me.
+            // Handed Landing, she decides config changes too (Darryl, 2026-11-21).
+            if u.config_unapproved() && (u.by_human() || crate::hive::checkpoints::asks(&caller.hive, crate::hive::checkpoints::LANDING)) {
                 if u.by_human() {
                     if u.shown_fp.is_some() && u.shown_fp == u.config_fp {
                         u.config_approved = u.config_fp.clone();

@@ -531,9 +531,11 @@ async fn advance_inner<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &Wor
                 let why = format!("{folder} isn't ready to land ({})", r.status);
                 return fail(ctx, caller, w, land, why).await;
             }
-            // The config rule (§8.1), before anything moves: a change the human hasn't approved
-            // as it now stands sends the whole land to one card, whatever the checkpoint says.
-            if land.repos.iter().any(LandRepo::config_unapproved) {
+            // The config rule (§8.1), before anything moves: while Landing is Ask me, a change the
+            // human hasn't approved as it now stands sends the whole land to one card. Handed
+            // Landing, the queen decides config changes too (Darryl, 2026-11-21); an Undo's
+            // preview still names the config files a land changed.
+            if crate::hive::checkpoints::asks(&caller.hive, crate::hive::checkpoints::LANDING) && land.repos.iter().any(LandRepo::config_unapproved) {
                 return super::approval::await_human(ctx, caller, w, land, super::approval::WHY_CONFIG).await;
             }
             if let Some(seam) = opts.before_advance.clone() {

@@ -272,8 +272,9 @@ pub fn tool_definition(tab_id: &Value) -> Value {
              landed; hiveRetireWorker abandons a held land. Without a land check the answer is the result; with one it says \
              checking, and the result arrives as ⟦HIVE LAND⟧. When it lands, the worker is retired and workers waiting on it \
              launch from the new Base. Some lands wait for the human's approval on a card first: every land while the Landing \
-             checkpoint is Ask me (in either landing mode), and any land whose diff changes agent or execution \
-             config (.claude/, CLAUDE.md, git hooks, CI, package.json scripts…). The answer then says awaiting_human; the \
+             checkpoint is Ask me (in either landing mode), including one whose diff changes agent or execution \
+             config (.claude/, CLAUDE.md, git hooks, CI, package.json scripts…) after they approved it. Handed Landing, \
+             you decide config changes too: look hard at any such diff before you land it. The answer then says awaiting_human; the \
              result arrives as ⟦HIVE LAND⟧ once they answer, and a denial, or no answer within 24 hours, puts the worker back \
              in Reported. Don't ask them again yourself. If a land check fails, maiTerm also runs it on Base alone: when Base \
              fails too, that repo is suspect, the lands since it last passed are named, and every land there needs \
