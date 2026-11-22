@@ -2424,6 +2424,12 @@ export interface AgentDefaultsStatus {
   claude: AgentDefaultsClaude;
   codex: AgentDefaultsCodex;
   agy: AgentDefaultsAgy;
+  /** Off: maiTerm changes no agent setting, here or on SSH hosts. */
+  enabled: boolean;
+  /** `claude.advisor`… → the value every machine is given (null: the agent's default). A
+   *  setting not here is never changed by maiTerm. */
+  managed: Record<string, string | null>;
+  managed_error: string | null;
 }
 
 export type AgentDefaultsRuntime = 'claude' | 'codex' | 'agy';
@@ -2432,9 +2438,24 @@ export async function agentDefaultsStatus(): Promise<AgentDefaultsStatus> {
   return invoke('agent_defaults_status');
 }
 
-/** Set one default, or clear it with null (the agent's own default). Answers with what is on disk. */
+/** Set one managed default, or clear it with null (the agent's own default). Answers with what is on disk. */
 export async function agentDefaultsSet(runtime: AgentDefaultsRuntime, key: string, value: string | null): Promise<AgentDefaultsStatus> {
   return invoke('agent_defaults_set', { runtime, key, value });
+}
+
+/** Tick or untick a setting: whether maiTerm sets it here and on every bridged SSH host. */
+export async function agentDefaultsManage(runtime: AgentDefaultsRuntime, key: string, managed: boolean): Promise<AgentDefaultsStatus> {
+  return invoke('agent_defaults_manage', { runtime, key, managed });
+}
+
+/** Switch the whole section on or off. */
+export async function agentDefaultsEnable(enabled: boolean): Promise<AgentDefaultsStatus> {
+  return invoke('agent_defaults_enable', { enabled });
+}
+
+/** The script that gives a bridged SSH host the managed settings ('' for nothing to do). */
+export async function buildAgentDefaultsSetupScript(): Promise<string> {
+  return invoke('build_agent_defaults_setup_script');
 }
 
 // ─── Deshittification ──────────────────────────────────────────────────────

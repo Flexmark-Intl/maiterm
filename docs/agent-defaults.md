@@ -1,4 +1,4 @@
-# Agent Defaults (built 2026-11-22: local files + Preferences; SSH hosts not yet)
+# Agent Defaults (built 2026-11-22: local files, Preferences, SSH hosts)
 
 Code: `src-tauri/src/agent_defaults.rs` (every read and write, path-parameterized, tests),
 `commands/agent_defaults.rs` (Tauri), `components/agentDefaults/AgentDefaultsPane.svelte`.
@@ -19,8 +19,11 @@ share the mechanics: §2.
   sessions maiTerm didn't start too. A session's own `/model`, `/effort`, `/advisor` or launch
   flag still wins for that session (flags and in-session choices sit above user settings in
   every runtime).
-- **Not maiTerm state.** No `Preferences` field, no `AppData` field, nothing in
-  `preference_meta`, no MCP tool. An agent that wants a different model asks its human.
+- **Not maiTerm preferences.** No `Preferences` field, no `AppData` field, nothing in
+  `preference_meta`, no MCP tool. An agent that wants a different model asks its human. The
+  one thing maiTerm keeps is WHICH settings it manages and the value each was given
+  (`~/.maiterm/agent-defaults.json`, §2.1), beside the files it describes and shared by every
+  build like them.
 - **Not Hive's launch settings.** The Hive launch builder (`hive_launch_args`) passes `--model`
   and `--effort` on every launch, coordinator and workers alike, so those two defaults never
   reach a Hive agent. The coordinator loads every settings source like a normal tab, so it gets
@@ -32,9 +35,14 @@ share the mechanics: §2.
 
 ## 2. Mechanics (borrowed from Deshittify, `commands/deshittify.rs`)
 
-- **Disk is the state.** The section reads each agent's file and shows what is there. A value
-  the user (or the agent's own `/config`) changes by hand reads back as changed: no drift, no
-  re-assert loop.
+- **Disk is the state of each value here.** The section reads each agent's file and shows what
+  is there. A value the user (or the agent's own `/config`) changes by hand reads back as
+  changed, and is never re-asserted here. For a managed setting the section also says when the
+  file no longer holds the recorded value hosts are given (§2.1).
+- **maiTerm changes only the settings the human ticked** (Darryl, 2026-11-22). Each row has a
+  tick; an unticked setting's control is read-only and maiTerm never changes it, here or on a
+  host. Ticking records what this machine's file holds and writes nothing. A switch at the top
+  turns the whole section off (nothing changed anywhere) and keeps the ticks.
 - **"Agent's default"** is a choice in every control, and means the key is ABSENT: maiTerm
   removes it rather than writing the runtime's current default, so a later change of default
   upstream reaches the user.
@@ -58,17 +66,37 @@ share the mechanics: §2.
 - **Managed accounts need nothing extra.** Every account root symlinks `settings.json` and
   `config.toml` back to the shared file (`accounts/mod.rs`), so one write reaches every account.
 
-### 2.1 SSH hosts
+### 2.1 SSH hosts (built 2026-11-22)
 
-The values travel to a bridged host the way Deshittify's do: a python3 merge appended to the
-bridge setup script (`render_remote_setup_script`, run from `sshMcpBridge.svelte.ts`), and the
-existing Antigravity merge in `commands/ssh_tunnel.rs` for its file. **This machine is the
-source of truth in both directions**, as in Deshittify: a value set here is set there, and
-"Agent's default" here removes the key there. **Open (2026-11-22, on the board):** for values,
-unlike Deshittify's on/off rules, mirroring removals deletes a value a host set for itself (another
-plan's model, say); the MCP proxy's remote merge never deletes for that reason. Darryl decides
-between set-only and mirroring before this is built. The script rewrites a remote file only when
-something changed, and never one it can't parse.
+**Every managed setting is mirrored to every bridged host, removals included** (Darryl,
+2026-11-22: "the point of the setting is to make sure all hosts follow same settings; so removal
+mirrors, but disable stops changing anything"). A value set here is set there; "Agent's
+default" here removes the key there, even a value the host set for itself. An UNTICKED setting
+is left alone everywhere, which is how a host keeps its own value.
+
+- **Hosts get the RECORDED value, never what this machine's file holds at connect time.**
+  `Managed.keys` (`~/.maiterm/agent-defaults.json`) maps `claude.advisor`, `codex.effort`… to the
+  value the human chose (JSON null: the agent's default), written when they tick (this machine's
+  value then) or pick. Anything that drops a key here — a hand edit, another writer's bug —
+  would otherwise become a removal on every host, and a removed `cleanupPeriodDays` lets Claude
+  sweep a host's transcripts at 30 days. When the file here drifts from the record, the row
+  says so and offers to give hosts this machine's value. Ticking refuses a value a host would
+  break on (wrong JSON type, a Codex reviewer Codex won't start on); a hand-typed model id is
+  carried as it is.
+- **How:** `agent_defaults::remote_script`, run by `sshMcpBridge.svelte.ts` on every connect
+  AFTER the bridge's own setup and Deshittify's script (all three read-modify-write the same
+  remote files), never gating `connected`; also appended last to "Install MCP for Current
+  User". Two python3 snippets: a JSON merge for `~/.claude/settings.json` and
+  `~/.gemini/antigravity-cli/settings.json` (`[path, value]` pairs; a removal also drops an
+  object it empties: `env`, a `modelSettings` entry), and a textual top-level edit of
+  `~/.codex/config.toml` (python3 has no TOML writer), checked with `tomllib` where the host has
+  Python 3.11+.
+- **Left alone:** a host without the agent's folder (nothing created), a file that doesn't
+  parse, a link to a missing file. A file is rewritten only when something changed, through a
+  temp file beside the link's target. Empty script when the section is off or nothing is
+  ticked. An isolated instance builds none (`global_write_refusal`).
+- **Remote Claude file is `~/.claude/settings.json`**, as Deshittify's: a host's own
+  `CLAUDE_CONFIG_DIR` is not followed.
 
 ## 3. The settings (first version)
 
@@ -109,16 +137,17 @@ CLIs, and a wrong key is silently ignored.
 first launch included: only when `cleanupPeriodDays` is ABSENT. A value the user already set
 (Darryl's 548) is a choice and is left alone; once seeded, a change in either direction sticks. An
 unreadable file, a link to a missing file, or no Claude folder yet leaves it unsettled, to be tried
-next launch. Nothing else in this section is applied without the human choosing it.
+next launch. Nothing else in this section is applied without the human choosing it. The seed
+is local only: it ticks nothing, so it never reaches a host.
 
 ## 5. UI
 
 A Preferences section beside Deshittification: three collapsible parts headed Claude, Codex,
 Antigravity. A part whose CLI isn't installed is shown collapsed with "not installed"; its
 values can still be set (they wait in the file). Each control shows the on-disk value, with
-"Agent's default" for absent. No section-level switch: these are values, not rules. A line
-under the section says changes apply to new sessions. (Reaching bridged SSH hosts: §2.1, not
-built yet.)
+"Agent's default" for absent. Each row has a tick (§2): unticked, its control is read-only.
+One section switch, "maiTerm sets the ticked settings". A line under the section says changes
+apply to new sessions and reach SSH hosts on their next bridge connect.
 
 ## 6. Questions settled while building
 

@@ -22,7 +22,7 @@ pub async fn agent_defaults_status(state: State<'_, Arc<AppState>>) -> Result<St
         .map_err(|e| format!("Status task failed: {e}"))
 }
 
-/// Set one default (`value` null: the agent's own default), then report what is on disk, so
+/// Set one managed default (`value` null: the agent's own default), then report what is on disk, so
 /// the UI shows the file rather than what it hoped happened.
 #[tauri::command]
 pub async fn agent_defaults_set(
@@ -37,9 +37,57 @@ pub async fn agent_defaults_set(
     }
     let p = paths(&state)?;
     tauri::async_runtime::spawn_blocking(move || {
-        agent_defaults::set(&p, runtime, &key, value.as_deref())?;
+        agent_defaults::set_managed(&p, runtime, &key, value.as_deref())?;
         Ok(agent_defaults::status(&p))
     })
     .await
     .map_err(|e| format!("Write task failed: {e}"))?
+}
+
+/// Tick (`managed`) or untick one setting: whether maiTerm sets it here and on SSH hosts.
+#[tauri::command]
+pub async fn agent_defaults_manage(
+    state: State<'_, Arc<AppState>>,
+    runtime: Runtime,
+    key: String,
+    managed: bool,
+) -> Result<Status, String> {
+    if let Some(why) = crate::instance::global_write_refusal() {
+        return Err(why);
+    }
+    let p = paths(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        agent_defaults::manage(&p, runtime, &key, managed)?;
+        Ok(agent_defaults::status(&p))
+    })
+    .await
+    .map_err(|e| format!("Write task failed: {e}"))?
+}
+
+/// Switch the whole section on or off (off: maiTerm changes no agent setting anywhere).
+#[tauri::command]
+pub async fn agent_defaults_enable(state: State<'_, Arc<AppState>>, enabled: bool) -> Result<Status, String> {
+    if let Some(why) = crate::instance::global_write_refusal() {
+        return Err(why);
+    }
+    let p = paths(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        agent_defaults::set_enabled(&p, enabled)?;
+        Ok(agent_defaults::status(&p))
+    })
+    .await
+    .map_err(|e| format!("Write task failed: {e}"))?
+}
+
+/// The script that gives a bridged SSH host the managed settings. Empty when there is nothing
+/// to carry. Refused in an isolated instance, like Deshittify's: it removes things on hosts.
+#[tauri::command]
+pub async fn build_agent_defaults_setup_script(state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    if let Some(why) = crate::instance::global_write_refusal() {
+        return Err(why);
+    }
+    let p = paths(&state)?;
+    tauri::async_runtime::spawn_blocking(move || agent_defaults::remote_script(&p))
+        .await
+        .map_err(|e| format!("Render task failed: {e}"))
 }

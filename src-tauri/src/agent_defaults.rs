@@ -2,7 +2,9 @@
 //! with, written into that agent's OWN user settings file. The sister of Deshittify
 //! (`commands/deshittify.rs`), with its mechanics:
 //!
-//! - **Disk is the state.** Nothing here is kept in maiTerm; `status` reads the files.
+//! - **Disk is the state** of each value here; `status` reads the files. maiTerm keeps only
+//!   WHICH settings the human ticked and the value each was given (`Managed`), because those
+//!   are what SSH hosts receive (`remote_script`). An unticked setting is never changed.
 //! - **Absent is "the agent's default".** Clearing a value removes its key, never writes the
 //!   runtime's current default, so a later upstream change of default reaches the user.
 //! - **Only our keys are touched**, everything else is kept (TOML through `toml_edit`).
@@ -72,6 +74,8 @@ pub struct Paths {
     pub agy: PathBuf,
     /// Which one-time defaults were settled (`seed_retention`).
     pub seeded: PathBuf,
+    /// Which settings maiTerm manages (`Managed`).
+    pub managed: PathBuf,
 }
 
 impl Paths {
@@ -93,6 +97,7 @@ impl Paths {
             codex: home.join(".codex").join("config.toml"),
             agy: home.join(".gemini").join("antigravity-cli").join("settings.json"),
             seeded: home.join(".maiterm").join("agent-defaults-seeded"),
+            managed: home.join(".maiterm").join("agent-defaults.json"),
         }
     }
 }
@@ -255,6 +260,13 @@ pub struct Status {
     pub claude: ClaudePart,
     pub codex: CodexPart,
     pub agy: AgyPart,
+    /// The section is on: maiTerm changes the settings in `managed`, here and on SSH hosts.
+    pub enabled: bool,
+    /// `claude.advisor`… → the value maiTerm gives every machine, as the UI shows it (None: the
+    /// agent's default). A setting not here is never changed by maiTerm.
+    pub managed: std::collections::BTreeMap<String, Option<String>>,
+    /// The record can't be read: nothing is changed anywhere until it can.
+    pub managed_error: Option<String>,
 }
 
 fn dir_exists(file: &Path) -> bool {
@@ -262,7 +274,18 @@ fn dir_exists(file: &Path) -> bool {
 }
 
 pub fn status(p: &Paths) -> Status {
-    Status { claude: claude_status(&p.claude), codex: codex_status(&p.codex), agy: agy_status(&p.agy) }
+    let (m, managed_error) = match load_managed(&p.managed) {
+        Ok(m) => (m, None),
+        Err(e) => (Managed { enabled: false, keys: Default::default() }, Some(e)),
+    };
+    Status {
+        claude: claude_status(&p.claude),
+        codex: codex_status(&p.codex),
+        agy: agy_status(&p.agy),
+        enabled: m.enabled,
+        managed: m.keys.iter().map(|(k, v)| (k.clone(), shown(Some(v)))).collect(),
+        managed_error,
+    }
 }
 
 /// `env[key]` as the string Claude puts in the process environment (None: absent or empty).
@@ -377,6 +400,25 @@ pub enum Runtime {
     Agy,
 }
 
+impl Runtime {
+    /// As the managed record names it (`claude.advisor`) and the wire spells it.
+    fn id(self) -> &'static str {
+        match self {
+            Runtime::Claude => "claude",
+            Runtime::Codex => "codex",
+            Runtime::Agy => "agy",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Runtime::Claude => "Claude",
+            Runtime::Codex => "Codex",
+            Runtime::Agy => "Antigravity",
+        }
+    }
+}
+
 fn one_of(value: &str, allowed: &[&str], what: &str) -> Result<(), String> {
     if allowed.contains(&value) {
         Ok(())
@@ -385,28 +427,102 @@ fn one_of(value: &str, allowed: &[&str], what: &str) -> Result<(), String> {
     }
 }
 
-/// Set one setting, or clear it with `value` None ("the agent's default"). Every value is
-/// checked against what the agent accepts before anything is written.
+/// A setting's value as the agent's file holds it (a string, a number of days, a bool), checked
+/// against what maiTerm offers. None: "the agent's default", the key absent. An unknown key is
+/// an error either way.
 ///
 /// Keys: Claude `advisor`, `model`, `effort:<model id>`, `retention`; Codex `model`, `effort`,
 /// `reviewer`; Antigravity `agent_mode`, `show_thinking`, `queued_messages`.
-pub fn set(p: &Paths, runtime: Runtime, key: &str, value: Option<&str>) -> Result<bool, String> {
-    match runtime {
-        Runtime::Claude => set_claude(&p.claude, key, value),
-        Runtime::Codex => set_codex(&p.codex, key, value),
-        Runtime::Agy => set_agy(&p.agy, key, value),
+pub fn typed(runtime: Runtime, key: &str, value: Option<&str>) -> Result<Option<Value>, String> {
+    match (runtime, key) {
+        (Runtime::Claude, "advisor") => value.map(|v| one_of(v, CLAUDE_ADVISORS, "Claude advisor").map(|_| json!(v))).transpose(),
+        (Runtime::Claude, "model") => value.map(|v| one_of(v, CLAUDE_MODELS, "Claude model").map(|_| json!(v))).transpose(),
+        (Runtime::Claude, "retention") => value
+            .map(|v| {
+                v.trim()
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|d| (1..=RETENTION_MAX_DAYS).contains(d))
+                    .map(|d| json!(d))
+                    .ok_or_else(|| format!("Keep transcripts takes a whole number of days from 1 to {RETENTION_MAX_DAYS}"))
+            })
+            .transpose(),
+        (Runtime::Claude, k) if k.starts_with("effort:") => {
+            let model_id = &k["effort:".len()..];
+            if !CLAUDE_EFFORT_MODELS.iter().any(|(id, _)| *id == model_id) {
+                return Err(format!("{model_id:?} is not a model maiTerm sets effort for"));
+            }
+            value.map(|v| one_of(v, CLAUDE_EFFORTS, "Claude effort level").map(|_| json!(v))).transpose()
+        }
+        (Runtime::Codex, "model") => value
+            .map(|v| if valid_codex_model(v) { Ok(json!(v)) } else { Err(format!("{v:?} is not a Codex model name")) })
+            .transpose(),
+        (Runtime::Codex, "effort") => value.map(|v| one_of(v, CODEX_EFFORTS, "Codex reasoning effort").map(|_| json!(v))).transpose(),
+        (Runtime::Codex, "reviewer") => value.map(|v| one_of(v, CODEX_REVIEWERS, "Codex approvals reviewer").map(|_| json!(v))).transpose(),
+        (Runtime::Agy, "agent_mode") => value.map(|v| one_of(v, AGY_MODES, "Antigravity agent mode").map(|_| json!(v))).transpose(),
+        (Runtime::Agy, "show_thinking") => value
+            .map(|v| match v {
+                "true" => Ok(json!(true)),
+                "false" => Ok(json!(false)),
+                _ => Err(format!("{v:?} is not on or off")),
+            })
+            .transpose(),
+        (Runtime::Agy, "queued_messages") => {
+            value.map(|v| one_of(v, AGY_QUEUED, "Antigravity queued-messages choice").map(|_| json!(v))).transpose()
+        }
+        (rt, k) => Err(format!("Unknown {} setting {k:?}", rt.name())),
     }
 }
 
-fn set_claude(path: &Path, key: &str, value: Option<&str>) -> Result<bool, String> {
+/// Set one setting in this machine's file, or clear it with `value` None ("the agent's
+/// default"). Every value is checked (`typed`) before anything is written. Whether the human
+/// lets maiTerm change it at all is `set_managed`'s question, not this one's.
+pub fn set(p: &Paths, runtime: Runtime, key: &str, value: Option<&str>) -> Result<bool, String> {
+    let v = typed(runtime, key, value)?;
+    match runtime {
+        Runtime::Claude => set_claude(&p.claude, key, v),
+        Runtime::Codex => set_codex(&p.codex, codex_key(key)?, v),
+        Runtime::Agy => edit_json(&p.agy, |s| Ok(put(s, agy_key(key)?, v.clone()))),
+    }
+}
+
+/// The JSON path a Claude setting is written at (`advisor` also writes its flag bypass).
+fn claude_path(key: &str) -> Result<Vec<&str>, String> {
+    Ok(match key {
+        "advisor" => vec!["advisorModel"],
+        "model" => vec!["model"],
+        "retention" => vec!["cleanupPeriodDays"],
+        k => match k.strip_prefix("effort:") {
+            Some(id) => vec!["modelSettings", id, "effortLevel"],
+            None => return Err(format!("Unknown Claude setting {key:?}")),
+        },
+    })
+}
+
+fn codex_key(key: &str) -> Result<&'static str, String> {
+    Ok(match key {
+        "model" => "model",
+        "effort" => "model_reasoning_effort",
+        "reviewer" => "approvals_reviewer",
+        _ => return Err(format!("Unknown Codex setting {key:?}")),
+    })
+}
+
+fn agy_key(key: &str) -> Result<&'static str, String> {
+    Ok(match key {
+        "agent_mode" => "agentMode",
+        "show_thinking" => "showThinking",
+        "queued_messages" => "queuedMessages",
+        _ => return Err(format!("Unknown Antigravity setting {key:?}")),
+    })
+}
+
+fn set_claude(path: &Path, key: &str, value: Option<Value>) -> Result<bool, String> {
     if key == "advisor" {
-        if let Some(v) = value {
-            one_of(v, CLAUDE_ADVISORS, "Claude advisor")?;
-        }
         // The model and its flag bypass go together, in one write: an advisor without the
         // bypass is silently ignored while telemetry is off.
         return edit_json(path, |s| {
-            let mut changed = put(s, "advisorModel", value.map(|v| json!(v)));
+            let mut changed = put(s, "advisorModel", value.clone());
             if value.is_some() {
                 if !s.get("env").is_some_and(Value::is_object) {
                     s["env"] = json!({});
@@ -418,33 +534,9 @@ fn set_claude(path: &Path, key: &str, value: Option<&str>) -> Result<bool, Strin
             Ok(changed)
         });
     }
-    if key == "model" {
-        if let Some(v) = value {
-            one_of(v, CLAUDE_MODELS, "Claude model")?;
-        }
-        return edit_json(path, |s| Ok(put(s, "model", value.map(|v| json!(v)))));
-    }
-    if key == "retention" {
-        let days = value
-            .map(|v| {
-                v.trim()
-                    .parse::<u64>()
-                    .ok()
-                    .filter(|d| (1..=RETENTION_MAX_DAYS).contains(d))
-                    .ok_or_else(|| format!("Keep transcripts takes a whole number of days from 1 to {RETENTION_MAX_DAYS}"))
-            })
-            .transpose()?;
-        return edit_json(path, |s| Ok(put(s, "cleanupPeriodDays", days.map(|d| json!(d)))));
-    }
     if let Some(model_id) = key.strip_prefix("effort:") {
-        if !CLAUDE_EFFORT_MODELS.iter().any(|(id, _)| *id == model_id) {
-            return Err(format!("{model_id:?} is not a model maiTerm sets effort for"));
-        }
-        if let Some(v) = value {
-            one_of(v, CLAUDE_EFFORTS, "Claude effort level")?;
-        }
         return edit_json(path, |s| {
-            if let Some(v) = value {
+            if let Some(v) = &value {
                 if !s.get("modelSettings").is_some_and(Value::is_object) {
                     s["modelSettings"] = json!({});
                 }
@@ -452,7 +544,7 @@ fn set_claude(path: &Path, key: &str, value: Option<&str>) -> Result<bool, Strin
                 if !table.get(model_id).is_some_and(Value::is_object) {
                     table[model_id] = json!({});
                 }
-                return Ok(put(&mut table[model_id], "effortLevel", Some(json!(v))));
+                return Ok(put(&mut table[model_id], "effortLevel", Some(v.clone())));
             }
             let Some(table) = s.get_mut("modelSettings").and_then(Value::as_object_mut) else { return Ok(false) };
             let Some(entry) = table.get_mut(model_id) else { return Ok(false) };
@@ -464,7 +556,8 @@ fn set_claude(path: &Path, key: &str, value: Option<&str>) -> Result<bool, Strin
             Ok(changed)
         });
     }
-    Err(format!("Unknown Claude setting {key:?}"))
+    let field = claude_path(key)?[0];
+    edit_json(path, |s| Ok(put(s, field, value.clone())))
 }
 
 /// A Codex model name: free text (its names change too often for a list), but one TOML string
@@ -473,30 +566,8 @@ fn valid_codex_model(v: &str) -> bool {
     !v.is_empty() && v.len() <= 100 && v.chars().all(|c| c.is_ascii_alphanumeric() || "-_.:/".contains(c))
 }
 
-fn set_codex(path: &Path, key: &str, value: Option<&str>) -> Result<bool, String> {
-    let toml_key = match key {
-        "model" => {
-            if let Some(v) = value {
-                if !valid_codex_model(v) {
-                    return Err(format!("{v:?} is not a Codex model name"));
-                }
-            }
-            "model"
-        }
-        "effort" => {
-            if let Some(v) = value {
-                one_of(v, CODEX_EFFORTS, "Codex reasoning effort")?;
-            }
-            "model_reasoning_effort"
-        }
-        "reviewer" => {
-            if let Some(v) = value {
-                one_of(v, CODEX_REVIEWERS, "Codex approvals reviewer")?;
-            }
-            "approvals_reviewer"
-        }
-        _ => return Err(format!("Unknown Codex setting {key:?}")),
-    };
+fn set_codex(path: &Path, toml_key: &str, value: Option<Value>) -> Result<bool, String> {
+    let value = value.as_ref().and_then(Value::as_str);
     edit_text(path, |raw| {
         let mut doc = parse_toml(path, raw)?;
         let current = doc.get(toml_key).and_then(|i| i.as_str()).map(str::to_string);
@@ -523,35 +594,6 @@ fn set_codex(path: &Path, key: &str, value: Option<&str>) -> Result<bool, String
         }
         Ok(Some(doc.to_string()))
     })
-}
-
-fn set_agy(path: &Path, key: &str, value: Option<&str>) -> Result<bool, String> {
-    let (json_key, v) = match key {
-        "agent_mode" => {
-            if let Some(v) = value {
-                one_of(v, AGY_MODES, "Antigravity agent mode")?;
-            }
-            ("agentMode", value.map(|v| json!(v)))
-        }
-        "show_thinking" => {
-            let b = value
-                .map(|v| match v {
-                    "true" => Ok(true),
-                    "false" => Ok(false),
-                    _ => Err(format!("{v:?} is not on or off")),
-                })
-                .transpose()?;
-            ("showThinking", b.map(|b| json!(b)))
-        }
-        "queued_messages" => {
-            if let Some(v) = value {
-                one_of(v, AGY_QUEUED, "Antigravity queued-messages choice")?;
-            }
-            ("queuedMessages", value.map(|v| json!(v)))
-        }
-        _ => return Err(format!("Unknown Antigravity setting {key:?}")),
-    };
-    edit_json(path, |s| Ok(put(s, json_key, v.clone())))
 }
 
 // ─── The one default maiTerm applies itself ───────────────────────────────
@@ -610,6 +652,366 @@ pub fn seed_retention(p: &Paths) {
         }
         Err(e) => log::warn!("Agent Defaults: retention default not applied: {e}"),
     }
+}
+
+// ─── Which settings maiTerm manages (and carries to SSH hosts) ──────────
+
+/// The human's choice of which settings maiTerm sets, here and on every bridged SSH host
+/// (Darryl, 2026-11-22). A setting not in `keys` is never changed by maiTerm, here or there;
+/// one in it is set to the RECORDED value everywhere, its removal ("the agent's default")
+/// included. `enabled` off changes nothing anywhere and keeps the ticks.
+///
+/// Hosts get the recorded value, never whatever this machine's file holds at connect time:
+/// anything that dropped a key here (a hand edit, another writer's bug) would otherwise become a
+/// removal on every host, and a removed `cleanupPeriodDays` lets Claude sweep a host's
+/// transcripts at its 30-day default. Kept in `~/.maiterm/` beside the seeded marker: like the
+/// files it describes, it is shared by every maiTerm build.
+#[derive(Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct Managed {
+    #[serde(default = "on")]
+    pub enabled: bool,
+    /// `claude.advisor`, `codex.effort`… → the value (JSON null: the agent's default).
+    #[serde(default)]
+    pub keys: std::collections::BTreeMap<String, Value>,
+}
+
+fn on() -> bool {
+    true
+}
+
+impl Default for Managed {
+    fn default() -> Self {
+        Self { enabled: true, keys: Default::default() }
+    }
+}
+
+fn managed_id(runtime: Runtime, key: &str) -> String {
+    format!("{}.{key}", runtime.id())
+}
+
+fn parse_managed(path: &Path, raw: Option<&str>) -> Result<Managed, String> {
+    match raw.filter(|r| !r.trim().is_empty()) {
+        None => Ok(Managed::default()),
+        Some(r) => serde_json::from_str(r).map_err(|e| format!("{} could not be parsed ({e})", path.display())),
+    }
+}
+
+pub fn load_managed(path: &Path) -> Result<Managed, String> {
+    match fs::read_to_string(path) {
+        Ok(r) => parse_managed(path, Some(&r)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Managed::default()),
+        Err(e) => Err(format!("Cannot read {}: {e}", path.display())),
+    }
+}
+
+fn edit_managed(path: &Path, f: impl Fn(&mut Managed)) -> Result<(), String> {
+    edit_text(path, |raw| {
+        let mut m = parse_managed(path, raw)?;
+        let before = m.clone();
+        f(&mut m);
+        if m == before {
+            return Ok(None);
+        }
+        serde_json::to_string_pretty(&m).map(|s| Some(s + "\n")).map_err(|e| e.to_string())
+    })
+    .map(|_| ())
+}
+
+/// What this machine's file holds for a setting, as the value a host would be given.
+fn local_value(p: &Paths, runtime: Runtime, key: &str) -> Result<Option<Value>, String> {
+    match runtime {
+        Runtime::Claude => {
+            let s = read_json(&p.claude)?;
+            let mut at = Some(&s);
+            for k in claude_path(key)? {
+                at = at.and_then(|v| v.get(k));
+            }
+            // An empty advisor is no advisor (as `claude_status` reads it).
+            Ok(at.filter(|v| !v.is_null() && !(key == "advisor" && v.as_str() == Some(""))).cloned())
+        }
+        Runtime::Codex => {
+            let raw = match fs::read_to_string(&p.codex) {
+                Ok(r) => Some(r),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(format!("Cannot read {}: {e}", p.codex.display())),
+            };
+            let doc = parse_toml(&p.codex, raw.as_deref())?;
+            match doc.get(codex_key(key)?).and_then(|i| i.as_value()) {
+                None => Ok(None),
+                Some(v) => v.as_str().map(|s| Some(json!(s))).ok_or_else(|| format!("{} in {} is not a string", codex_key(key).unwrap_or(key), p.codex.display())),
+            }
+        }
+        Runtime::Agy => Ok(read_json(&p.agy)?.get(agy_key(key)?).filter(|v| !v.is_null()).cloned()),
+    }
+}
+
+/// Whether a value found on this machine can be given to hosts as it is. Looser than `typed`,
+/// which is what maiTerm OFFERS: a model id typed by hand works here and works there. Refused
+/// only where a host would break or misread it: the wrong JSON type, a Codex reviewer Codex
+/// refuses to start on, days out of range.
+fn carriable(runtime: Runtime, key: &str, v: &Value) -> bool {
+    match (runtime, key) {
+        (Runtime::Claude, "retention") => v.as_u64().is_some_and(|d| (1..=RETENTION_MAX_DAYS).contains(&d)),
+        (Runtime::Agy, "show_thinking") => v.is_boolean(),
+        (Runtime::Codex, "reviewer") => v.as_str().is_some_and(|s| CODEX_REVIEWERS.contains(&s)),
+        (Runtime::Codex, "model") => v.as_str().is_some_and(valid_codex_model),
+        _ => v.is_string(),
+    }
+}
+
+/// Tick (`on`) or untick a setting. Ticking records what this machine's file holds now, so
+/// nothing changes here and hosts are given this machine's value; it writes no agent file.
+pub fn manage(p: &Paths, runtime: Runtime, key: &str, on: bool) -> Result<(), String> {
+    // A known setting (an effort row only for the models offered; others are read-only).
+    typed(runtime, key, None)?;
+    let id = managed_id(runtime, key);
+    if !on {
+        return edit_managed(&p.managed, |m| {
+            m.keys.remove(&id);
+        });
+    }
+    let v = local_value(p, runtime, key)?;
+    if let Some(v) = &v {
+        if !carriable(runtime, key, v) {
+            return Err(format!(
+                "This machine has {v} for it, which maiTerm can't give other hosts as it is. Change it in {} first.",
+                runtime.name()
+            ));
+        }
+    }
+    let v = v.unwrap_or(Value::Null);
+    edit_managed(&p.managed, |m| {
+        m.keys.insert(id.clone(), v.clone());
+    })
+}
+
+/// Switch the whole section on or off. Off: maiTerm changes no agent setting anywhere; the
+/// ticks are kept for when it's on again.
+pub fn set_enabled(p: &Paths, on: bool) -> Result<(), String> {
+    edit_managed(&p.managed, |m| m.enabled = on)
+}
+
+/// The human picked a value: written here, and recorded as what hosts are given. Refused for a
+/// setting maiTerm doesn't manage, and while the section is off.
+pub fn set_managed(p: &Paths, runtime: Runtime, key: &str, value: Option<&str>) -> Result<(), String> {
+    let m = load_managed(&p.managed)?;
+    if !m.enabled {
+        return Err("Agent Defaults is off, so maiTerm changes no agent settings. Switch it on first.".into());
+    }
+    let id = managed_id(runtime, key);
+    if !m.keys.contains_key(&id) {
+        return Err("maiTerm doesn't manage this setting. Tick it first.".into());
+    }
+    let v = typed(runtime, key, value)?;
+    set(p, runtime, key, value)?;
+    edit_managed(&p.managed, |m| {
+        if m.keys.contains_key(&id) {
+            m.keys.insert(id.clone(), v.clone().unwrap_or(Value::Null));
+        }
+    })
+}
+
+// ─── SSH hosts ────────────────────────────────────────────────────────────
+
+/// Merges managed settings into a remote JSON settings file (`sys.argv[1]`: `claude` or `agy`).
+/// The payload on stdin holds `[path, value]` pairs per file; null removes the key, and an
+/// object that removal empties goes too. Does nothing where the agent's folder doesn't exist,
+/// to a link whose file is gone, or to a file it can't parse; writes only when something
+/// changed, through a temp file beside the link's target. No single quotes (the shell wraps it
+/// in them), pure ASCII.
+const PY_REMOTE_JSON: &str = r#"import json,os,sys
+which=sys.argv[1]
+d=json.load(sys.stdin)
+ops=d.get(which) or []
+paths={"claude":"~/.claude/settings.json","agy":"~/.gemini/antigravity-cli/settings.json"}
+p=os.path.expanduser(paths[which])
+if not ops or not os.path.isdir(os.path.dirname(p)):
+    sys.exit(0)
+if os.path.islink(p) and not os.path.exists(p):
+    sys.exit(0)
+s={}
+if os.path.exists(p):
+    try:
+        raw=open(p).read()
+        s=json.loads(raw) if raw.strip() else {}
+    except Exception:
+        sys.stderr.write("maiterm: Agent Defaults left "+p+" alone: it does not parse\n")
+        sys.exit(0)
+if not isinstance(s,dict):
+    sys.exit(0)
+before=json.dumps(s,sort_keys=True)
+for path,v in ops:
+    if v is None:
+        chain=[s]
+        for k in path[:-1]:
+            n=chain[-1].get(k)
+            if not isinstance(n,dict):
+                chain=None
+                break
+            chain.append(n)
+        if chain is None or path[-1] not in chain[-1]:
+            continue
+        chain[-1].pop(path[-1])
+        for i in range(len(chain)-1,0,-1):
+            if chain[i]:
+                break
+            chain[i-1].pop(path[i-1])
+    else:
+        cur=s
+        for k in path[:-1]:
+            if k not in cur:
+                cur[k]={}
+            cur=cur[k]
+            if not isinstance(cur,dict):
+                cur=None
+                break
+        if cur is not None:
+            cur[path[-1]]=v
+if json.dumps(s,sort_keys=True)!=before:
+    t=os.path.realpath(p)
+    tmp=t+".maiterm-tmp-"+str(os.getpid())
+    open(tmp,"w").write(json.dumps(s,indent=2)+"\n")
+    os.replace(tmp,t)"#;
+
+/// Merges managed settings into a remote `~/.codex/config.toml` (top-level string keys only),
+/// textually, as `CODEX_TOML_MERGE_PY` does: python3 has no TOML writer. A changed value keeps
+/// its line and trailing comment; a new key goes on the first line, which is always top level;
+/// a removed one loses its line. With tomllib (Python 3.11+), a file it can't parse is left
+/// alone, and so is a result that doesn't read back with exactly the values meant.
+const PY_REMOTE_TOML: &str = r#"import json,os,re,sys
+d=json.load(sys.stdin)
+ops=d.get("codex") or []
+p=os.path.expanduser("~/.codex/config.toml")
+if not ops or not os.path.isdir(os.path.dirname(p)):
+    sys.exit(0)
+if os.path.islink(p) and not os.path.exists(p):
+    sys.exit(0)
+try:
+    src=open(p).read() if os.path.exists(p) else ""
+except Exception:
+    sys.exit(0)
+try:
+    import tomllib
+except ImportError:
+    tomllib=None
+if tomllib:
+    try:
+        tomllib.loads(src)
+    except Exception:
+        sys.stderr.write("maiterm: Agent Defaults left "+p+" alone: it does not parse\n")
+        sys.exit(0)
+lines=src.split("\n")
+hdr=re.compile(r"^\s*\[\[?\s*[A-Za-z0-9_\"-][A-Za-z0-9_.\" -]*\]\]?\s*(#.*)?$")
+end=len(lines)
+for i,l in enumerate(lines):
+    if hdr.match(l):
+        end=i
+        break
+for k,v in ops:
+    key=re.compile(r"^\s*(" + re.escape(k) + r"|\"" + re.escape(k) + r"\")\s*=")
+    idx=[i for i in range(end) if key.match(lines[i])]
+    if v is None:
+        for i in reversed(idx):
+            del lines[i]
+            end-=1
+        continue
+    if not idx:
+        lines.insert(0,k+" = "+json.dumps(v))
+        end+=1
+        continue
+    m=re.match(r"^(\s*\S+\s*=\s*)(\"(?:[^\"\\]|\\.)*\")(.*)$",lines[idx[0]])
+    if m:
+        try:
+            same=json.loads(m.group(2))==v
+        except Exception:
+            same=False
+        if not same:
+            lines[idx[0]]=m.group(1)+json.dumps(v)+m.group(3)
+    else:
+        lines[idx[0]]=k+" = "+json.dumps(v)
+res="\n".join(lines)
+if res==src:
+    sys.exit(0)
+if tomllib:
+    try:
+        back=tomllib.loads(res)
+    except Exception:
+        sys.exit(0)
+    for k,v in ops:
+        if back.get(k)!=v:
+            sys.exit(0)
+t=os.path.realpath(p)
+tmp=t+".maiterm-tmp-"+str(os.getpid())
+open(tmp,"w").write(res)
+os.replace(tmp,t)"#;
+
+/// The script that gives a bridged SSH host every managed setting: set where a value is
+/// recorded, removed where "the agent's default" is. Empty when the section is off, nothing is
+/// managed, or the record can't be read. Runs after the bridge's own setup, never beside it:
+/// that rewrites the same files.
+pub fn remote_script(p: &Paths) -> String {
+    let m = match load_managed(&p.managed) {
+        Ok(m) => m,
+        Err(e) => {
+            log::warn!("Agent Defaults: nothing carried to SSH hosts: {e}");
+            return String::new();
+        }
+    };
+    if !m.enabled || m.keys.is_empty() {
+        return String::new();
+    }
+    let (mut claude, mut codex, mut agy) = (Vec::new(), Vec::new(), Vec::new());
+    for (id, v) in &m.keys {
+        let Some((rt, key)) = id.split_once('.') else { continue };
+        match rt {
+            "claude" => {
+                let Ok(path) = claude_path(key) else { continue };
+                if key == "advisor" {
+                    let switch = if v.is_null() { Value::Null } else { json!("1") };
+                    claude.push(json!([["env", ADVISOR_TOOL_ENV], switch]));
+                }
+                claude.push(json!([path, v]));
+            }
+            "codex" => {
+                if let Ok(k) = codex_key(key) {
+                    codex.push(json!([k, v]));
+                }
+            }
+            "agy" => {
+                if let Ok(k) = agy_key(key) {
+                    agy.push(json!([[k], v]));
+                }
+            }
+            _ => {}
+        }
+    }
+    let payload = json!({ "claude": claude, "codex": codex, "agy": agy });
+    // ASCII-only JSON: the remote python3 decodes it under whatever locale ssh gives it.
+    let ascii: String = payload
+        .to_string()
+        .chars()
+        .map(|c| {
+            if c.is_ascii() {
+                c.to_string()
+            } else {
+                c.encode_utf16(&mut [0; 2]).iter().map(|u| format!("\\u{u:04x}")).collect()
+            }
+        })
+        .collect();
+    let escaped = ascii.replace('\'', r"'\''");
+    let mut lines = vec![format!("__agd='{escaped}'"), "if command -v python3 >/dev/null 2>&1; then".to_string()];
+    for (which, ops) in [("claude", &claude), ("agy", &agy)] {
+        if !ops.is_empty() {
+            lines.push(format!("printf '%s' \"$__agd\" | python3 -c '{PY_REMOTE_JSON}' {which}"));
+        }
+    }
+    if !codex.is_empty() {
+        lines.push(format!("printf '%s' \"$__agd\" | python3 -c '{PY_REMOTE_TOML}'"));
+    }
+    lines.push("fi".into());
+    // `:`, not `exit`: this is also pasted into a user's interactive shell (deshittify.rs).
+    lines.push(":".into());
+    lines.join("\n")
 }
 
 #[cfg(test)]
@@ -809,4 +1211,148 @@ mod tests {
         seed_retention(&q);
         assert!(json_at(&q.claude).get("cleanupPeriodDays").is_none());
     }
+
+    // ─── Managed settings and SSH hosts ───
+
+    #[test]
+    fn ticking_records_this_machines_value_and_writes_no_agent_file() {
+        let (_h, p) = scratch();
+        let before = r#"{"cleanupPeriodDays":548,"model":"claude-opus-5-5[1m]"}"#;
+        write(&p.claude, before);
+        assert!(set_managed(&p, Runtime::Claude, "model", Some("opus")).is_err(), "not ticked: refused");
+        manage(&p, Runtime::Claude, "retention", true).unwrap();
+        manage(&p, Runtime::Claude, "model", true).unwrap();
+        manage(&p, Runtime::Claude, "advisor", true).unwrap();
+        assert_eq!(fs::read_to_string(&p.claude).unwrap(), before, "ticking changes nothing here");
+        let m = load_managed(&p.managed).unwrap();
+        assert_eq!(m.keys["claude.retention"], json!(548));
+        assert_eq!(m.keys["claude.model"], json!("claude-opus-5-5[1m]"), "a hand-typed id is carried as it is");
+        assert_eq!(m.keys["claude.advisor"], Value::Null, "absent: the agent's default");
+
+        set_managed(&p, Runtime::Claude, "model", Some("fable")).unwrap();
+        assert_eq!(json_at(&p.claude)["model"], "fable");
+        assert_eq!(load_managed(&p.managed).unwrap().keys["claude.model"], json!("fable"));
+        set_managed(&p, Runtime::Claude, "retention", None).unwrap();
+        assert_eq!(load_managed(&p.managed).unwrap().keys["claude.retention"], Value::Null);
+
+        set_enabled(&p, false).unwrap();
+        assert!(set_managed(&p, Runtime::Claude, "model", Some("opus")).is_err(), "off: refused");
+        assert_eq!(remote_script(&p), "", "off: nothing reaches hosts");
+        let st = status(&p);
+        assert!(!st.enabled && st.managed.len() == 3, "the ticks are kept");
+        set_enabled(&p, true).unwrap();
+        manage(&p, Runtime::Claude, "model", false).unwrap();
+        assert!(!load_managed(&p.managed).unwrap().keys.contains_key("claude.model"));
+        assert_eq!(json_at(&p.claude)["model"], "fable", "unticking changes nothing here");
+    }
+
+    #[test]
+    fn a_value_hosts_would_break_on_is_not_ticked() {
+        let (_h, p) = scratch();
+        write(&p.codex, "approvals_reviewer = \"bogus\"\n");
+        write(&p.claude, r#"{"cleanupPeriodDays":"long"}"#);
+        assert!(manage(&p, Runtime::Codex, "reviewer", true).is_err());
+        assert!(manage(&p, Runtime::Claude, "retention", true).is_err());
+        assert!(manage(&p, Runtime::Claude, "effort:claude-opus-4", true).is_err(), "only the models offered");
+        assert!(load_managed(&p.managed).unwrap().keys.is_empty());
+        assert_eq!(remote_script(&p), "", "nothing managed: no script");
+    }
+
+    /// Run the remote script with `home` as HOME. None when this machine has no python3.
+    fn run_remote(p: &Paths, home: &Path) -> Option<()> {
+        std::process::Command::new("python3").arg("-c").arg("pass").output().ok()?.status.success().then_some(())?;
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(remote_script(p))
+            .env("HOME", home)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        Some(())
+    }
+
+    #[test]
+    fn hosts_get_the_recorded_values_and_nothing_else() {
+        let (_h, p) = scratch();
+        let (remote, r) = scratch();
+        // Recorded here: advisor and Opus effort back to the agent's default, 500 days kept,
+        // Codex and Antigravity values. The model is not managed.
+        fs::create_dir_all(p.managed.parent().unwrap()).unwrap();
+        fs::write(
+            &p.managed,
+            json!({"enabled": true, "keys": {
+                "claude.advisor": null, "claude.effort:claude-opus-5-5": null, "claude.retention": 500,
+                "codex.model": "gpt-7", "codex.reviewer": null, "codex.effort": "high",
+                "agy.agent_mode": "", "agy.show_thinking": true,
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        write(
+            &r.claude,
+            &json!({"advisorModel": "opus", "model": "sonnet", "x": 1,
+                "env": {"DISABLE_TELEMETRY": "1", ADVISOR_TOOL_ENV: "1"},
+                "modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}}})
+            .to_string(),
+        );
+        let toml = "# mine\nmodel = \"gpt-6\"  # pinned\napprovals_reviewer = \"user\"\n\n[profiles.x]\nmodel = \"o\"\n";
+        write(&r.codex, toml);
+        write(&r.agy, r#"{"agentMode":"plan","permissions":{"allow":["mcp(maiterm/*)"]}}"#);
+        if run_remote(&p, &remote).is_none() {
+            return;
+        }
+        let c = json_at(&r.claude);
+        assert!(c.get("advisorModel").is_none());
+        assert_eq!(c["env"], json!({"DISABLE_TELEMETRY": "1"}), "only the advisor's switch goes");
+        assert!(c.get("modelSettings").is_none(), "an emptied entry goes, and the emptied table");
+        assert_eq!(c["cleanupPeriodDays"], 500);
+        assert_eq!((c["model"].as_str(), c["x"].as_i64()), (Some("sonnet"), Some(1)), "unmanaged: kept");
+
+        let t = fs::read_to_string(&r.codex).unwrap();
+        assert!(t.contains("model = \"gpt-7\"  # pinned\n"), "{t}");
+        assert!(!t.contains("approvals_reviewer"), "{t}");
+        assert!(t.starts_with("model_reasoning_effort = \"high\"\n# mine\n"), "{t}");
+        assert!(t.ends_with("[profiles.x]\nmodel = \"o\"\n"), "a table's own key is not ours: {t}");
+
+        let g = json_at(&r.agy);
+        assert_eq!((g["agentMode"].as_str(), g["showThinking"].as_bool()), (Some(""), Some(true)), "\"\" is a value");
+        assert_eq!(g["permissions"]["allow"][0], "mcp(maiterm/*)");
+
+        // A second connect changes nothing: the files are not even rewritten.
+        let compact = fs::read_to_string(&r.agy).unwrap().replace(['\n', ' '], "");
+        write(&r.agy, &compact);
+        let codex_before = fs::read_to_string(&r.codex).unwrap();
+        run_remote(&p, &remote);
+        assert_eq!(fs::read_to_string(&r.agy).unwrap(), compact);
+        assert_eq!(fs::read_to_string(&r.codex).unwrap(), codex_before);
+    }
+
+    #[test]
+    fn a_host_file_that_does_not_parse_or_an_absent_agent_is_left_alone() {
+        let (_h, p) = scratch();
+        let (remote, r) = scratch();
+        fs::create_dir_all(p.managed.parent().unwrap()).unwrap();
+        fs::write(&p.managed, json!({"keys": {"claude.model": "opus", "codex.effort": "low", "agy.agent_mode": "plan"}}).to_string()).unwrap();
+        write(&r.claude, "{ not json");
+        write(&r.codex, "model = [unclosed\n");
+        if run_remote(&p, &remote).is_none() {
+            return;
+        }
+        assert_eq!(fs::read_to_string(&r.claude).unwrap(), "{ not json");
+        assert!(!r.agy.parent().unwrap().exists(), "no Antigravity there: nothing created");
+        // Without tomllib (Python < 3.11) the text edit goes ahead; with it, the file is kept.
+        let probe = std::process::Command::new("python3").args(["-c", "import tomllib"]).output().unwrap();
+        if probe.status.success() {
+            assert_eq!(fs::read_to_string(&r.codex).unwrap(), "model = [unclosed\n");
+        }
+    }
+
+    #[test]
+    fn the_remote_snippets_survive_the_shell() {
+        for (name, src) in [("PY_REMOTE_JSON", PY_REMOTE_JSON), ("PY_REMOTE_TOML", PY_REMOTE_TOML)] {
+            assert!(!src.contains('\''), "{name} contains a single quote");
+            assert!(src.is_ascii(), "{name} is not ASCII");
+        }
+    }
+
 }

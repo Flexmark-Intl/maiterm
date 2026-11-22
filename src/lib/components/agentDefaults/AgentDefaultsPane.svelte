@@ -6,6 +6,10 @@
    *  one change at a time. "Agent's default" means the key is absent. Every answer is the
    *  file's state after the write, so the pane never shows what it only hoped happened.
    *
+   *  maiTerm changes only the settings the human ticked (§2.1): a ticked one is set here and on
+   *  every bridged SSH host to the RECORDED value, removals included; an unticked one is never
+   *  changed anywhere, so its control is read-only. The section switch turns all of it off.
+   *
    *  Text values (days, a Codex model) are committed on Enter or leaving the field, never per
    *  keystroke: typing "500" must not save "5" on the way, and a 5-day retention sweeps the
    *  transcripts on the next Claude start. */
@@ -96,6 +100,64 @@
     }
   }
 
+  function managedId(runtime: AgentDefaultsRuntime, key: string): string {
+    return `${runtime}.${key}`;
+  }
+
+  function isManaged(runtime: AgentDefaultsRuntime, key: string): boolean {
+    return !!status && managedId(runtime, key) in status.managed;
+  }
+
+  /** The control can't change anything: unticked, the section off, the file unreadable, or a
+   *  write in flight. */
+  function locked(runtime: AgentDefaultsRuntime, key: string, error: string | null): boolean {
+    return !status?.enabled || !isManaged(runtime, key) || !!error || busy !== null;
+  }
+
+  /** The value hosts are given, when this machine's file no longer holds it (changed with the
+   *  agent's own /config, say). Hosts keep getting the recorded one: `{ recorded }`, null for
+   *  no difference. */
+  function drift(runtime: AgentDefaultsRuntime, key: string, local: string | null): { recorded: string | null } | null {
+    if (!status || !isManaged(runtime, key)) return null;
+    const recorded = status.managed[managedId(runtime, key)] ?? null;
+    return recorded === local ? null : { recorded };
+  }
+
+  /** Tick or untick; also "give hosts this machine's value" (ticking again re-records it). */
+  async function manage(runtime: AgentDefaultsRuntime, key: string, on: boolean, el: HTMLInputElement | null) {
+    if (busy) {
+      if (el) el.checked = !on;
+      return;
+    }
+    busy = `${runtime}:${key}`;
+    feedback = null;
+    try {
+      status = await commands.agentDefaultsManage(runtime, key, on);
+    } catch (e) {
+      if (el) el.checked = !on;
+      feedback = { runtime, text: String(e) };
+    } finally {
+      busy = null;
+    }
+  }
+
+  async function enable(on: boolean, el: HTMLInputElement) {
+    if (busy) {
+      el.checked = !on;
+      return;
+    }
+    busy = 'enable';
+    feedback = null;
+    try {
+      status = await commands.agentDefaultsEnable(on);
+    } catch (e) {
+      el.checked = !on;
+      feedback = { runtime: null, text: String(e) };
+    } finally {
+      busy = null;
+    }
+  }
+
   /** The options, plus the on-disk value when it isn't one of them: a value set by hand or
    *  by a newer CLI is shown as it is, never as a blank that could be saved over. */
   function withCurrent(options: Option[], current: string | null): Option[] {
@@ -147,6 +209,28 @@
   </select>
 {/snippet}
 
+{#snippet tick(runtime: AgentDefaultsRuntime, key: string, label: string, error: string | null)}
+  <input
+    class="tick"
+    type="checkbox"
+    aria-label={`maiTerm sets ${label} here and on SSH hosts`}
+    checked={isManaged(runtime, key)}
+    disabled={!status?.enabled || !!error || busy !== null}
+    onchange={(e) => manage(runtime, key, e.currentTarget.checked, e.currentTarget)}
+  />
+{/snippet}
+
+{#snippet drifted(runtime: AgentDefaultsRuntime, key: string, local: string | null, error: string | null)}
+  {@const d = drift(runtime, key, local)}
+  {#if d && !error}
+    <p class="warn">
+      This machine's file now has {local ?? "the agent's default"}, changed outside maiTerm. SSH
+      hosts are still given {d.recorded ?? "the agent's default"}. Pick a value to set both, or
+      <button class="link" disabled={busy !== null} onclick={() => manage(runtime, key, true, null)}>give hosts this machine's</button>.
+    </p>
+  {/if}
+{/snippet}
+
 {#snippet header(runtime: AgentDefaultsRuntime, name: string, file: string, installed: boolean)}
   <button
     class="part-head"
@@ -179,6 +263,28 @@
     <code>/model</code>, <code>/effort</code> or launch flag still wins for that session. Changes
     apply to new sessions.
   </p>
+  <p class="hint">
+    Tick the settings maiTerm should set. A ticked setting is set here and on every SSH host a
+    tab bridges to, each time it connects, so every machine follows the same value; "Agent's
+    default" removes it everywhere. maiTerm never changes an unticked setting, here or on a host.
+  </p>
+  {#if status}
+    <label class="switch">
+      <input
+        type="checkbox"
+        checked={status.enabled}
+        disabled={busy !== null || !!status.managed_error}
+        onchange={(e) => enable(e.currentTarget.checked, e.currentTarget)}
+      />
+      <span>maiTerm sets the ticked settings</span>
+    </label>
+    {#if !status.enabled}
+      <p class="hint">Off: maiTerm changes no agent setting, here or on a host. Your ticks are kept.</p>
+    {/if}
+    {#if status.managed_error}
+      <p class="error">{status.managed_error}. maiTerm changes nothing until it reads.</p>
+    {/if}
+  {/if}
 
   {#if feedback && feedback.runtime === null}
     <p class="error">{feedback.text}</p>
@@ -195,6 +301,7 @@
           {@render message('claude', c.error)}
 
           <div class="row">
+            {@render tick('claude', 'advisor', 'the Claude advisor', c.error)}
             <div class="text">
               <span class="label">Advisor</span>
               <p class="hint">
@@ -210,15 +317,18 @@
                   a switch that isn't set. Choose the advisor again here to set it.
                 </p>
               {/if}
+              {@render drifted('claude', 'advisor', c.advisor, c.error)}
             </div>
-            {@render choice('claude', 'advisor', c.advisor, CLAUDE_ADVISORS, !!c.error, 'Claude advisor')}
+            {@render choice('claude', 'advisor', c.advisor, CLAUDE_ADVISORS, locked('claude', 'advisor', c.error), 'Claude advisor')}
           </div>
 
           <div class="row">
+            {@render tick('claude', 'model', "Claude's default model", c.error)}
             <div class="text">
               <span class="label">Default model</span>
+              {@render drifted('claude', 'model', c.model, c.error)}
             </div>
-            {@render choice('claude', 'model', c.model, CLAUDE_MODELS, !!c.error, 'Claude default model')}
+            {@render choice('claude', 'model', c.model, CLAUDE_MODELS, locked('claude', 'model', c.error), 'Claude default model')}
           </div>
 
           <div class="row column">
@@ -229,25 +339,36 @@
             <div class="effort">
               {#each c.effort as row (row.model_id)}
                 <div class="effort-row">
+                  {#if row.label}
+                    {@render tick('claude', `effort:${row.model_id}`, `${row.label} effort`, c.error)}
+                  {:else}
+                    <span class="tick-space"></span>
+                  {/if}
                   <span class="effort-model">{row.label ?? row.model_id}</span>
                   {#if row.label}
-                    {@render choice('claude', `effort:${row.model_id}`, row.level, CLAUDE_EFFORTS, !!c.error, `${row.label} effort`)}
+                    {@render choice('claude', `effort:${row.model_id}`, row.level, CLAUDE_EFFORTS, locked('claude', `effort:${row.model_id}`, c.error), `${row.label} effort`)}
                   {:else}
                     <span class="readonly">{row.level}</span>
                   {/if}
                 </div>
+                {#if row.label}
+                  {@render drifted('claude', `effort:${row.model_id}`, row.level, c.error)}
+                {/if}
               {/each}
             </div>
           </div>
 
           <div class="row">
+            {@render tick('claude', 'retention', 'how long Claude keeps transcripts', c.error)}
             <div class="text">
               <span class="label">Keep transcripts (days)</span>
               <p class="hint">
                 Claude deletes chats older than this when a session starts: 30 days unless set.
-                Resume, maiLink and the Loom read them. maiTerm sets 500 once where nothing is
-                set. Empty for Claude's default.
+                Resume, maiLink and the Loom read them. maiTerm sets 500 once on this machine
+                where nothing is set. Empty for Claude's default. Ticked and empty, every host
+                falls back to 30 days and deletes its older chats.
               </p>
+              {@render drifted('claude', 'retention', c.retention_days, c.error)}
             </div>
             <input
               class="days"
@@ -256,7 +377,7 @@
               aria-label="Days Claude keeps transcripts"
               placeholder="30"
               value={c.retention_days ?? ''}
-              disabled={!!c.error || busy !== null}
+              disabled={locked('claude', 'retention', c.error)}
               onkeydown={(e) => textKeys(e, c.retention_days)}
               onblur={(e) => commitText('claude', 'retention', c.retention_days, e.currentTarget)}
             />
@@ -272,9 +393,11 @@
         <div class="rows">
           {@render message('codex', x.error)}
           <div class="row">
+            {@render tick('codex', 'model', "Codex's default model", x.error)}
             <div class="text">
               <span class="label">Default model</span>
               <p class="hint">A Codex model name, as <code>codex --model</code> takes it. Empty for Codex's default.</p>
+              {@render drifted('codex', 'model', x.model, x.error)}
             </div>
             <input
               class="model"
@@ -283,21 +406,27 @@
               aria-label="Codex default model"
               placeholder="Codex's default"
               value={x.model ?? ''}
-              disabled={!!x.error || busy !== null}
+              disabled={locked('codex', 'model', x.error)}
               onkeydown={(e) => textKeys(e, x.model)}
               onblur={(e) => commitText('codex', 'model', x.model, e.currentTarget)}
             />
           </div>
           <div class="row">
-            <div class="text"><span class="label">Reasoning effort</span></div>
-            {@render choice('codex', 'effort', x.effort, CODEX_EFFORTS, !!x.error, 'Codex reasoning effort')}
+            {@render tick('codex', 'effort', "Codex's reasoning effort", x.error)}
+            <div class="text">
+              <span class="label">Reasoning effort</span>
+              {@render drifted('codex', 'effort', x.effort, x.error)}
+            </div>
+            {@render choice('codex', 'effort', x.effort, CODEX_EFFORTS, locked('codex', 'effort', x.error), 'Codex reasoning effort')}
           </div>
           <div class="row">
+            {@render tick('codex', 'reviewer', "Codex's approvals reviewer", x.error)}
             <div class="text">
               <span class="label">Approvals reviewer</span>
               <p class="hint">Who answers Codex's approval requests.</p>
+              {@render drifted('codex', 'reviewer', x.reviewer, x.error)}
             </div>
-            {@render choice('codex', 'reviewer', x.reviewer, CODEX_REVIEWERS, !!x.error, 'Codex approvals reviewer')}
+            {@render choice('codex', 'reviewer', x.reviewer, CODEX_REVIEWERS, locked('codex', 'reviewer', x.error), 'Codex approvals reviewer')}
           </div>
         </div>
       {/if}
@@ -310,21 +439,29 @@
         <div class="rows">
           {@render message('agy', g.error)}
           <div class="row">
+            {@render tick('agy', 'agent_mode', "Antigravity's agent mode", g.error)}
             <div class="text">
               <span class="label">Agent mode</span>
               <p class="hint">"Default" is Antigravity's own Default mode, saved as a choice.</p>
+              {@render drifted('agy', 'agent_mode', g.agent_mode, g.error)}
             </div>
-            {@render choice('agy', 'agent_mode', g.agent_mode, AGY_MODES, !!g.error, 'Antigravity agent mode')}
+            {@render choice('agy', 'agent_mode', g.agent_mode, AGY_MODES, locked('agy', 'agent_mode', g.error), 'Antigravity agent mode')}
           </div>
           <div class="row">
-            <div class="text"><span class="label">Thinking</span></div>
-            {@render choice('agy', 'show_thinking', g.show_thinking, AGY_THINKING, !!g.error, 'Antigravity thinking display')}
+            {@render tick('agy', 'show_thinking', "Antigravity's thinking display", g.error)}
+            <div class="text">
+              <span class="label">Thinking</span>
+              {@render drifted('agy', 'show_thinking', g.show_thinking, g.error)}
+            </div>
+            {@render choice('agy', 'show_thinking', g.show_thinking, AGY_THINKING, locked('agy', 'show_thinking', g.error), 'Antigravity thinking display')}
           </div>
           <div class="row">
+            {@render tick('agy', 'queued_messages', "Antigravity's queued messages", g.error)}
             <div class="text">
               <span class="label">Messages sent while it works</span>
+              {@render drifted('agy', 'queued_messages', g.queued_messages, g.error)}
             </div>
-            {@render choice('agy', 'queued_messages', g.queued_messages, AGY_QUEUED, !!g.error, 'Antigravity queued messages')}
+            {@render choice('agy', 'queued_messages', g.queued_messages, AGY_QUEUED, locked('agy', 'queued_messages', g.error), 'Antigravity queued messages')}
           </div>
           <p class="hint">Antigravity's model and effort aren't kept in its settings file, so they aren't offered here.</p>
         </div>
@@ -495,13 +632,60 @@
     align-items: center;
     display: flex;
     gap: 12px;
-    justify-content: space-between;
+  }
+
+  .effort-row .effort-model {
+    flex: 1;
   }
 
   .effort-model {
     color: var(--fg);
     font-size: 0.85rem;
     overflow-wrap: anywhere;
+  }
+
+  .tick {
+    accent-color: var(--accent);
+    cursor: pointer;
+    flex: none;
+    margin: 3px 0 0;
+  }
+
+  .tick:disabled {
+    cursor: default;
+  }
+
+  .tick-space {
+    flex: none;
+    width: 13px;
+  }
+
+  .switch {
+    align-items: center;
+    color: var(--fg);
+    cursor: pointer;
+    display: flex;
+    font-size: 0.9rem;
+    gap: 8px;
+  }
+
+  .switch input {
+    accent-color: var(--accent);
+  }
+
+  .link {
+    background: none;
+    border: none;
+    color: var(--accent);
+    cursor: pointer;
+    font: inherit;
+    padding: 0;
+    text-decoration: underline;
+  }
+
+  .link:disabled {
+    cursor: default;
+    opacity: 0.6;
   }
 
   .readonly {
