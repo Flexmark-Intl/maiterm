@@ -144,16 +144,29 @@ fn write_claude_settings(settings: &serde_json::Value) -> Result<(), String> {
     })
 }
 
-/// True when `env[key]` is set to `want` ("1" or "0"). Tolerates the number and
-/// the bool as well as the string — all appear in the wild, Claude Code accepts each.
-fn env_var_applied(settings: &serde_json::Value, key: &str, want: &str) -> bool {
-    let on = want == "1";
-    match settings.get("env").and_then(|e| e.get(key)) {
-        Some(serde_json::Value::String(s)) => s == want,
-        Some(serde_json::Value::Number(n)) => n.as_i64() == Some(on as i64),
-        Some(serde_json::Value::Bool(b)) => *b == on,
-        _ => false,
+/// `env[key]` read the way Claude Code reads a boolean env var: "1"/"true"/"yes"/"on"
+/// is on, "0"/"false"/"no"/"off" is off (any case), the number and the bool as
+/// such; absent or anything else is None — Claude Code falls back to its default.
+fn env_var_bool(settings: &serde_json::Value, key: &str) -> Option<bool> {
+    match settings.get("env").and_then(|e| e.get(key))? {
+        serde_json::Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        },
+        serde_json::Value::Number(n) => match n.as_i64() {
+            Some(1) => Some(true),
+            Some(0) => Some(false),
+            _ => None,
+        },
+        serde_json::Value::Bool(b) => Some(*b),
+        _ => None,
     }
+}
+
+/// True when `env[key]` already means `want` ("1" or "0") to Claude Code.
+fn env_var_applied(settings: &serde_json::Value, key: &str, want: &str) -> bool {
+    env_var_bool(settings, key) == Some(want == "1")
 }
 
 fn env_rule_applied(settings: &serde_json::Value, vars: &[(&str, &str)]) -> bool {
@@ -207,19 +220,13 @@ fn set_co_authored(enabled: bool) -> Result<(), String> {
     write_claude_settings(&settings)
 }
 
-/// Both keys, because they cover different ground: `disableRemoteControl` removes
-/// the feature outright (claude.ai/code, `claude remote-control`, `--rc`, the
-/// in-session command), `remoteControlAtStartup: false` overrides the auto-start
-/// an org or rollout default can switch on even where the feature stays allowed.
-/// The user's own explicit opt-in — Remote Control switched on by hand. The seed
-/// leaves such a file alone: a default is for people who never chose.
-/// True when the user has set one of an env rule's vars to something other than
-/// the rule's value (e.g. `CLAUDE_CODE_ARTIFACT_COMMENTS=1`): an explicit choice
-/// the first-launch seed must leave alone, as it does Remote Control's.
+/// True when the user has set one of an env rule's vars to the opposite of the
+/// rule's value (e.g. `CLAUDE_CODE_ARTIFACT_COMMENTS=1`): an explicit choice the
+/// first-launch seed must leave alone, as it does Remote Control's. A value Claude
+/// Code can't read as on or off means its default, so it is no choice.
 fn env_rule_chosen_otherwise(settings: &serde_json::Value, vars: &[(&str, &str)]) -> bool {
-    vars.iter().any(|(k, v)| {
-        settings.get("env").and_then(|e| e.get(*k)).is_some() && !env_var_applied(settings, k, v)
-    })
+    vars.iter()
+        .any(|(k, v)| env_var_bool(settings, k).is_some_and(|b| b != (*v == "1")))
 }
 
 /// A default-on rule the user already chose against before maiTerm seeded it.
@@ -233,6 +240,8 @@ fn chosen_otherwise(id: &str, settings: &serde_json::Value) -> bool {
         .is_some_and(|(_, vars)| env_rule_chosen_otherwise(settings, vars))
 }
 
+/// The user's own explicit opt-in — Remote Control switched on by hand. The seed
+/// leaves such a file alone: a default is for people who never chose.
 fn remote_control_chosen_on(settings: &serde_json::Value) -> bool {
     settings.get("disableRemoteControl") == Some(&serde_json::Value::Bool(false))
         || settings.get("remoteControlAtStartup") == Some(&serde_json::Value::Bool(true))
@@ -243,6 +252,10 @@ fn remote_control_applied(settings: &serde_json::Value) -> bool {
         && settings.get("remoteControlAtStartup") == Some(&serde_json::Value::Bool(false))
 }
 
+/// Both keys, because they cover different ground: `disableRemoteControl` removes
+/// the feature outright (claude.ai/code, `claude remote-control`, `--rc`, the
+/// in-session command), `remoteControlAtStartup: false` overrides the auto-start
+/// an org or rollout default can switch on even where the feature stays allowed.
 fn set_remote_control(enabled: bool) -> Result<(), String> {
     let mut settings = read_claude_settings()?;
     let obj = settings
@@ -1984,6 +1997,15 @@ mod tests {
         ));
         assert!(!chosen_otherwise(RULE_ARTIFACT_COMMENTS, &env(serde_json::json!({"CLAUDE_CODE_ARTIFACT_COMMENTS": "0"}))));
         assert!(!chosen_otherwise(RULE_ARTIFACT_COMMENTS, &serde_json::json!({})));
+        // Claude Code's other spellings of off are off, not a choice; garbage is its default.
+        assert!(!chosen_otherwise(RULE_ARTIFACT_COMMENTS, &env(serde_json::json!({"CLAUDE_CODE_ARTIFACT_COMMENTS": "False"}))));
+        assert!(!chosen_otherwise(RULE_ARTIFACT_COMMENTS, &env(serde_json::json!({"CLAUDE_CODE_ARTIFACT_COMMENTS": ""}))));
+        assert!(chosen_otherwise(RULE_ARTIFACT_COMMENTS, &env(serde_json::json!({"CLAUDE_CODE_ARTIFACT_COMMENTS": "yes"}))));
+        let vars = ENV_RULES.iter().find(|(id, _)| *id == RULE_ARTIFACT_COMMENTS).unwrap().1;
+        assert!(env_rule_applied(
+            &env(serde_json::json!({"CLAUDE_CODE_ARTIFACT_COMMENTS": "off", "CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT": "no"})),
+            vars
+        ));
         assert!(!chosen_otherwise(RULE_MEMORY_WRITES, &env(serde_json::json!({"CLAUDE_CODE_ARTIFACT_COMMENTS": "1"}))));
     }
 
