@@ -22,7 +22,10 @@ share the mechanics: §2.
   and `--effort` on every launch, coordinator and workers alike, so those two defaults never
   reach a Hive agent. The coordinator loads every settings source like a normal tab, so it gets
   the rest (the advisor, retention). Workers launch with `--setting-sources project` (a reviewer
-  `local`) and never read user settings at all: **no Agent Default reaches a worker** (§6).
+  `local`) and never read user settings, with ONE exception: the launch builder passes the
+  advisor itself as `--advisor`, read by `launch_advisor(root)` (`hive/launch.rs`) from the
+  same `settings.json` the human's tabs read (Darryl, 2026-11-22: workers consult Fable too).
+  No other Agent Default reaches a worker, retention included (§6).
 
 ## 2. Mechanics (borrowed from Deshittify, `commands/deshittify.rs`)
 
@@ -107,9 +110,12 @@ connect.
 
 1. The `modelSettings` alias→id mapping and the top-level `effortLevel` (§3.1).
 2. Antigravity's model and effort keys (§3.3).
-3. Hive workers get no Agent Default (§1). An advisor for workers would have to be the Hive's
-   own choice, written into the worker's generated `--settings` file or passed as `--advisor`
-   by the launch builder: a Hive change, and a cost one (every worker consulting the advisor).
+3. **Settled: Hive workers and reviewers get the advisor** through `--advisor` (§1). The
+   Advisor control should say so: the choice also applies to every Hive agent, so it
+   multiplies the advisor's cost and time by the number of workers. When this section's reader
+   lands, `launch_advisor` switches to it (the Hive Feature agent asked to be told its name).
+   A Hive's worker transcripts are deleted with the Hive (`delete_hive`), never earlier: a Done
+   or retired Hive's workers can still be resumed and their chats are read back.
 4. **Settled: a worker runs no transcript cleanup at all.** Claude Code 2.1.330 skips the
    sweep when `--setting-sources` leaves out user settings and no enabled source sets
    `cleanupPeriodDays` ("Skipping retention cleanup: userSettings source is disabled"). So
