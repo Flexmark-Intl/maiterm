@@ -122,7 +122,11 @@ Nothing in it sends the human away to start over (Darryl, 2026-10-30, after doin
 **Defaults for new Hives** (Darryl, 2026-10-31: the full tool checklist every time was too much).
 Preferences → Hive (`HiveDefaultsSection.svelte`) holds `Preferences.hive_defaults`: the tools to
 start ticked, the queen's and workers' model and effort, workers at once, budget, phone, push after
-land and default rules for every agent. The wizard starts every one of those from it when it opens
+land and default rules for every agent. It also holds who approves the queen's changes in a new
+Hive, `access_approval` and `settings_approval` (Darryl, 2026-11-21: "i should be able to set whether
+i want to autoapprove that or manual approve"). Create puts them on the Access and Settings
+checkpoints (`create::apply_approval_defaults`; "" keeps the built-ins: Access the queen's, Settings
+Ask me). The wizard starts every one of those from it when it opens
 with no draft and on Start over; a draft still wins, since it is what the human already typed.
 Unset fields (empty, null) are the built-ins below (`lib/hive/defaults.ts` `wizardStart`). Default
 rules prefill the field and open it. A default tool not detected on this machine any more is
@@ -456,6 +460,19 @@ agent offers, the human creates.
   screen). The seed is spent by the panel's first mount, so Back then Next shows no tags and
   re-opens nothing; a kept draft keeps the ids for the next time the sheet opens. A new-goal
   target ignores it: that sheet has no media panel.
+  **What the Hive has access to** (Darryl, 2026-11-21) can be proposed too:
+  - **`tools`** is a list of detected ids (`mcp:`, `cli:`, `skill:`). They are added to the human's
+    default picks, never replacing them. An id not detected on this Mac, or a setup-only one, is
+    dropped and named back (`tools_dropped`). A skill reaches only the queen: workers have none.
+  - **`coordinator_model`** and **`coordinator_effort`** set the queen's model and effort.
+  - **`worker_hosts`** and **`worker_sockets`** are grants for every worker. They are checked when
+    the proposal is filed, exactly as Create checks them against the proposed folders' remotes
+    (`hive_check_worker_grants`): no repo remote's host, nothing that answers home, only a
+    database's socket, and within the limits. So the agent hears a refusal, never the human after
+    approving. The sheet shows them on Review as removable chips, and the card names every one.
+  - Create stores them in `settings.worker_hosts` / `worker_sockets`, checked again.
+  - A new-goal target doesn't apply any of them, and says so: they are Hive settings, which the
+    queen changes with `hiveChangeSettings` (§3.4).
 - **What happens.** An agent request, kind `hive_propose` (docs/agent-requests.md), one per agent:
   a second call ends the first (`replace_proposals`). It waits a day, not 30 minutes. It shows in
   the Loom's Decisions and on the phone. On the desktop its button is **Open in the sheet**, which
@@ -481,8 +498,9 @@ agent offers, the human creates.
   the human to the desktop. maiLink can't show a sheet, so the card is the sheet's answers, filled
   in when the request is filed (`lib/hive/proposalCard.ts`):
   - the folders as detected, each with its kind and Base;
-  - the human's Hive defaults (`wizardStart`), with the proposal's cap and worker settings over them;
-  - the tools those defaults name (`defaultToolIds`);
+  - the human's Hive defaults (`wizardStart`), with the proposal's cap, queen and worker settings over them;
+  - the tools those defaults name (`defaultToolIds`), plus the proposal's, each named;
+  - the proposal's worker hosts and sockets, each named;
   - landing on Base, and an empty stack.
 
   Every line is maiTerm's words. A git folder's setup is named, because it runs outside the
