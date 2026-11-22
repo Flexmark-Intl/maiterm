@@ -7,7 +7,7 @@
  */
 
 import type { Tab } from '$lib/tauri/types';
-import { followUpRemoteHome, hiveCheckBriefFiles, hiveDetectTools, hiveMediaCheckRequested } from '$lib/tauri/commands';
+import { followUpRemoteHome, hiveCheckBriefFiles, hiveCheckWorkerGrants, hiveDetectTools, hiveMediaCheckRequested } from '$lib/tauri/commands';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
@@ -59,6 +59,14 @@ export async function proposeHive(tab: Tab, args: Record<string, unknown>): Prom
   if (typeof parsed === 'string') return { error: parsed };
   try {
     await hiveCheckBriefFiles(parsed.briefFiles);
+    // The grants as Create will check them (no repo remote's host, nothing home, only a database's
+    // socket, the limits): refused to the agent now, never left for an approved card to fail on.
+    // The kept, normalised forms are what the card names.
+    if (parsed.workerHosts?.length || parsed.workerSockets?.length) {
+      const [hosts, sockets] = await hiveCheckWorkerGrants(parsed.folders, parsed.workerHosts ?? [], parsed.workerSockets ?? []);
+      parsed.workerHosts = hosts;
+      parsed.workerSockets = sockets;
+    }
   } catch (e) {
     return { error: String(e) };
   }

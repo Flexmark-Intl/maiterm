@@ -1263,6 +1263,7 @@ pub fn run() {
             hive::media::whisper::hive_media_whisper_model_download,
             hive::create::hive_create,
             hive::create::hive_check_brief_files,
+            hive::create::hive_check_worker_grants,
             hive::fuses::hive_resume,
             hive::fuses::hive_pause,
             hive::finish::hive_finish_report,

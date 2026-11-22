@@ -164,7 +164,8 @@ export function proposalEffects(p: HiveProposal, plan: ProposalPlan): string[] {
     `Up to ${plural(plan.cap, `${MODEL(plan.workerModel)} worker`)} at once (${plan.workerEffort} effort); the queen is ${MODEL(plan.coordModel)} (${plan.coordEffort} effort).`,
     plan.toolLabels.length ? `Tools: ${listed(plan.toolLabels)}.` : 'No tools beyond the agents’ own.',
     ...(plan.addedTools?.length
-      ? [`Added to your default tools by the agent: ${listed(plan.addedToolLabels?.length === plan.addedTools.length ? plan.addedToolLabels : plan.addedTools, 6)}.${plan.addedTools.some((id) => id.startsWith('skill:')) ? ' A skill reaches the queen only: workers have no skills.' : ''}`]
+      ? // Every one named, never "+N more": Approve grants them all.
+        [`Added to your default tools by the agent: ${(plan.addedToolLabels?.length === plan.addedTools.length ? plan.addedToolLabels : plan.addedTools).join(', ')}.${plan.addedTools.some((id) => id.startsWith('skill:')) ? ' A skill reaches the queen only: workers have no skills.' : ''}`]
       : []),
     ...((p.workerHosts ?? []).length ? [`Workers may also reach: ${(p.workerHosts ?? []).join(', ')}. Every worker’s sandbox lets it connect there, beyond the package registries.`] : []),
     ...((p.workerSockets ?? []).length ? [`Workers may also connect to: ${(p.workerSockets ?? []).join(', ')}, a local database’s socket${(p.workerSockets ?? []).length === 1 ? '' : 's'}.`] : []),

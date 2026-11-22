@@ -3090,6 +3090,12 @@ export async function hiveCheckBriefFiles(paths: string[]): Promise<void> {
   return invoke('hive_check_brief_files', { paths });
 }
 
+/** An agent's proposed worker hosts and sockets, checked as Create checks them against the
+ *  proposed folders' remotes: the kept forms, or why not (`proposeHive`). */
+export async function hiveCheckWorkerGrants(folders: string[], hosts: string[], sockets: string[]): Promise<[string[], string[]]> {
+  return invoke('hive_check_worker_grants', { folders, hosts, sockets });
+}
+
 export async function hiveDetectFolder(path: string): Promise<HiveFolderInfo> {
   return invoke('hive_detect_folder', { path });
 }

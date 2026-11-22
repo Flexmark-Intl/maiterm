@@ -3,10 +3,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const check = vi.hoisted(() => vi.fn());
 const filed = vi.hoisted(() => vi.fn());
 const detect = vi.hoisted(() => vi.fn());
+const grants = vi.hoisted(() => vi.fn(async (_f: string[], h: string[], s: string[]) => [h.map((x) => x.toLowerCase()), s]));
 
 vi.mock('$lib/tauri/commands', () => ({
   followUpRemoteHome: vi.fn(async () => ({ host: null })),
   hiveCheckBriefFiles: vi.fn(async () => undefined),
+  hiveCheckWorkerGrants: grants,
   hiveMediaCheckRequested: check,
   hiveDetectTools: detect,
 }));
@@ -26,6 +28,28 @@ beforeEach(() => {
   detect.mockReset();
   filed.mockReset();
   filed.mockImplementation(async () => ({ requestId: 'r1' }));
+});
+
+describe('proposeHive worker grants', () => {
+  it('refuses the agent a grant Create would refuse, so no card is filed that can never succeed', async () => {
+    grants.mockRejectedValueOnce(new Error('api.github.com reaches github.com, where this Hive’s repos push'));
+    const res = await proposeHive(tab, { goal: 'Ship it', worker_hosts: ['api.github.com'] });
+    expect(String(res.error)).toContain('github.com');
+    expect(filed).not.toHaveBeenCalled();
+  });
+
+  it('files the kept forms, which the card names', async () => {
+    const res = await proposeHive(tab, { goal: 'Ship it', worker_hosts: ['API.Example.com'], worker_sockets: ['/tmp/.s.PGSQL.5432'] });
+    expect(grants).toHaveBeenCalledWith(['/Users/me/app'], ['API.Example.com'], ['/tmp/.s.PGSQL.5432']);
+    expect(filed.mock.calls[0][1].workerHosts).toEqual(['api.example.com']);
+    expect(res.worker_hosts).toEqual(['api.example.com']);
+  });
+
+  it('asks nothing when the proposal grants nothing', async () => {
+    grants.mockClear();
+    await proposeHive(tab, { goal: 'Ship it' });
+    expect(grants).not.toHaveBeenCalled();
+  });
 });
 
 describe('proposeHive media', () => {

@@ -1331,6 +1331,25 @@ fn check_brief_file(s: &str) -> Result<(PathBuf, String), String> {
     Ok((src, name))
 }
 
+/// An agent's proposed worker hosts and sockets (`proposeHive`), checked as Create will check
+/// them against the proposed folders' remotes, so the agent hears of a refused one now rather than
+/// the human after approving a card that can never succeed (the review). The kept forms, which
+/// the card then names. A missing folder has no remotes yet: Create checks again.
+#[tauri::command]
+pub async fn hive_check_worker_grants(folders: Vec<String>, hosts: Vec<String>, sockets: Vec<String>) -> Result<(Vec<String>, Vec<String>), String> {
+    let probe = Hive {
+        folders: folders
+            .iter()
+            .map(|p| HiveFolder { name: p.clone(), path: crate::share::expand_tilde(p.trim()).to_string_lossy().to_string(), kind: super::record::KIND_GIT.to_string(), ..HiveFolder::default() })
+            .collect(),
+        ..Hive::default()
+    };
+    let remotes = super::tools::blocking(move || Ok(super::settings::hive_remote_hosts(&probe))).await?;
+    let (hosts, sockets) = check_worker_grants(&hosts, &sockets, &remotes)?;
+    super::change::refuse_private_hosts(&hosts, false, &super::change::ip_remotes(&remotes)).await?;
+    Ok((hosts, sockets))
+}
+
 /// An agent's proposed brief files (`proposeHive`, docs/hive.md §3.7), checked as Create will
 /// check them, so the agent hears about a wrong path now rather than the human at Create.
 #[tauri::command]
