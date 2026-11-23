@@ -1337,15 +1337,10 @@ async fn post_message(
     if let Some(reply) = phone_hive_send(&s, &headers, &tab_id, &body).await? {
         return Ok(Json(reply));
     }
-    let pty = pty_for_tab(&s.app, &tab_id).ok_or(StatusCode::CONFLICT)?;
-    let woke = match ready_to_type(&s.app, s.app_handle.as_ref(), &tab_id).await {
-        Ok(woke) => woke,
-        Err(unreachable) => return Ok(Json(unreachable)),
-    };
-
-    // Image attach: Claude only. Gate BEFORE touching the PTY and return a machine-readable
-    // `status:"unsupported"` (HTTP 200) so the phone reframes it as an in-app notice — never a
-    // "do it on the desktop" deferral. Text-only messages are unchanged for all runtimes.
+    // Image attach: Claude only. Gate BEFORE touching the PTY, and before the wake (a refused send
+    // must not relaunch an exited agent), and return a machine-readable `status:"unsupported"`
+    // (HTTP 200) so the phone reframes it as an in-app notice — never a "do it on the desktop"
+    // deferral. Text-only messages are unchanged for all runtimes.
     if !body.images.is_empty() {
         if runtime_for_tab(&s.app, &tab_id) != Some(AgentRuntime::Claude) {
             return Ok(Json(json!({ "status": "unsupported", "reason": "unsupported_runtime",
@@ -1358,6 +1353,14 @@ async fn post_message(
             return Ok(Json(json!({ "status": "unsupported", "reason": "unsupported_attachment",
                 "detail": format!("{what} can't be attached. Attach an image, or a .log, .txt, .csv or .md file.") })));
         }
+    }
+    let pty = pty_for_tab(&s.app, &tab_id).ok_or(StatusCode::CONFLICT)?;
+    let woke = match ready_to_type(&s.app, s.app_handle.as_ref(), &tab_id).await {
+        Ok(woke) => woke,
+        Err(unreachable) => return Ok(Json(unreachable)),
+    };
+
+    if !body.images.is_empty() {
         // foreground_command is Some only for a live ssh/mosh: the temp files are LOCAL paths the
         // remote claude can't see. With a live bridge tunnel we stage the bytes on the remote host
         // over its mux socket and type THOSE paths; no tunnel (mosh, bridge down/disabled) or a
