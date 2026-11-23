@@ -3460,10 +3460,13 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 95] = [
+const PEER_ADDRESSING_TOOLS: [&str; 96] = [
     // Moves the CALLER's review mark (docs/overlord.md §9.5): on a guessed tab, the next review
     // there would skip commits nobody reviewed.
     "getReviewBrief",
+    // Copies a mail attachment onto the caller's host (docs/apple-mail.md §5): on a guessed tab,
+    // the human's mail lands on another tab's ssh host.
+    "saveMailAttachment",
     // A tab's auto-resume command and its trigger variables (interpolated unescaped into that
     // command, e.g. `%claudeSessionId`) run in that tab's shell at its next spawn or recover:
     // set on another tab, they plant a command there.
@@ -3601,9 +3604,12 @@ const PEER_ADDRESSING_TOOLS: [&str; 95] = [
 /// The agent-request tools (agent_requests.rs) are here for the same reason from the other side:
 /// a request is shown to the human as "the agent in <tab> asks…", so the tab named must be the
 /// caller, and a request's status is only its own tab's to read.
-const OWN_TAB_ONLY_TOOLS: [&str; 75] = [
+const OWN_TAB_ONLY_TOOLS: [&str; 76] = [
     // The review mark is the caller's own record of what it has had reviewed.
     "getReviewBrief",
+    // The attachment goes where the CALLER can open it (its ssh host's /tmp, or here): a named
+    // tab would choose another tab's host (docs/apple-mail.md §5).
+    "saveMailAttachment",
     // What a tab's shell runs on its next spawn is that tab's own business: with any `tabId`,
     // one agent could set the command another tab replays (found by the Hive spike 15 audit,
     // 2026-10-23). The only in-repo use is an agent fixing its OWN auto-resume.

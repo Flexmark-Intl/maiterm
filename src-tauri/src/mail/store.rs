@@ -385,6 +385,31 @@ pub fn query(conn: &Connection, f: &Filter, limit: usize, with_terms: bool) -> r
     Ok((rows.into_iter().take(limit).collect(), more))
 }
 
+/// Is this the copy a listing shows? One mail filed in several mailboxes is shown once, as the
+/// first copy in sort order (newest date, then highest ROWID) that passes the same filter. Decided
+/// against the database, not against what this call has seen, so the next page can't show
+/// another copy of a mail the previous page already did. The filter matters: copies can differ
+/// (read in one mailbox, unread in another), and a newer copy the filter rejects must not hide
+/// one it accepts.
+pub fn is_first_copy(conn: &Connection, f: &Filter, with_terms: bool, r: &Row) -> bool {
+    use rusqlite::types::Value as V;
+    // The copies that sort ahead, by the global-id index alone: almost always none. Asking with
+    // the whole filter in one query let SQLite walk a date index instead (~5 ms a row).
+    let newer: Vec<i64> = conn
+        .prepare_cached("SELECT ROWID FROM messages WHERE global_message_id = ? AND (date_received > ? OR (date_received = ? AND ROWID > ?))")
+        .and_then(|mut st| st.query_map([r.global_id, r.date, r.date, r.rowid], |x| x.get(0))?.collect())
+        .unwrap_or_default();
+    if newer.is_empty() {
+        return true;
+    }
+    let mut params = Vec::new();
+    let unpaged = Filter { before: None, ..f.clone() };
+    let wh = where_clause(&unpaged, with_terms, &mut params);
+    params.extend(newer.iter().map(|id| V::Integer(*id)));
+    let sql = format!("SELECT 1 {ROW_JOINS} WHERE {wh} AND m.ROWID IN ({}) LIMIT 1", placeholders(newer.len()));
+    conn.query_row(&sql, params_from_iter(params), |_| Ok(())).optional().map(|v| v.is_none()).unwrap_or(true)
+}
+
 /// One page of rows with duplicates (one mail in several mailboxes) folded by global id. Pages
 /// through the database until `limit` distinct rows are found or it runs out.
 pub fn page(conn: &Connection, f: &Filter, limit: usize) -> rusqlite::Result<(Vec<Row>, bool)> {
@@ -396,7 +421,7 @@ pub fn page(conn: &Connection, f: &Filter, limit: usize) -> rusqlite::Result<(Ve
         let last = rows.last().map(|r| (r.date, r.rowid));
         let n = rows.len();
         for (i, r) in rows.into_iter().enumerate() {
-            if seen.insert(r.global_id) {
+            if seen.insert(r.global_id) && is_first_copy(conn, &f, true, &r) {
                 out.push(r);
                 if out.len() == limit {
                     // Rows left in this batch (or beyond it) may be more mail; they may also be
@@ -450,19 +475,25 @@ pub fn thread_size(conn: &Connection, conversation_id: i64) -> i64 {
     .unwrap_or(1)
 }
 
-/// Every message in a conversation, oldest first, one per global id.
-pub fn thread_rows(conn: &Connection, conversation_id: i64, limit: usize) -> rusqlite::Result<Vec<Row>> {
-    let sql = format!("SELECT {ROW_COLS} {ROW_JOINS} WHERE m.conversation_id = ? AND +m.deleted = 0 ORDER BY m.date_received ASC, m.ROWID ASC");
+pub const THREAD_SCAN_CAP: usize = 5_000;
+
+/// The newest `limit` messages of a conversation that `keep` accepts, one per global id, returned
+/// oldest first, plus how many distinct accepted messages the conversation has in all. `keep`
+/// runs BEFORE the duplicate fold, so a copy that isn't kept (another account's) can't stand in
+/// for one that is.
+pub fn thread_rows(conn: &Connection, conversation_id: i64, limit: usize, keep: impl Fn(&Row) -> bool) -> rusqlite::Result<(Vec<Row>, usize)> {
+    let sql = format!("SELECT {ROW_COLS} {ROW_JOINS} WHERE m.conversation_id = ? AND +m.deleted = 0 ORDER BY m.date_received DESC, m.ROWID DESC");
     let mut st = conn.prepare(&sql)?;
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    for r in st.query_map([conversation_id], row_from)?.flatten() {
-        if seen.insert(r.global_id) {
+    // A notification "thread" can hold thousands of messages: count at most this many rows.
+    for r in st.query_map([conversation_id], row_from)?.flatten().take(THREAD_SCAN_CAP) {
+        if keep(&r) && seen.insert(r.global_id) && out.len() < limit {
             out.push(r);
-            if out.len() >= limit { break; }
         }
     }
-    Ok(out)
+    out.reverse();
+    Ok((out, seen.len()))
 }
 
 pub fn message_id_header(conn: &Connection, global_id: i64) -> Option<String> {
@@ -581,6 +612,22 @@ mod tests {
     }
 
     #[test]
+    fn a_mail_in_two_mailboxes_is_never_shown_again_on_a_later_page() {
+        let c = fixture();
+        let f = Filter { scope: scope_of(&c, &[1, 2, 3, 4, 5]), ..Default::default() };
+        let mut shown = Vec::new();
+        let mut cursor = None;
+        loop {
+            let (rows, more) = page(&c, &Filter { before: cursor, ..f.clone() }, 1).unwrap();
+            let Some(r) = rows.first() else { break };
+            shown.push(r.global_id);
+            cursor = Some((r.date, r.rowid));
+            if !more { break; }
+        }
+        assert_eq!(shown, vec![102, 101, 100]);
+    }
+
+    #[test]
     fn paging_walks_strictly_older() {
         let c = fixture();
         let f = Filter { scope: scope_of(&c, &[1, 2, 3, 4, 5]), ..Default::default() };
@@ -594,8 +641,11 @@ mod tests {
     #[test]
     fn threads_fold_duplicates_oldest_first() {
         let c = fixture();
-        let rows = thread_rows(&c, 7, 50).unwrap();
-        assert_eq!(rows.len(), 1);
+        let (rows, total) = thread_rows(&c, 7, 50, |_| true).unwrap();
+        assert_eq!((rows.len(), total), (1, 1));
+        // A copy that isn't kept can't stand in for the one that is.
+        let (rows, _) = thread_rows(&c, 7, 50, |r| r.rowid == 10).unwrap();
+        assert_eq!(rows[0].rowid, 10);
         assert_eq!(thread_size(&c, 8), 1);
         assert_eq!(message_id_header(&c, 100).as_deref(), Some("<abc@acme.test>"));
     }

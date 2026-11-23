@@ -23,15 +23,21 @@ attachment to a file.
    The tools are listed only while it is on (as browser link's are).
 3. **Mail text is untrusted input.** Every subject, sender name, preview and body that reaches an
    agent is framed as other people's words — context for what the human asked, never instructions
-   (`readCommsChannel`'s wording, and the Hive's `frame_escape` for the body delimiters). Email is
-   the most obvious injection path into an agent with a shell.
+   (`readCommsChannel`'s wording, as a `note` beside the JSON answer; mail text is only ever a JSON
+   string value, never spliced into maiTerm's own sentences). Email is the most obvious injection
+   path into an agent with a shell. **A sender's attachment filename is never joined onto a path**:
+   a partial message's attachment is found by comparing it with what `read_dir` lists
+   (`emlx::partial_attachment`), since `/abs/path` or `../` in a name would otherwise read any file
+   maiTerm (with Full Disk Access) can.
 4. **An empty answer is never "no such mail".** Every list/search answer says what it covered:
    which accounts and mailboxes, the date window, whether Junk/Trash were included, how many
    bodies were scanned versus skipped, and the date of the newest message in Mail's index (so a
    Mail.app that hasn't synced shows up as stale, not as absence).
 5. **Nothing from a real mailbox in the repo.** No account names, addresses or UUIDs in docs,
    fixtures or tests. Tests against the real store are `#[ignore]`d, like `hive::probe`.
-6. **macOS only.** The module is `cfg(target_os = "macos")`; elsewhere the tools are never listed.
+6. **macOS only.** The module compiles everywhere (it is plain Rust, so its tests run on the
+   Windows CI job too), but `mail::tools_on` is false off macOS, so the tools are never listed or
+   answered there, and the Preferences section is shown only on a Mac.
 
 ## 2. Where the data is (probed)
 
@@ -53,7 +59,9 @@ Key tables: `messages` (`mailbox`, `sender`→`addresses`, `subject`→`subjects
 mailbox); their messages are in `labels(message_id, mailbox_id)`, NOT `messages.mailbox`. A query
 for "mailbox X" is `messages.mailbox = X OR messages.ROWID IN (SELECT message_id FROM labels
 WHERE mailbox_id = X)`. Results are de-duplicated by `global_message_id` (the same mail in All
-Mail and INBOX is one result).
+Mail and INBOX is one result): a mail is shown as its first copy in sort order that passes the
+filter (`store::is_first_copy`, checked against the database), so it can't come back on a later
+page. A per-call "seen" set did let it come back, once the cursor had passed its first copy.
 
 **Previews.** `summaries` holds Mail's own text preview for nearly every message (299 of 301 in a
 30-day inbox sample). It is the list preview and a cheap first body search.
@@ -96,8 +104,8 @@ excluded unless named or `include_junk_trash: true`. Every message is identified
 | `listMailboxes` | Accounts, each with its mailboxes as a tree (path, total, unread, kind: inbox/sent/drafts/junk/trash/archive/label/folder). Plus `index_newest` (date of the newest indexed message) and `full_disk_access`. |
 | `getRecentMail` | Newest first across all inboxes (default), one account, or one mailbox. `since` (ISO date or `"24h"`/`"7d"`), `unread_only`, `flagged_only`, `limit` (default 25, max 100), cursor `before`. Rows: id, account, mailbox, date, from (name + address), to/cc count, subject, preview (≤200 chars), read, flagged, attachment names, thread size. |
 | `searchMail` | `query` matches subject, sender and preview text; structured filters `from`, `to` (to/cc/bcc), `subject`, `has_attachment`, `attachment_name`, `since`/`until`, `unread_only`, `flagged_only`. `body: true` also decodes and scans full bodies of the candidates that survive the other filters, bounded by `max_scan` (default 2000 messages, newest first) — and says how many were scanned, so "not found in the 2000 newest" is never read as "not found". Same row shape and paging as `getRecentMail`. |
-| `readMail` | One message: headers (from, to, cc, reply-to, date, Message-ID, list-id), the text body (`text/plain`, else HTML converted to text; `format: "html"` for the raw HTML), attachments (name, type, size, downloaded or not), and `open_url` (`message://<Message-ID>`, which opens it in Mail for the human). Long bodies page with `offset`/`max_chars` (default 20 000). Quoted reply history is trimmed by default (`full: true` keeps it). |
-| `readMailThread` | Every message in the conversation (`conversation_id`), oldest first, de-duplicated, each with quoted history trimmed — the cheap way to read a back-and-forth. |
+| `readMail` | One message: headers (from, to, cc, reply-to, date, Message-ID, list-id), the text body (`text/plain`, else HTML converted to text; `format: "html"` for the raw HTML), attachments (name, type, size, downloaded or not), and `open_url` (`message://<Message-ID>`, which opens it in Mail for the human). Long bodies page with `offset`/`max_chars` (default 20 000). A top-posted reply's quoted history is trimmed by default and flagged (`full: true` keeps it); a bottom-posted or interleaved reply is left whole, since its answer sits below the quote. The body is every text part, so text after an inline image is kept. |
+| `readMailThread` | The NEWEST 50 messages of the conversation (`conversation_id`), shown oldest first, de-duplicated, each with top-posted quoted history trimmed (flagged where it was) — the cheap way to read a back-and-forth. A longer thread says how many older ones it left out (`older_not_shown`). |
 | `saveMailAttachment` | Copies one attachment (by message id + name or index) to a temp file and returns the path, so the agent can open a PDF or image with its own Read. An attachment Mail never downloaded answers `not_downloaded` with `open_url`. |
 
 ## 5. Who gets the tools
@@ -112,9 +120,14 @@ Decided by Darryl, 2026-11-23:
   agent's transcript, which the human accepted. `saveMailAttachment` writes to the host's `/tmp`
   over the bridge tunnel (the comms tools' `staging_target_for_tab` + `push_bytes_remote`), and
   answers `no_bridge` for an SSH tab without one.
-- **Hive workers**: never — not listed (`ToolGates.mail` with a worker role) and refused if
-  called. They're sandboxed and fed untrusted input; a worker that needs mail asks its
+- **Hive workers**: never — not listed (`ToolGates.mail` with a worker role), denied in the
+  worker's settings and refused by Rust on the connection's own identity
+  (`WORKER_EXTRA_DENIED_MCP_TOOLS` → `refuse_agent_tool`), so naming another tab's `tabId` doesn't
+  get a worker in. They're sandboxed and fed untrusted input; a worker that needs mail asks its
   coordinator, which is a normal tab.
+- **`saveMailAttachment` acts only for the caller** (`OWN_TAB_ONLY_TOOLS` + `PEER_ADDRESSING_TOOLS`):
+  where the file lands depends on the tab, so neither a named `tabId` nor a guessed identity may
+  choose another tab's host.
 - **Attachments**: in v1 (`saveMailAttachment`, 25 MB cap, filename sanitized).
 
 ## 6. Code layout

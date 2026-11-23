@@ -105,32 +105,48 @@ fn addresses(a: Option<&mail_parser::Address>) -> Vec<String> {
         .collect()
 }
 
-/// A partial message's attachment saved beside it, found by filename.
-pub fn partial_attachment(data_dir: &Path, rowid: i64, name: &str) -> Option<PathBuf> {
+/// A partial message's attachment saved beside it: the `occurrence`-th file named `name` across
+/// the part folders, in part order. The name is the SENDER's — it is only ever compared with what
+/// `read_dir` lists, never joined onto a path, so `../` or an absolute name can't reach outside
+/// the message's own folder.
+pub fn partial_attachment(data_dir: &Path, rowid: i64, name: &str, occurrence: usize) -> Option<PathBuf> {
     let base = data_dir.join("Attachments").join(rowid.to_string());
-    for part in std::fs::read_dir(base).ok()?.flatten() {
-        let candidate = part.path().join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    let mut parts: Vec<PathBuf> = std::fs::read_dir(base).ok()?.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    // Part folders are MIME part numbers ("2", "10", "2.1"): order them numerically.
+    let key = |p: &PathBuf| -> Vec<u64> {
+        p.file_name().and_then(|n| n.to_str()).unwrap_or("").split('.').map(|s| s.parse().unwrap_or(u64::MAX)).collect()
+    };
+    parts.sort_by_key(key);
+    parts
+        .into_iter()
+        .filter_map(|dir| {
+            std::fs::read_dir(&dir).ok()?.flatten().find(|e| e.file_name().to_str() == Some(name) && e.path().is_file()).map(|e| e.path())
+        })
+        .nth(occurrence)
+}
+
+/// How many earlier attachments share this one's name: which of the same-named files it is.
+fn occurrence(names: &[String], index: usize) -> usize {
+    names[..index].iter().filter(|n| **n == names[index]).count()
+}
+
+fn attachment_name(part: &mail_parser::MessagePart, index: usize) -> String {
+    part.attachment_name().map(str::to_string).unwrap_or_else(|| format!("attachment-{}", index + 1))
 }
 
 pub fn parse(bytes: &[u8], located: Option<&Located>, rowid: i64) -> Option<Parsed> {
     let msg = MessageParser::default().parse(bytes)?;
-    let mut text = String::new();
-    let mut i = 0;
-    while let Some(t) = msg.body_text(i) {
-        if !text.is_empty() { text.push_str("\n\n"); }
-        text.push_str(&t);
-        i += 1;
-    }
+    // Every text part: an inline image between two paragraphs is IN `text_body` and has no text,
+    // so stopping at the first part without any would drop everything after the picture.
+    let join = |parts: Vec<String>| parts.into_iter().filter(|t| !t.trim().is_empty()).collect::<Vec<_>>().join("\n\n");
+    let text = join((0..msg.text_body.len()).filter_map(|i| msg.body_text(i).map(|t| t.into_owned())).collect());
+    let html = join((0..msg.html_body.len()).filter_map(|i| msg.body_html(i).map(|t| t.into_owned())).collect());
+    let names: Vec<String> = msg.attachments().enumerate().map(|(i, p)| attachment_name(p, i)).collect();
     let attachments = msg
         .attachments()
         .enumerate()
         .map(|(index, part)| {
-            let name = part.attachment_name().map(str::to_string).unwrap_or_else(|| format!("attachment-{}", index + 1));
+            let name = names[index].clone();
             let content_type = part
                 .content_type()
                 .map(|c| match c.subtype() { Some(s) => format!("{}/{s}", c.ctype()), None => c.ctype().to_string() })
@@ -139,7 +155,7 @@ pub fn parse(bytes: &[u8], located: Option<&Located>, rowid: i64) -> Option<Pars
             let (size, downloaded) = if inline > 0 {
                 (inline, true)
             } else {
-                match located.filter(|l| l.partial).and_then(|l| partial_attachment(&l.data_dir, rowid, &name)) {
+                match located.filter(|l| l.partial).and_then(|l| partial_attachment(&l.data_dir, rowid, &name, occurrence(&names, index))) {
                     Some(p) => (std::fs::metadata(p).map(|m| m.len() as usize).unwrap_or(0), true),
                     None => (0, false),
                 }
@@ -157,7 +173,7 @@ pub fn parse(bytes: &[u8], located: Option<&Located>, rowid: i64) -> Option<Pars
         list_id: msg.header_raw("List-Id").map(|s| s.trim().to_string()),
         subject: msg.subject().map(str::to_string),
         text,
-        html: msg.body_html(0).map(|h| h.into_owned()),
+        html: (!html.is_empty()).then_some(html),
         attachments,
     })
 }
@@ -166,38 +182,51 @@ pub fn parse(bytes: &[u8], located: Option<&Located>, rowid: i64) -> Option<Pars
 pub fn attachment_bytes(bytes: &[u8], located: Option<&Located>, rowid: i64, index: usize) -> Result<(String, Vec<u8>), String> {
     let msg = MessageParser::default().parse(bytes).ok_or("Mail's copy of this message could not be parsed")?;
     let part = msg.attachments().nth(index).ok_or("no attachment at that index")?;
-    let name = part.attachment_name().map(str::to_string).unwrap_or_else(|| format!("attachment-{}", index + 1));
+    let names: Vec<String> = msg.attachments().enumerate().map(|(i, p)| attachment_name(p, i)).collect();
+    let name = names[index].clone();
     let inline = part.contents();
     if !inline.is_empty() {
         return Ok((name, inline.to_vec()));
     }
-    match located.filter(|l| l.partial).and_then(|l| partial_attachment(&l.data_dir, rowid, &name)) {
+    match located.filter(|l| l.partial).and_then(|l| partial_attachment(&l.data_dir, rowid, &name, occurrence(&names, index))) {
         Some(p) => std::fs::read(&p).map(|b| (name, b)).map_err(|e| format!("cannot read the attachment: {e}")),
         None => Err("not_downloaded".into()),
     }
 }
 
-/// Cut quoted reply history: the text from the first "On … wrote:" / "-----Original Message-----"
-/// / Outlook "From: … Sent:" marker on, and any run of `>` lines. Returns the text and whether
+/// Cut quoted reply history from a TOP-posted reply: everything from the first "On … wrote:" /
+/// "-----Original Message-----" / Outlook "From: … Sent:" marker on. Returns the text and whether
 /// anything was cut.
+///
+/// Only top-posting is cut. A "wrote:" quote followed by the writer's own unquoted lines is a
+/// bottom-posted or interleaved reply, where the answer sits BELOW the quote: that text is left
+/// whole, since cutting at the marker would drop the reply itself.
 pub fn trim_quoted(text: &str) -> (String, bool) {
     let lines: Vec<&str> = text.lines().collect();
-    let mut cut_at = lines.len();
     for (i, raw) in lines.iter().enumerate() {
+        if i == 0 { continue; }
         let l = raw.trim();
-        let wrote = l.starts_with("On ") && (l.ends_with("wrote:") || lines.get(i + 1).is_some_and(|n| n.trim().ends_with("wrote:")));
+        let wrote_end = if l.starts_with("On ") && l.ends_with("wrote:") {
+            Some(i)
+        } else if l.starts_with("On ") && lines.get(i + 1).is_some_and(|n| n.trim().ends_with("wrote:")) {
+            Some(i + 1)
+        } else {
+            None
+        };
         let original = l.trim_matches('-').trim().eq_ignore_ascii_case("original message");
         let outlook = l.starts_with("From:") && lines.iter().skip(i + 1).take(4).any(|n| n.trim_start().starts_with("Sent:"));
-        if (wrote || original || outlook) && i > 0 {
-            cut_at = i;
-            break;
+        if let Some(end) = wrote_end {
+            // The writer's own words after the quote mean it's not top-posted.
+            let unquoted_after = lines[end + 1..].iter().any(|n| !n.trim().is_empty() && !n.trim_start().starts_with('>'));
+            if unquoted_after { return (text.trim_end().to_string(), false); }
+        } else if !(original || outlook) {
+            continue;
         }
+        let mut out = lines[..i].join("\n");
+        while out.ends_with('\n') || out.ends_with(' ') { out.pop(); }
+        return (out, true);
     }
-    let kept: Vec<&str> = lines[..cut_at].iter().copied().filter(|l| !l.trim_start().starts_with('>')).collect();
-    let trimmed = cut_at < lines.len() || kept.len() < cut_at;
-    let mut out = kept.join("\n");
-    while out.ends_with('\n') || out.ends_with(' ') { out.pop(); }
-    (out, trimmed)
+    (text.trim_end().to_string(), false)
 }
 
 #[cfg(test)]
@@ -263,9 +292,60 @@ mod tests {
     }
 
     #[test]
+    fn a_senders_attachment_name_cannot_reach_outside_the_message_folder() {
+        let dir = std::env::temp_dir().join(format!("maiterm-emlx-{}", uuid::Uuid::new_v4()));
+        let data = dir.join("A/INBOX.mbox/STORE-1/Data/1");
+        std::fs::create_dir_all(data.join("Messages")).unwrap();
+        std::fs::create_dir_all(data.join("Attachments/1234/2")).unwrap();
+        let secret = dir.join("SECRET.txt");
+        std::fs::write(&secret, b"outside").unwrap();
+        for evil in [secret.to_string_lossy().to_string(), "../../../../../../../SECRET.txt".to_string()] {
+            let body = MIME.replace("JVBERi0x\r\n", "").replace("filename=inv.pdf", &format!("filename=\"{evil}\""));
+            std::fs::write(data.join("Messages/1234.partial.emlx"), emlx(&body)).unwrap();
+            let loc = locate(&dir, "A", "INBOX", 1234).unwrap();
+            let file = std::fs::read(&loc.path).unwrap();
+            let raw = rfc822(&file).unwrap();
+            let p = parse(raw, Some(&loc), 1234).unwrap();
+            assert!(!p.attachments[0].downloaded, "{evil}");
+            assert_eq!(attachment_bytes(raw, Some(&loc), 1234, 0).unwrap_err(), "not_downloaded", "{evil}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn same_named_attachments_each_get_their_own_file() {
+        let dir = std::env::temp_dir().join(format!("maiterm-emlx-{}", uuid::Uuid::new_v4()));
+        let data = dir.join("A/INBOX.mbox/STORE-1/Data/1");
+        std::fs::create_dir_all(data.join("Messages")).unwrap();
+        for (part, bytes) in [("2", "first"), ("10", "second")] {
+            std::fs::create_dir_all(data.join(format!("Attachments/1234/{part}"))).unwrap();
+            std::fs::write(data.join(format!("Attachments/1234/{part}/inv.pdf")), bytes).unwrap();
+        }
+        let pdf = "--b\r\nContent-Type: application/pdf; name=inv.pdf\r\nContent-Disposition: attachment; filename=inv.pdf\r\n\r\n\r\n";
+        let body = MIME.replace("--b\r\nContent-Type: application/pdf", &format!("{pdf}--b\r\nContent-Type: application/pdf")).replace("JVBERi0x\r\n", "");
+        std::fs::write(data.join("Messages/1234.partial.emlx"), emlx(&body)).unwrap();
+        let loc = locate(&dir, "A", "INBOX", 1234).unwrap();
+        let file = std::fs::read(&loc.path).unwrap();
+        let raw = rfc822(&file).unwrap();
+        assert_eq!(attachment_bytes(raw, Some(&loc), 1234, 0).unwrap().1, b"first");
+        assert_eq!(attachment_bytes(raw, Some(&loc), 1234, 1).unwrap().1, b"second");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn text_after_an_inline_image_is_kept() {
+        let m = "Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nPart one\r\n--b\r\nContent-Type: image/png\r\nContent-Disposition: inline; filename=IMG.png\r\nContent-Transfer-Encoding: base64\r\n\r\niVBORw0K\r\n--b\r\nContent-Type: text/plain\r\n\r\nPart two\r\n--b--\r\n";
+        let p = parse(m.as_bytes(), None, 1).unwrap();
+        assert!(p.text.contains("Part one") && p.text.contains("Part two"), "{:?}", p.text);
+    }
+
+    #[test]
     fn quoted_history_is_trimmed() {
         let (t, cut) = trim_quoted("Sounds good.\n\nOn Mon, Nov 23, 2026 at 10:00 Pat <p@x.test>\nwrote:\n> earlier\n> text");
         assert_eq!((t.as_str(), cut), ("Sounds good.", true));
+        // Bottom-posted: the answer is below the quote, so nothing is cut.
+        let (t, cut) = trim_quoted("Hi,\n\nOn Mon, Pat wrote:\n> are you free Friday?\n\nYes, Friday works.");
+        assert!(t.ends_with("Yes, Friday works.") && !cut);
         let (t, cut) = trim_quoted("Yes.\n-----Original Message-----\nFrom: a\nSent: b");
         assert_eq!((t.as_str(), cut), ("Yes.", true));
         let (t, cut) = trim_quoted("No quotes here.\nSecond line.");

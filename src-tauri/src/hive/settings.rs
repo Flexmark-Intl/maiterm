@@ -184,6 +184,13 @@ const WORKER_EXTRA_DENIED_MCP_TOOLS: &[&str] = &[
     "getDiagnostics",
     "readCommsChannel",
     "readCommsThread",
+    // The human's Apple Mail (docs/apple-mail.md §5): a worker asks its coordinator instead.
+    "listMailboxes",
+    "getRecentMail",
+    "searchMail",
+    "readMail",
+    "readMailThread",
+    "saveMailAttachment",
 ];
 
 /// The hive and gallery tools only a coordinator holds.

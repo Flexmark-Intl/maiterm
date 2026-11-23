@@ -475,7 +475,7 @@ fn search(ctx: &Ctx, args: &Value) -> Answer {
         if rows.is_empty() { exhausted = true; break; }
         for r in rows.iter() {
             last_examined = Some((r.date, r.rowid));
-            if !seen.insert(r.global_id) { continue; }
+            if !seen.insert(r.global_id) || !store::is_first_copy(&ctx.conn, &f, false, r) { continue; }
             let fields = format!("{}\n{}\n{}\n{}", r.subject, r.from_name, r.from_address, r.preview).to_lowercase();
             let missing: Vec<&String> = terms.iter().filter(|t| !fields.contains(t.as_str())).collect();
             let hit = if missing.is_empty() {
@@ -564,7 +564,7 @@ fn read(ctx: &Ctx, args: &Value) -> Answer {
     out["body_format"] = json!(if html { "html" } else { "text" });
     out["body"] = json!(slice);
     out["body_chars"] = json!(total);
-    if offset + max < total { out["next_offset"] = json!(offset + max); }
+    if offset.saturating_add(max) < total { out["next_offset"] = json!(offset + max); }
     if trimmed { out["quoted_history_trimmed"] = json!("Quoted reply history was cut; full:true keeps it, or readMailThread reads each message of the thread."); }
     if html && p.html.is_none() { out["body_note"] = json!("This message has no HTML part."); }
     out["attachments"] = json!(p.attachments);
@@ -573,12 +573,11 @@ fn read(ctx: &Ctx, args: &Value) -> Answer {
 
 fn thread(ctx: &Ctx, args: &Value) -> Answer {
     let row = ctx.row_for(args)?;
-    let rows = if row.conversation_id == 0 {
-        vec![row.clone()]
+    let (rows, total) = if row.conversation_id == 0 {
+        (vec![row.clone()], 1)
     } else {
-        store::thread_rows(&ctx.conn, row.conversation_id, THREAD_MAX * 2).map_err(|e| err("mail_read_failed", e.to_string()))?
+        store::thread_rows(&ctx.conn, row.conversation_id, THREAD_MAX, |r| ctx.visible(r)).map_err(|e| err("mail_read_failed", e.to_string()))?
     };
-    let rows: Vec<Row> = rows.into_iter().filter(|r| ctx.visible(r)).take(THREAD_MAX).collect();
     let messages: Vec<Value> = rows
         .iter()
         .map(|r| {
@@ -586,13 +585,14 @@ fn thread(ctx: &Ctx, args: &Value) -> Answer {
             let mut v = json!({ "id": r.rowid.to_string(), "date": iso(r.date), "subject": r.subject });
             match parsed {
                 Some(p) => {
-                    let (text, _) = emlx::trim_quoted(&p.text);
+                    let (text, trimmed) = emlx::trim_quoted(&p.text);
                     let total = text.chars().count();
                     v["from"] = json!(p.from);
                     v["to"] = json!(p.to);
                     if !p.cc.is_empty() { v["cc"] = json!(p.cc); }
                     v["body"] = json!(clip(&text, THREAD_BODY_CHARS));
                     if total > THREAD_BODY_CHARS { v["body_cut"] = json!(format!("{total} characters; readMail with this id reads all of it")); }
+                    if trimmed { v["quoted_history_trimmed"] = json!(true); }
                     let names: Vec<&str> = p.attachments.iter().map(|a| a.name.as_str()).collect();
                     if !names.is_empty() { v["attachments"] = json!(names); }
                 }
@@ -605,7 +605,15 @@ fn thread(ctx: &Ctx, args: &Value) -> Answer {
             v
         })
         .collect();
-    Ok(Outcome::Answer(json!({ "messages": messages, "open_url": ctx.open_url(&row), "note": UNTRUSTED })))
+    let mut out = json!({ "messages": messages, "thread_messages": total, "open_url": ctx.open_url(&row), "note": UNTRUSTED });
+    if total > messages.len() {
+        out["older_not_shown"] = json!(format!(
+            "This thread has {}{total} messages; these are the newest {}. Older ones: searchMail with subject and until, then readMail.",
+            if total >= store::THREAD_SCAN_CAP { "at least " } else { "" },
+            messages.len()
+        ));
+    }
+    Ok(Outcome::Answer(out))
 }
 
 fn attachment(ctx: &Ctx, args: &Value) -> Answer {
@@ -622,14 +630,16 @@ fn attachment(ctx: &Ctx, args: &Value) -> Answer {
             .attachments
             .iter()
             .position(|a| a.name.eq_ignore_ascii_case(want.trim()))
-            .ok_or_else(|| err("no_such_attachment", format!(
-                "No attachment \"{want}\". This message has: {}.",
-                if parsed.attachments.is_empty() { "none".to_string() } else { parsed.attachments.iter().map(|a| format!("{} \"{}\"", a.index, a.name)).collect::<Vec<_>>().join(", ") }
-            )))?,
+            .ok_or_else(|| json!({
+                "error": "no_such_attachment",
+                "message": format!("No attachment \"{want}\". This message's attachments are listed by index in `attachments`."),
+                "attachments": parsed.attachments.iter().map(|a| json!({ "index": a.index, "name": a.name })).collect::<Vec<_>>(),
+                "note": UNTRUSTED,
+            }))?,
     };
     match emlx::attachment_bytes(&raw, Some(&loc), row.rowid, index) {
         Ok((name, bytes)) if bytes.len() <= MAX_ATTACHMENT_BYTES => Ok(Outcome::Attachment { name, bytes, open_url }),
-        Ok((name, bytes)) => Err(err("too_large", format!("\"{name}\" is {} MB; the limit is {} MB. open_url opens the message in Mail.", bytes.len() / (1024 * 1024), MAX_ATTACHMENT_BYTES / (1024 * 1024)))),
+        Ok((_, bytes)) => Err(err("too_large", format!("Attachment {index} is {} MB; the limit is {} MB. open_url opens the message in Mail.", bytes.len() / (1024 * 1024), MAX_ATTACHMENT_BYTES / (1024 * 1024)))),
         Err(e) if e == "not_downloaded" => Err(json!({ "error": "not_downloaded", "message": "Mail never downloaded this attachment; open_url opens the message in Mail, where your human can fetch it.", "open_url": open_url })),
         Err(e) => Err(err("attachment_failed", e)),
     }
@@ -816,6 +826,7 @@ pub fn parse_when(s: &str, now: i64) -> Option<i64> {
             return Some(now - n * secs);
         }
     }
+    if !s.is_ascii() { return None; }
     let (date, rest) = s.split_at(s.len().min(10));
     let mut it = date.split('-');
     let (y, m, d) = (it.next()?.parse::<i64>().ok()?, it.next()?.parse::<i64>().ok()?, it.next()?.parse::<i64>().ok()?);
@@ -829,9 +840,16 @@ pub fn parse_when(s: &str, now: i64) -> Option<i64> {
     let tz = rest[hms.len()..].trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
     if tz.is_empty() || tz.eq_ignore_ascii_case("z") { return Some(t); }
     let sign = match tz.chars().next()? { '+' => 1, '-' => -1, _ => return None };
-    let mut tzp = tz[1..].split(':');
-    let off = tzp.next()?.parse::<i64>().ok()? * 3600 + tzp.next().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0) * 60;
-    Some(t - sign * off)
+    // `+02:00`, `+0200` or `+02`.
+    let digits: String = tz[1..].chars().filter(|c| *c != ':').collect();
+    if !digits.chars().all(|c| c.is_ascii_digit()) { return None; }
+    let (h, m) = match digits.len() {
+        2 => (digits.parse::<i64>().ok()?, 0),
+        4 => (digits[..2].parse::<i64>().ok()?, digits[2..].parse::<i64>().ok()?),
+        _ => return None,
+    };
+    if h > 14 || m > 59 { return None; }
+    Some(t - sign * (h * 3600 + m * 60))
 }
 
 #[cfg(test)]
@@ -845,6 +863,10 @@ mod tests {
         assert_eq!(parse_when("2026-11-23", 0), Some(1_795_392_000));
         assert_eq!(parse_when("2026-11-23T16:04:31Z", 0), Some(1_795_449_871));
         assert_eq!(parse_when("2026-11-23T10:04:31-06:00", 0), Some(1_795_449_871));
+        assert_eq!(parse_when("2026-11-23T10:04:31-0600", 0), Some(1_795_449_871));
+        assert_eq!(parse_when("2026-11-23T18:04:31+02", 0), Some(1_795_449_871));
+        assert_eq!(parse_when("2026-11-23T10:04:31-600", 0), None);
+        assert_eq!(parse_when("2026年11月1日", 0), None);
         assert_eq!(parse_when("7d", 1_000_000), Some(1_000_000 - 7 * 86_400));
         assert_eq!(parse_when("24h", 100_000), Some(100_000 - 86_400));
         assert_eq!(parse_when("last tuesday", 0), None);
