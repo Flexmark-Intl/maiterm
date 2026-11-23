@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::agent_defaults::{self, Paths, Runtime, Status};
 use crate::state::AppState;
@@ -11,6 +11,13 @@ use crate::state::AppState;
 /// The human's files: which Claude settings their tabs read depends on their accounts.
 fn paths(state: &AppState) -> Result<Paths, String> {
     Paths::real(&state.app_data.read().preferences).ok_or_else(|| "Could not determine home directory".to_string())
+}
+
+/// What hosts are given may have changed: every window gives its bridged SSH hosts the
+/// settings now, rather than at their next connect (`refreshAgentDefaults`, sshMcpBridge).
+/// Sent after the write, so the script they build reads the new record.
+fn announce(app: &AppHandle) {
+    let _ = app.emit("agent-defaults-changed", ());
 }
 
 /// What each agent's settings file holds now.
@@ -26,6 +33,7 @@ pub async fn agent_defaults_status(state: State<'_, Arc<AppState>>) -> Result<St
 /// the UI shows the file rather than what it hoped happened.
 #[tauri::command]
 pub async fn agent_defaults_set(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     runtime: Runtime,
     key: String,
@@ -36,17 +44,20 @@ pub async fn agent_defaults_set(
         return Err(why);
     }
     let p = paths(&state)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let status = tauri::async_runtime::spawn_blocking(move || {
         agent_defaults::set_managed(&p, runtime, &key, value.as_deref())?;
-        Ok(agent_defaults::status(&p))
+        Ok::<_, String>(agent_defaults::status(&p))
     })
     .await
-    .map_err(|e| format!("Write task failed: {e}"))?
+    .map_err(|e| format!("Write task failed: {e}"))??;
+    announce(&app);
+    Ok(status)
 }
 
 /// Tick (`managed`) or untick one setting: whether maiTerm sets it here and on SSH hosts.
 #[tauri::command]
 pub async fn agent_defaults_manage(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     runtime: Runtime,
     key: String,
@@ -56,27 +67,35 @@ pub async fn agent_defaults_manage(
         return Err(why);
     }
     let p = paths(&state)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let status = tauri::async_runtime::spawn_blocking(move || {
         agent_defaults::manage(&p, runtime, &key, managed)?;
-        Ok(agent_defaults::status(&p))
+        Ok::<_, String>(agent_defaults::status(&p))
     })
     .await
-    .map_err(|e| format!("Write task failed: {e}"))?
+    .map_err(|e| format!("Write task failed: {e}"))??;
+    announce(&app);
+    Ok(status)
 }
 
 /// Switch the whole section on or off (off: maiTerm changes no agent setting anywhere).
 #[tauri::command]
-pub async fn agent_defaults_enable(state: State<'_, Arc<AppState>>, enabled: bool) -> Result<Status, String> {
+pub async fn agent_defaults_enable(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<Status, String> {
     if let Some(why) = crate::instance::global_write_refusal() {
         return Err(why);
     }
     let p = paths(&state)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let status = tauri::async_runtime::spawn_blocking(move || {
         agent_defaults::set_enabled(&p, enabled)?;
-        Ok(agent_defaults::status(&p))
+        Ok::<_, String>(agent_defaults::status(&p))
     })
     .await
-    .map_err(|e| format!("Write task failed: {e}"))?
+    .map_err(|e| format!("Write task failed: {e}"))??;
+    announce(&app);
+    Ok(status)
 }
 
 /// The script that gives a bridged SSH host the managed settings. Empty when there is nothing

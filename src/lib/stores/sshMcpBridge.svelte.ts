@@ -455,6 +455,49 @@ export async function refreshProxyEntries(): Promise<void> {
 }
 
 /**
+ * Give every host bridged now the Agent Defaults as recorded (`agent-defaults-changed`), so a
+ * setting ticked or changed in Preferences reaches hosts at once rather than at their next
+ * connect (docs/agent-defaults.md §2.1). Runs are serialized: changes made while one is in
+ * flight are covered by ONE more run, which builds its script from the record at that time,
+ * so the last change always lands last. Idempotent, so another window doing the same is
+ * harmless. An unticked setting or the section switched off gives an empty script: nothing
+ * runs, and hosts keep what they have.
+ */
+let agentDefaultsRun: Promise<void> | null = null;
+let agentDefaultsAgain = false;
+
+export function refreshAgentDefaults(): Promise<void> {
+  if (agentDefaultsRun) {
+    agentDefaultsAgain = true;
+    return agentDefaultsRun;
+  }
+  agentDefaultsRun = (async () => {
+    do {
+      agentDefaultsAgain = false;
+      const hosts = new Set<string>();
+      for (const b of bridgeStates.values()) if (b.status === 'connected') hosts.add(b.hostKey);
+      if (hosts.size === 0) continue;
+      let script: string;
+      try {
+        script = await commands.buildAgentDefaultsSetupScript();
+      } catch (e) {
+        logError(`SSH MCP bridge: Agent Defaults script: ${e}`);
+        continue;
+      }
+      if (!script.trim()) continue;
+      await Promise.all([...hosts].map(async (host) => {
+        try {
+          await commands.sshRunSetup(host, script);
+        } catch (e) {
+          logError(`SSH MCP bridge: Agent Defaults on ${host}: ${e}`);
+        }
+      }));
+    } while (agentDefaultsAgain);
+  })().finally(() => { agentDefaultsRun = null; });
+  return agentDefaultsRun;
+}
+
+/**
  * Build a shell script for background SSH execution.
  * This runs as a non-interactive command, not through the user's PTY.
  * Sets up: lockfile, MCP entry in ~/.claude.json, hooks in ~/.claude/settings.json.

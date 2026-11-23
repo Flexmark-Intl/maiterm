@@ -292,8 +292,9 @@
   </p>
   <p class="hint">
     Tick the settings maiTerm should set. A ticked setting is set here and on every SSH host a
-    tab bridges to, each time it connects, so every machine follows the same value; "Agent's
-    default" removes it everywhere. maiTerm never changes an unticked setting, here or on a host.
+    tab bridges to, straight away and again each time one connects, so every machine follows the
+    same value; "Agent's default" removes it everywhere. maiTerm never changes an unticked
+    setting, here or on a host. An agent already running picks a change up when it restarts.
   </p>
   {#if status}
     <label class="switch">

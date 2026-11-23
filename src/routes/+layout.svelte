@@ -9,7 +9,7 @@
   import { wakeTab, type WakeAction } from '$lib/agents/wake';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
   import { loomStore, type LoomMode } from '$lib/stores/loom.svelte';
-  import { retryDownBridgesNow, refreshProxyEntries } from '$lib/stores/sshMcpBridge.svelte';
+  import { retryDownBridgesNow, refreshProxyEntries, refreshAgentDefaults } from '$lib/stores/sshMcpBridge.svelte';
   import ImportPreviewModal from '$lib/components/ImportPreviewModal.svelte';
   import MoveProjectModal from '$lib/components/MoveProjectModal.svelte';
   import ShareImportWizard from '$lib/components/share/ShareImportWizard.svelte';
@@ -569,6 +569,13 @@
     listen('mcp-proxy-entries-changed', () => {
       void refreshProxyEntries();
     }).then(unlisten => { unlistenProxyEntries = unlisten; });
+
+    // Agent Defaults changed (docs/agent-defaults.md §2.1): give the ssh hosts this window has
+    // bridged the ticked settings now, rather than at their next connect.
+    let unlistenAgentDefaults: (() => void) | undefined;
+    listen('agent-defaults-changed', () => {
+      void refreshAgentDefaults();
+    }).then(unlisten => { unlistenAgentDefaults = unlisten; });
 
     // A maiLink phone tapped "Resume workspace" on a suspended workspace. Only the window that
     // owns the workspace acts — resumeWorkspace() no-ops when the id isn't a suspended workspace
@@ -1544,6 +1551,7 @@
       unlistenAccountReload?.();
       unlistenTabRenamed?.();
       unlistenProxyEntries?.();
+      unlistenAgentDefaults?.();
       unlistenResumeWorkspace?.();
       unlistenMeshInit?.();
       unlistenArchiveTab?.();

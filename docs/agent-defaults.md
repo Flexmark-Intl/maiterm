@@ -87,7 +87,11 @@ is left alone everywhere, which is how a host keeps its own value.
 - **How:** `agent_defaults::remote_script`, run by `sshMcpBridge.svelte.ts` on every connect
   AFTER the bridge's own setup and Deshittify's script (all three read-modify-write the same
   remote files), never gating `connected`; also appended last to "Install MCP for Current
-  User". Two python3 snippets: a JSON merge for `~/.claude/settings.json` and
+  User". A tick, a value or the switch changed in Preferences also reaches hosts bridged NOW:
+  the command emits `agent-defaults-changed` and every window runs the script on its connected
+  hosts (`refreshAgentDefaults`, serialized so the last change lands last). Without this, a host
+  whose tabs bridged before the change kept its old values until a reconnect (2026-11-23:
+  server02 had no advisor after the human ticked it). Two python3 snippets: a JSON merge for `~/.claude/settings.json` and
   `~/.gemini/antigravity-cli/settings.json` (`[path, value]` pairs; a removal also drops an
   object it empties: `env`, a `modelSettings` entry), and a textual top-level edit of
   `~/.codex/config.toml` (python3 has no TOML writer), checked with `tomllib` where the host has
