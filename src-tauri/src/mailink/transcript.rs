@@ -2490,6 +2490,14 @@ fn image_message_caption(blocks: &[Value]) -> String {
 /// A whitespace-delimited leading token is treated as one of ours only if it is an absolute path
 /// containing the `maiterm-mailink-` sidecar marker, so ordinary user text is never touched.
 /// A no-op when the text starts with neither form.
+/// `/…` (macOS, Linux, an ssh host's `/tmp`) or a Windows drive path, `C:\…` / `C:/…`: on
+/// Windows the staged attachment is under `%TEMP%`, and a `/`-only test left its path in the
+/// thread as text.
+fn is_absolute_path_token(token: &str) -> bool {
+    let b = token.as_bytes();
+    token.starts_with('/') || (b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/'))
+}
+
 fn strip_leading_image_refs(s: &str) -> &str {
     let mut s = s.trim_start();
     loop {
@@ -2502,7 +2510,7 @@ fn strip_leading_image_refs(s: &str) -> &str {
             }
         }
         let token = s.split_whitespace().next().unwrap_or("");
-        if !token.is_empty() && token.starts_with('/') && token.contains("maiterm-mailink-") {
+        if is_absolute_path_token(token) && token.contains("maiterm-mailink-") {
             s = s[token.len()..].trim_start();
             continue;
         }
@@ -3373,6 +3381,14 @@ mod tests {
         let mut out7 = Vec::new();
         push_line_messages(&ordinary, ToolRender::Marker, &mut out7);
         assert_eq!(out7[0]["text"], "check /var/log/app.png for the crash");
+
+        // Windows stages under %TEMP%, a drive path; a text attachment strips like an image.
+        assert_eq!(
+            strip_leading_image_refs(r"C:\Users\d\AppData\Local\Temp\maiterm-mailink-a.png C:/T/maiterm-mailink-b.log why"),
+            "why"
+        );
+        assert_eq!(strip_leading_image_refs(r"C:\notes\plan.md says so"), r"C:\notes\plan.md says so");
+        assert_eq!(strip_leading_image_refs("C: maiterm-mailink-x"), "C: maiterm-mailink-x");
     }
 
     #[test]
