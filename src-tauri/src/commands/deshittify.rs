@@ -1093,7 +1093,8 @@ else:
     if s.get("remoteControlAtStartup") is False:
         s.pop("remoteControlAtStartup")
 if d["classicRenderer"]=="set":
-    s["tui"]="default"
+    if "tui" not in s:
+        s["tui"]="default"
 elif s.get("tui")=="default":
     s.pop("tui")
 def ours(x):
@@ -1776,18 +1777,22 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
     }
 
-    /// The same for the renderer: switching the rule off removes only our "default",
-    /// never a "fullscreen" the remote's owner picked with `/tui`.
+    /// The renderer is the host user's to pick, both ways: with the rule on, a
+    /// "fullscreen" they chose there with `/tui` survives every connect (the script runs
+    /// on each one); with it off, only our "default" is removed.
     #[test]
     fn remote_script_keeps_a_users_own_fullscreen_choice() {
-        let home = scratch("remote-tui");
-        fs::create_dir_all(home.join(".claude")).unwrap();
-        let settings = home.join(".claude/settings.json");
-        fs::write(&settings, "{\"tui\":\"fullscreen\"}").unwrap();
-        let out = run_remote_script(&render_remote_setup_script_from(&status_with(false), true), &home);
-        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
-        assert_eq!(fs::read_to_string(&settings).unwrap(), "{\"tui\":\"fullscreen\"}");
-        let _ = fs::remove_dir_all(&home);
+        for rules_on in [true, false] {
+            let home = scratch("remote-tui");
+            fs::create_dir_all(home.join(".claude")).unwrap();
+            let settings = home.join(".claude/settings.json");
+            fs::write(&settings, "{\"tui\":\"fullscreen\"}").unwrap();
+            let out = run_remote_script(&render_remote_setup_script_from(&status_with(rules_on), true), &home);
+            assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+            let s: serde_json::Value = serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+            assert_eq!(s["tui"], "fullscreen", "rules_on={rules_on}: the host's own choice was overwritten");
+            let _ = fs::remove_dir_all(&home);
+        }
     }
 
     #[test]
