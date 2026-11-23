@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { FollowUp } from '$lib/tauri/types';
 import {
   resolveCreate, isDue, isExpired, statusOf, envelope, durationText, clockText, whenText, badgeSummary, hostLabel,
-  isConditionKind, promptEvidence,
+  isConditionKind, promptEvidence, localScriptFolder,
   serviceOutcome, taskOutcome, needsApproval, MAX_PENDING, MAX_CREATED_PER_HOUR, type CreateContext,
 } from './model';
 
@@ -416,5 +416,34 @@ describe('promptEvidence (§6.2, ahead of the shell line probe)', () => {
     // join is one this webview never saw.
     expect(promptEvidence({ beginAt: 10, markless: true })).toBe('running');
     expect(promptEvidence({ typedAt: 10, markless: true })).toBe('typed');
+  });
+});
+
+describe('localScriptFolder', () => {
+  it('keeps macOS/Linux folders as they are and refuses anything else', () => {
+    expect(localScriptFolder('/Users/ann/repo', false)).toBe('/Users/ann/repo');
+    expect(localScriptFolder('~', false)).toBe('~');
+    expect(localScriptFolder('~/repo', false)).toBe('~/repo');
+    expect(localScriptFolder('repo', false)).toBeNull();
+    expect(localScriptFolder('', false)).toBeNull();
+  });
+
+  it('stores one Windows spelling, whatever the tab reported', () => {
+    expect(localScriptFolder('C:\\Users\\ann\\repo', true)).toBe('C:\\Users\\ann\\repo');
+    expect(localScriptFolder('c:/Users/ann/repo', true)).toBe('C:\\Users\\ann\\repo');
+    expect(localScriptFolder('/c/Users/ann/repo', true)).toBe('C:\\Users\\ann\\repo'); // Git Bash prompt
+    expect(localScriptFolder('/C:/Users/ann/repo', true)).toBe('C:\\Users\\ann\\repo'); // OSC 7 file URI
+    expect(localScriptFolder('/d', true)).toBe('D:\\');
+    expect(localScriptFolder('D:', true)).toBe('D:\\');
+    expect(localScriptFolder('\\\\server\\share\\repo', true)).toBe('\\\\server\\share\\repo');
+    expect(localScriptFolder('~/repo', true)).toBe('~/repo');
+    expect(localScriptFolder('~\\repo', true)).toBe('~/repo');
+  });
+
+  it('refuses a Windows folder it would have to guess at', () => {
+    expect(localScriptFolder('/tmp', true)).toBeNull(); // Git Bash's own root, not C:\tmp
+    expect(localScriptFolder('/usr/src', true)).toBeNull();
+    expect(localScriptFolder('repo', true)).toBeNull();
+    expect(localScriptFolder('', true)).toBeNull();
   });
 });

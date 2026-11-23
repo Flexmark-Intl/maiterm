@@ -154,9 +154,11 @@ pub fn status() -> HashMap<String, WatchStatus> {
     runs().lock().iter().map(|(id, r)| (id.clone(), r.view(now))).collect()
 }
 
-/// Where a script runs, as one string: its folder on this computer ("/repo", "~/repo"), or
-/// `user@host:folder` for an ssh tab's. What the approval is keyed by and what a card shows. The
-/// two can't collide: a local folder starts with `/` or `~`, a remote place with the user name.
+/// Where a script runs, as one string: its folder on this computer ("/repo", "~/repo", on Windows
+/// "C:\repo" or "\\server\share"), or `user@host:folder` for an ssh tab's. What the approval is
+/// keyed by and what a card shows. The two can't collide: a local folder starts with `/`, `~`, a
+/// drive letter and a BACKSLASH, or `\\` (the frontend stores Windows folders that way,
+/// `localScriptFolder`), while a remote folder after the host's colon is a POSIX path.
 pub fn place(host: Option<&str>, cwd: &str) -> String {
     match host {
         Some(h) => format!("{h}:{cwd}"),
@@ -499,6 +501,7 @@ struct Candidate {
     last_run: Option<i64>,
 }
 
+#[derive(Debug)]
 enum Outcome {
     Met(String),
     NotYet,
@@ -894,31 +897,25 @@ pub(crate) async fn login_path() -> String {
     .clone()
 }
 
-/// A tab's recorded folder is often home-relative (`last_cwd` = "~/repo"). On Windows it may
-/// also be Git Bash's spelling of a drive folder ("/c/Users/ann/repo", from its OSC 7), which
-/// Windows itself can't open.
+/// A tab's recorded folder is often home-relative (`last_cwd` = "~/repo"). A Windows folder
+/// arrives already in Windows' own spelling: the frontend converts Git Bash's `/c/…` once, when
+/// the follow-up is made (`localScriptFolder`), so approvals and Move project see the same path.
 fn expand_home(cwd: &str) -> PathBuf {
     match (cwd.strip_prefix('~'), dirs::home_dir()) {
-        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\') => {
-            home.join(rest.trim_start_matches(['/', '\\']))
-        }
-        _ if cfg!(windows) => PathBuf::from(msys_to_windows(cwd).unwrap_or_else(|| cwd.to_string())),
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => home.join(rest.trim_start_matches('/')),
         _ => PathBuf::from(cwd),
     }
 }
 
-/// "/c/Users/ann" (Git Bash's mount) or "/C:/Users/ann" (a `file:///C:/…` OSC 7) →
-/// "C:\Users\ann"; None for anything that isn't a drive folder in one of those spellings.
-fn msys_to_windows(p: &str) -> Option<String> {
-    let rest = p.strip_prefix('/')?;
-    let mut chars = rest.chars();
-    let drive = chars.next().filter(|c| c.is_ascii_alphabetic())?;
-    let after = chars.as_str();
-    let after = after.strip_prefix(':').unwrap_or(after);
-    if !(after.is_empty() || after.starts_with('/')) {
-        return None;
+/// Git Bash on Windows, as a watch run uses it: the user's own `CLAUDE_CODE_GIT_BASH_PATH` (which
+/// Claude honours too) when it names a file, else the full search, PATH included — this runs off
+/// the main thread, so the walk that spawns must avoid is fine here.
+#[cfg(windows)]
+async fn watch_git_bash() -> Option<String> {
+    if let Some(p) = std::env::var("CLAUDE_CODE_GIT_BASH_PATH").ok().filter(|p| Path::new(p).is_file()) {
+        return Some(p);
     }
-    Some(format!("{}:\\{}", drive.to_ascii_uppercase(), after.trim_start_matches('/').replace('/', "\\")))
+    tokio::task::spawn_blocking(crate::windows_setup::git_bash).await.ok().flatten()
 }
 
 /// A Windows path as Git Bash can take it as an argument or a variable: forward slashes
@@ -1072,9 +1069,9 @@ async fn execute(c: &Candidate, dir: &Path) -> Outcome {
     if !cwd.is_dir() {
         return Outcome::Broken(format!("its folder {} no longer exists", c.cwd));
     }
-    let Some(bash) = crate::windows_setup::git_bash_for_spawn() else {
+    let Some(bash) = watch_git_bash().await else {
         return Outcome::Broken(
-            "watch scripts on Windows run under Git Bash, and Git for Windows isn't installed".into(),
+            "watch scripts on Windows run under Git Bash, and maiTerm can't find Git for Windows (set CLAUDE_CODE_GIT_BASH_PATH to its bin\\bash.exe if it's installed somewhere unusual)".into(),
         );
     };
 
@@ -1665,19 +1662,6 @@ mod path_tests {
     use super::*;
 
     #[test]
-    fn git_bash_drive_folders_become_windows_paths() {
-        assert_eq!(msys_to_windows("/c/Users/ann/repo").as_deref(), Some(r"C:\Users\ann\repo"));
-        assert_eq!(msys_to_windows("/d").as_deref(), Some(r"D:\"));
-        assert_eq!(msys_to_windows("/d/").as_deref(), Some(r"D:\"));
-        assert_eq!(msys_to_windows("/C:/Users/ann").as_deref(), Some(r"C:\Users\ann"));
-        assert_eq!(msys_to_windows("/C:").as_deref(), Some(r"C:\"));
-        // Not a drive mount: a real POSIX folder, or a Windows path already.
-        assert_eq!(msys_to_windows("/usr/bin"), None);
-        assert_eq!(msys_to_windows(r"C:\Users\ann"), None);
-        assert_eq!(msys_to_windows("relative/c"), None);
-    }
-
-    #[test]
     fn bash_gets_forward_slashes() {
         assert_eq!(bash_path(Path::new(r"C:\Users\ann\x.sh")), "C:/Users/ann/x.sh");
     }
@@ -1746,8 +1730,16 @@ mod windows_tests {
 
     #[tokio::test]
     async fn a_shebang_runs_as_itself() {
-        let o = run("#!/bin/bash\n[[ -n \"$BASH_VERSION\" ]] && echo bash\n", 20).await;
-        assert!(matches!(o, Outcome::Met(ref s) if s == "bash"), "{o:?}");
+        // Perl ships with Git for Windows. Run by bash instead, this is a syntax error (exit 2).
+        let o = run("#!/usr/bin/perl\nprint \"perl \" . ($] > 5 ? \"ok\" : \"old\") . \"\\n\"; exit 0;\n", 20).await;
+        assert!(matches!(o, Outcome::Met(ref s) if s == "perl ok"), "{o:?}");
+    }
+
+    #[tokio::test]
+    async fn the_environment_is_minimal() {
+        std::env::set_var("MAITERM_TEST_LEAK", "maiTerm's own environment must not reach the script");
+        let o = run("[ -z \"$MAITERM_TEST_LEAK\" ] || exit 3\n[ -n \"$SYSTEMROOT$SystemRoot\" ] || exit 4\necho ok\n", 20).await;
+        assert!(matches!(o, Outcome::Met(ref s) if s == "ok"), "{o:?}");
     }
 
     #[tokio::test]
@@ -1768,18 +1760,6 @@ mod windows_tests {
         let _ = std::fs::remove_dir_all(&folder);
         assert!(matches!(first, Outcome::NotYet), "{first:?}");
         assert!(matches!(second, Outcome::Met(ref s) if s == "run 2 after 1700000000"), "{second:?}");
-    }
-
-    #[tokio::test]
-    async fn a_git_bash_spelled_folder_is_found() {
-        let folder = scratch();
-        std::fs::create_dir_all(&folder).unwrap();
-        let p = folder.display().to_string().replace('\\', "/");
-        let (drive, rest) = p.split_once(":/").unwrap();
-        let msys = format!("/{}/{}", drive.to_ascii_lowercase(), rest);
-        let o = run_in("pwd -W", Path::new(&msys), 20).await;
-        let _ = std::fs::remove_dir_all(&folder);
-        assert!(matches!(o, Outcome::Met(ref s) if s.eq_ignore_ascii_case(&p)), "{o:?} (wanted {p})");
     }
 
     /// Everything a run started is gone once it ends, finished or timed out: the job object.
