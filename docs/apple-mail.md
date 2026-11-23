@@ -1,7 +1,12 @@
 # Apple Mail for agents
 
-**Status: DESIGN, 2026-11-23. Nothing built.** Probe results in §2 were measured on a real
-Mail store (V10, 13 accounts, ~706k messages) the same day.
+**Status: BUILT 2026-11-23, not yet deployed** (`src-tauri/src/mail/`, Preferences → Mail,
+`components/mail/MailPane.svelte`). The tools answer only from an installed build, so agents
+can't use them until a deploy. Probe results in §2 were measured on a real Mail store (V10,
+13 accounts, ~706k messages) the same day. The `#[ignore]`d `mail::tests::real_store` re-runs
+every tool against this Mac's store and prints counts and timings only: 25 recent rows in
+~20 ms, an indexed search in ~30 ms, a body search over 128 messages in ~0.1 s, 40/40
+messages read with a body, 15/15 attachments saved.
 
 An agent is told "find the invoice Acme sent last week" or "read what support@ wrote about the
 outage". Today it has no way to do that short of asking the human to paste the mail. This gives
@@ -58,7 +63,13 @@ keeps its body index private. Full body search is ours.
 
 **Measured costs (unscoped, all 706k messages):** subject `LIKE` 0.35 s · sender address/name
 0.28 s · preview text 0.47 s · recipient address 1.1 s (an index on `recipients(address)` exists).
-A newest-first page of one mailbox: 10 ms.
+A newest-first page of one mailbox: 10 ms. Newest-first queries walk the date index and stop at
+the page, so a scoped search is far cheaper than these unscoped counts.
+
+**Query-plan trap:** `WHERE conversation_id = ? AND deleted = 0` makes SQLite walk the index on
+`deleted` (every live message, ~0.1 s per call), which made a 25-row page take 5.7 s while it
+counted each row's thread. `+deleted` steers it to the conversation index (8 ms). Any new
+per-row query on `messages` should be checked with `EXPLAIN QUERY PLAN` against a real store.
 
 **The schema is private and changes between macOS releases.** On open, check that the columns we
 use exist; if not, every tool answers with one sentence naming the missing column and the macOS
@@ -91,25 +102,36 @@ excluded unless named or `include_junk_trash: true`. Every message is identified
 
 ## 5. Who gets the tools
 
+Decided by Darryl, 2026-11-23:
 - **Normal agent tabs**: yes while `mail_enabled`.
-- **Accounts**: `mail_accounts` — **decision pending**: all accounts, or only the ones the human
-  ticks.
-- **SSH tabs**: an agent on another host reading this Mac's mail — **decision pending**.
-- **Hive workers**: never. They're sandboxed and fed untrusted input; a worker that needs mail
-  asks its coordinator, which is a normal tab.
-- **Attachments**: `saveMailAttachment` in v1 or later — **decision pending**.
+- **Accounts**: only the ones the human ticks (`mail_accounts`, account UUIDs). None is readable
+  until ticked, and an account added to Mail later is not readable until ticked. Every query is
+  limited to the ticked accounts' mailboxes, and a message id from another account answers "no
+  such message".
+- **SSH tabs**: yes. The tools run in maiTerm on the Mac; the text lands on the host in the
+  agent's transcript, which the human accepted. `saveMailAttachment` writes to the host's `/tmp`
+  over the bridge tunnel (the comms tools' `staging_target_for_tab` + `push_bytes_remote`), and
+  answers `no_bridge` for an SSH tab without one.
+- **Hive workers**: never — not listed (`ToolGates.mail` with a worker role) and refused if
+  called. They're sandboxed and fed untrusted input; a worker that needs mail asks its
+  coordinator, which is a normal tab.
+- **Attachments**: in v1 (`saveMailAttachment`, 25 MB cap, filename sanitized).
 
-## 6. Code layout (planned)
+## 6. Code layout
 
-- `src-tauri/src/mail/mod.rs` — open + schema check, account resolution (Accounts4 with the
-  parent fallback), mailbox tree, filters including labels.
-- `mail/emlx.rs` — path derivation, `.emlx` framing, MIME via a parser crate (`mail-parser`),
-  HTML → text, quote trimming, partial-attachment lookup.
-- `mail/search.rs` — SQL search + the bounded body scan.
-- `claude_code/protocol.rs` + `server.rs` — the six tools, listed only when enabled and macOS.
-- Preferences: a Mail section (enable toggle, FDA status + button, account ticks).
-- Tests: framing, path derivation, MIME decode, quote trimming on synthetic fixtures; the
-  real-store probe `#[ignore]`d.
+- `src-tauri/src/mail/store.rs` — open + schema check, accounts (Accounts4 with the parent
+  fallback), mailboxes and their kinds, the label-aware scope, filters, paging (newest first,
+  cursor `date:rowid`, duplicates folded by `global_message_id`), threads.
+- `mail/emlx.rs` — path derivation, `.emlx` framing, MIME via `mail-parser` 0.11 (1.x needs a
+  newer Rust), HTML → text, quote trimming, partial-attachment lookup.
+- `mail/mod.rs` — the six tool definitions and handlers, the access gates, coverage reporting,
+  the bounded body scan, attachment staging, and `mail_list_accounts` for Preferences.
+- `claude_code/protocol.rs` (`ToolGates.mail`) + `server.rs` (dispatch) — listed only when
+  `mail_enabled` on macOS and never to a Hive worker.
+- Preferences → Mail (`components/mail/MailPane.svelte`): the switch, Full Disk Access state with
+  an Open Privacy Settings button, and the account ticks.
+- Tests: fixtures for the SQL (labels, duplicates, paging, every filter), framing, MIME decode,
+  partial attachments, quote trimming, dates; `mail::tests::real_store` `#[ignore]`d.
 
 ## 7. Not in v1
 

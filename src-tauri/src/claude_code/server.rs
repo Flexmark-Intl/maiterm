@@ -1366,6 +1366,7 @@ async fn handle_backend_tool(tool_name: &str, arguments: &Value, state: &Arc<App
             Some(serde_json::json!({ "error": FILES_TOOLS_OFF }))
         }
         t if crate::browser_link::is_browser_tool(t) => Some(crate::browser_link::handle_tool(t, arguments, state, app_handle).await),
+        t if crate::mail::is_mail_tool(t) => Some(crate::mail::handle_tool(t, arguments, state).await),
         // Every `hive*` name, built or not, so none falls through to the frontend's switch. Run
         // detached and awaited (`detached_hive_tool`): an agent whose tool call times out drops
         // this request's future, and a land, undo or retire cut off between two of its steps was
@@ -7806,7 +7807,7 @@ mod tests {
         }
         // Every one of them is listed to agents (an unlisted name here would guard nothing).
         use crate::claude_code::protocol::{tool_list_response, ToolGates};
-        let gates = ToolGates { tasks: true, stack: true, follow_ups_live: true, escalations_to_overlord: true, browser_link: true, file_tree: true, hive: None };
+        let gates = ToolGates { tasks: true, stack: true, follow_ups_live: true, escalations_to_overlord: true, browser_link: true, file_tree: true, mail: true, hive: None };
         let listed = tool_list_response(gates).to_string();
         for tool in stack {
             assert!(listed.contains(&format!("\"name\":\"{tool}\"")), "{tool} is not a tool");

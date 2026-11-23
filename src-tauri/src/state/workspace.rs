@@ -2032,6 +2032,14 @@ pub struct Preferences {
     /// lists the browser tools to agents. Not in `preference_meta` — the human turns it on.
     #[serde(default)]
     pub browser_link_enabled: bool,
+    /// Apple Mail for agents (docs/apple-mail.md): lists the read-only mail tools. Off by default
+    /// and NEVER in `preference_meta` — only the human opens their mail to agents.
+    #[serde(default)]
+    pub mail_enabled: bool,
+    /// The Mail account ids (the UUID in a mailbox URL) agents may read. Empty = none: an account
+    /// is readable only once the human ticks it. Not in `preference_meta` either.
+    #[serde(default)]
+    pub mail_accounts: Vec<String>,
     /// Files (docs/file-tree.md §16): the human's view settings for the project tree. None of
     /// them is in `preference_meta` — agents get purpose-built tools instead. Values are bools,
     /// numbers and Strings, never enums, so an older build reading them loses nothing.
@@ -2444,6 +2452,8 @@ impl Default for Preferences {
             follow_ups_resume_agent: true,
             follow_ups_scripts_unattended: false,
             browser_link_enabled: false,
+            mail_enabled: false,
+            mail_accounts: Vec::new(),
             file_tree_enabled: true,
             file_tree_follow: true,
             file_tree_auto_reveal: true,

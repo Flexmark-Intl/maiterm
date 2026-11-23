@@ -87,6 +87,7 @@ tauri-plugin-process = "2"
 # Apple store "so the keychain feature gets enabled"; `v1` was already doing that, and the
 # whole block was removed after a review checked keyring's manifest rather than believing it.
 keyring = "4"
+mail-parser = { version = "0.11", features = ["full_encoding"] }
 
 # Opening a .maiterm-workspace on Windows/Linux launches a second process with the path in
 # argv; this forwards it to the running one (docs/workspace-share.md §7). macOS has

@@ -2380,6 +2380,17 @@ export async function openFullDiskAccessSettings(): Promise<void> {
   return invoke('open_full_disk_access_settings');
 }
 
+/** Preferences → Mail (docs/apple-mail.md): every account in Apple Mail, for the human to tick. */
+export interface MailAccountsStatus {
+  access: 'ok' | 'no_full_disk_access' | 'no_mail_store' | 'unsupported' | 'not_macos';
+  detail: string | null;
+  accounts: { id: string; name: string; email: string | null; messages: number }[];
+}
+
+export async function mailListAccounts(): Promise<MailAccountsStatus> {
+  return invoke('mail_list_accounts');
+}
+
 // ─── Agent Defaults (docs/agent-defaults.md) ───────────────────────────────
 // Each agent's own settings file is the state: every value is what is on disk, null where
 // the key is absent (the agent's own default). Mirrors `agent_defaults::Status`.

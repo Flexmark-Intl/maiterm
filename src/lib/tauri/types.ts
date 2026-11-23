@@ -1945,6 +1945,10 @@ export interface Preferences {
   follow_ups_scripts_unattended: boolean;
   /** The Chrome extension link (docs/browser-link.md): host manifests + the browser MCP tools. */
   browser_link_enabled: boolean;
+  /** Apple Mail for agents (docs/apple-mail.md): the read-only mail tools. Human-only. */
+  mail_enabled: boolean;
+  /** Mail account ids agents may read; empty = none. Human-only. */
+  mail_accounts: string[];
   // Files (docs/file-tree.md §16). Required: `set_preferences` REPLACES the whole object, so
   // the store must round-trip every one of these or a save resets it to its default.
   /** Master switch: the column, Cmd/Ctrl+Shift+B and (later) the tree's MCP tools. Default true. */

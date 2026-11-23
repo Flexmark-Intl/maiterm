@@ -72,6 +72,8 @@ function createPreferencesStore() {
   let followUpsResumeAgent = $state(true);
   let followUpsScriptsUnattended = $state(false);
   let browserLinkEnabled = $state(false);
+  let mailEnabled = $state(false);
+  let mailAccounts = $state<string[]>([]);
   // Files (docs/file-tree.md §16). Every one is round-tripped by `save()`: set_preferences
   // replaces the whole object, so a field the store forgets is reset to its default.
   let fileTreeEnabled = $state(true);
@@ -216,6 +218,8 @@ function createPreferencesStore() {
     /** Agents' watch scripts run without the human approving each (docs/follow-ups.md §5.1). */
     get followUpsScriptsUnattended() { return followUpsScriptsUnattended; },
     get browserLinkEnabled() { return browserLinkEnabled; },
+    get mailEnabled() { return mailEnabled; },
+    get mailAccounts() { return mailAccounts; },
     get fileTreeEnabled() { return fileTreeEnabled; },
     get fileTreeFollow() { return fileTreeFollow; },
     get fileTreeAutoReveal() { return fileTreeAutoReveal; },
@@ -348,6 +352,8 @@ function createPreferencesStore() {
       followUpsResumeAgent = prefs.follow_ups_resume_agent ?? true;
       followUpsScriptsUnattended = prefs.follow_ups_scripts_unattended ?? false;
       browserLinkEnabled = prefs.browser_link_enabled ?? false;
+      mailEnabled = prefs.mail_enabled ?? false;
+      mailAccounts = prefs.mail_accounts ?? [];
       fileTreeEnabled = prefs.file_tree_enabled ?? true;
       fileTreeFollow = prefs.file_tree_follow ?? true;
       fileTreeAutoReveal = prefs.file_tree_auto_reveal ?? true;
@@ -733,6 +739,9 @@ function createPreferencesStore() {
       await this.save();
     },
 
+    async setMailEnabled(value: boolean) { mailEnabled = value; await this.save(); },
+    async setMailAccounts(value: string[]) { mailAccounts = value; await this.save(); },
+
     async setFileTreeEnabled(value: boolean) { fileTreeEnabled = value; await this.save(); },
     async setFileTreeFollow(value: boolean) { fileTreeFollow = value; await this.save(); },
     async setFileTreeAutoReveal(value: boolean) { fileTreeAutoReveal = value; await this.save(); },
@@ -1079,6 +1088,8 @@ function createPreferencesStore() {
       followUpsResumeAgent = prefs.follow_ups_resume_agent ?? true;
       followUpsScriptsUnattended = prefs.follow_ups_scripts_unattended ?? false;
       browserLinkEnabled = prefs.browser_link_enabled ?? false;
+      mailEnabled = prefs.mail_enabled ?? false;
+      mailAccounts = prefs.mail_accounts ?? [];
       fileTreeEnabled = prefs.file_tree_enabled ?? true;
       fileTreeFollow = prefs.file_tree_follow ?? true;
       fileTreeAutoReveal = prefs.file_tree_auto_reveal ?? true;
@@ -1203,6 +1214,8 @@ function createPreferencesStore() {
         follow_ups_resume_agent: followUpsResumeAgent,
         follow_ups_scripts_unattended: followUpsScriptsUnattended,
         browser_link_enabled: browserLinkEnabled,
+        mail_enabled: mailEnabled,
+        mail_accounts: mailAccounts,
         file_tree_enabled: fileTreeEnabled,
         file_tree_follow: fileTreeFollow,
         file_tree_auto_reveal: fileTreeAutoReveal,

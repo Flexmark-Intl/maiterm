@@ -64,6 +64,8 @@ pub struct ToolGates {
     pub browser_link: bool,
     /// The Files tools (docs/file-tree.md §9.6): `file_tree_enabled && file_tree_agent_tools`.
     pub file_tree: bool,
+    /// The Apple Mail tools (docs/apple-mail.md): `mail::tools_on`. Never to a Hive worker.
+    pub mail: bool,
     /// The caller's `hive_role` (docs/hive.md §7.2), from the tab its request names: the Hive
     /// tools that role holds. None for every other agent, so no one else carries their schemas.
     pub hive: Option<&'static str>,
@@ -78,6 +80,7 @@ impl ToolGates {
             escalations_to_overlord: prefs.escalations_to_overlord(),
             browser_link: prefs.browser_link_enabled,
             file_tree: file_tree_tools_on(prefs),
+            mail: crate::mail::tools_on(prefs),
             hive: None,
         }
     }
@@ -90,7 +93,7 @@ pub fn file_tree_tools_on(prefs: &crate::state::workspace::Preferences) -> bool 
 }
 
 pub fn tool_list_response(gates: ToolGates) -> Value {
-    let ToolGates { tasks: tasks_enabled, stack: stack_enabled, follow_ups_live, escalations_to_overlord, browser_link, file_tree, hive } = gates;
+    let ToolGates { tasks: tasks_enabled, stack: stack_enabled, follow_ups_live, escalations_to_overlord, browser_link, file_tree, mail, hive } = gates;
     // Tools are built in batches to stay under the serde_json::json! macro recursion limit (128).
     // Each batch is a small Vec<Value> that gets extended into the final tools array.
 
@@ -1375,6 +1378,9 @@ pub fn tool_list_response(gates: ToolGates) -> Value {
     if file_tree {
         tools.extend(file_tree_tools());
     }
+    if mail && hive != Some(crate::hive::ROLE_WORKER) {
+        tools.extend(crate::mail::tool_definitions());
+    }
     if let Some(role) = hive {
         tools.extend(crate::hive::tools::tool_definitions(role));
     } else if !cfg!(windows) {
@@ -1804,7 +1810,7 @@ mod tests {
 
     #[test]
     fn every_listed_tool_name_is_unique() {
-        let all = names(ToolGates { tasks: true, stack: true, follow_ups_live: true, escalations_to_overlord: true, browser_link: true, file_tree: true, hive: Some("coordinator") });
+        let all = names(ToolGates { tasks: true, stack: true, follow_ups_live: true, escalations_to_overlord: true, browser_link: true, file_tree: true, mail: true, hive: Some("coordinator") });
         let set: std::collections::HashSet<&String> = all.iter().collect();
         assert_eq!(set.len(), all.len());
     }

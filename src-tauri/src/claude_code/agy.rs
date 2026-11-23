@@ -838,6 +838,7 @@ mod tests {
             escalations_to_overlord: true,
             browser_link: true,
             file_tree: true,
+            mail: true,
             hive: None,
         });
         let by_name: HashMap<&str, &Value> = tools["tools"]

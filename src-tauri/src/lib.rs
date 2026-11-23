@@ -11,6 +11,7 @@ mod host_guard;
 mod hive;
 mod instance;
 mod instance_lock;
+mod mail;
 mod mailink;
 mod mcp_proxy;
 mod pty;
@@ -1252,6 +1253,7 @@ pub fn run() {
             commands::workspace::get_app_diagnostics,
             commands::workspace::read_app_logs,
             commands::system::check_full_disk_access,
+            mail::mail_list_accounts,
             commands::system::open_full_disk_access_settings,
             share::commands::share_export_preview,
             share::commands::share_export_write,
