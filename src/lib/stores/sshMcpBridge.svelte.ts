@@ -477,7 +477,9 @@ function noteHostWrites(hostKey: string, work: Promise<unknown>): void {
  * already has in flight there (`hostWrites`). Runs are serialized: changes made while one is
  * in flight are covered by ONE more run, which builds its script from the record at that
  * time, so within this window the last change lands last. Not ordered against another
- * window's writes, nor against a connect that STARTS while a refresh is running: both are a
+ * window's writes, nor against a connect whose setup scripts haven't started yet (it counts
+ * from `noteHostWrites`, after its tunnel is up), nor against a connect that starts while a
+ * refresh is running: each is a
  * few seconds' window, and the next connect or change sets the host right. An unticked
  * setting or the section switched off gives an empty script: nothing runs, and hosts keep
  * what they have.
