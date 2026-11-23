@@ -436,6 +436,7 @@ describe('localScriptFolder', () => {
     expect(localScriptFolder('/d', true)).toBe('D:\\');
     expect(localScriptFolder('D:', true)).toBe('D:\\');
     expect(localScriptFolder('\\\\server\\share\\repo', true)).toBe('\\\\server\\share\\repo');
+    expect(localScriptFolder('//server/share/repo', true)).toBe('\\\\server\\share\\repo'); // Git Bash
     expect(localScriptFolder('~/repo', true)).toBe('~/repo');
     expect(localScriptFolder('~\\repo', true)).toBe('~/repo');
   });

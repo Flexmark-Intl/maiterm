@@ -453,12 +453,16 @@ waits on conditions on THAT machine, so its script runs there:
 - **When follow-ups are off,** as for every follow-up.
 
 **Windows** (built 2026-11-22, `watch.rs` `#[cfg(windows)] execute`): the same contract, run by
-Git Bash (`windows_setup::git_bash_for_spawn`, the `bin\bash.exe` launcher, which Claude's hooks
-already require there) with `CREATE_NO_WINDOW`. A kill-on-close **job object** stands in for the
+Git Bash (the `bin\bash.exe` launcher, which Claude's hooks already require there; found by
+`watch_git_bash`: `CLAUDE_CODE_GIT_BASH_PATH`, else the full `windows_setup::git_bash` search,
+PATH included, off the main thread) with `CREATE_NO_WINDOW`. A kill-on-close **job object** stands in for the
 process group: the shell is started SUSPENDED, put in the job, and only then resumed, so nothing it
 starts can be outside the job, and the job is terminated when the run ends or times out
-(`RunJob`). Paths reach bash with forward slashes (`C:/…`, `$MAITERM_WATCH_STATE` too); the tab
-folder may be `C:\…`, Git Bash's `/c/…` or an OSC 7 `/C:/…` (`msys_to_windows`). The environment
+(`RunJob`). Paths reach bash with forward slashes (`C:/…`, `$MAITERM_WATCH_STATE` too). The
+folder is stored in Windows' own spelling when the follow-up is made (`localScriptFolder` in
+`followUps/model.ts`): Git Bash's `/c/…` or `//server/share`, or an OSC 7 `/C:/…`, become `C:\…` /
+`\\server\share` there, once, and Git Bash's own root (`/tmp`, `/usr/…`) is refused. Rust runs
+only that stored spelling, so approvals and Move project see one path. The environment
 is the same minimum plus what Windows programs need to start (`SystemRoot`, `ComSpec`, `TEMP`,
 `USERPROFILE`, …), and `PATH` is the registry's (`windows_setup::fresh_path`), what a new terminal
 gets. Without Git for Windows a run is broken, saying so. A remote script from a Windows desktop

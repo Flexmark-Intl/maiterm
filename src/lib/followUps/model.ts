@@ -127,8 +127,6 @@ export function isConditionKind(kind: string): boolean {
   return isEventKind(kind) || isScriptKind(kind);
 }
 
-/** A script that runs on an ssh host has its OWN kind, so an older build — which runs every
- *  `script` it holds and ignores `host` — never runs it here. `watch::REMOTE_KIND` in Rust. */
 /** The folder a LOCAL watch script runs in, as it is stored, or null when `cwd` doesn't name one.
  *  The stored spelling is what Rust runs in, what approvals are keyed by (`watch::place`) and
  *  what Move project rebases, so it must be the machine's own: on macOS/Linux an absolute or
@@ -149,9 +147,13 @@ export function localScriptFolder(cwd: string, windows: boolean): string | null 
     return `${drive[1].toUpperCase()}:\\${rest}`;
   }
   if (cwd.startsWith('\\\\')) return cwd;
+  // Git Bash spells a network share `//server/share/repo`.
+  if (/^\/\/[^/]+\/[^/]/.test(cwd)) return cwd.replace(/\//g, '\\');
   return null;
 }
 
+/** A script that runs on an ssh host has its OWN kind, so an older build — which runs every
+ *  `script` it holds and ignores `host` — never runs it here. `watch::REMOTE_KIND` in Rust. */
 export const REMOTE_SCRIPT_KIND = 'remote_script';
 
 /** A watch script of either kind (§5.1). */
