@@ -455,13 +455,32 @@ export async function refreshProxyEntries(): Promise<void> {
 }
 
 /**
+ * The remote settings writes this window has in flight per host: a connect's setup,
+ * Deshittify and Agent Defaults scripts, or a refresh. They all read-modify-write the same
+ * files there, so a refresh waits for what is in flight before it runs; otherwise it could
+ * drop the hooks a connect just wrote, or land before a connect's run built from an older
+ * record. Never rejects.
+ */
+const hostWrites = new Map<string, Promise<unknown>>();
+
+function noteHostWrites(hostKey: string, work: Promise<unknown>): void {
+  // Joined with what is already there: two tabs connecting to one host both count.
+  const done = Promise.all([hostWrites.get(hostKey), work.then(() => {}, () => {})]).then(() => {});
+  hostWrites.set(hostKey, done);
+  void done.then(() => { if (hostWrites.get(hostKey) === done) hostWrites.delete(hostKey); });
+}
+
+/**
  * Give every host bridged now the Agent Defaults as recorded (`agent-defaults-changed`), so a
  * setting ticked or changed in Preferences reaches hosts at once rather than at their next
- * connect (docs/agent-defaults.md §2.1). Runs are serialized: changes made while one is in
- * flight are covered by ONE more run, which builds its script from the record at that time,
- * so the last change always lands last. Idempotent, so another window doing the same is
- * harmless. An unticked setting or the section switched off gives an empty script: nothing
- * runs, and hosts keep what they have.
+ * connect (docs/agent-defaults.md §2.1). On each host it runs after the writes this window
+ * already has in flight there (`hostWrites`). Runs are serialized: changes made while one is
+ * in flight are covered by ONE more run, which builds its script from the record at that
+ * time, so within this window the last change lands last. Not ordered against another
+ * window's writes, nor against a connect that STARTS while a refresh is running: both are a
+ * few seconds' window, and the next connect or change sets the host right. An unticked
+ * setting or the section switched off gives an empty script: nothing runs, and hosts keep
+ * what they have.
  */
 let agentDefaultsRun: Promise<void> | null = null;
 let agentDefaultsAgain = false;
@@ -485,12 +504,18 @@ export function refreshAgentDefaults(): Promise<void> {
         continue;
       }
       if (!script.trim()) continue;
-      await Promise.all([...hosts].map(async (host) => {
-        try {
-          await commands.sshRunSetup(host, script);
-        } catch (e) {
-          logError(`SSH MCP bridge: Agent Defaults on ${host}: ${e}`);
-        }
+      await Promise.all([...hosts].map((host) => {
+        const before = hostWrites.get(host);
+        const run = (async () => {
+          await before;
+          try {
+            await commands.sshRunSetup(host, script);
+          } catch (e) {
+            logError(`SSH MCP bridge: Agent Defaults on ${host}: ${e}`);
+          }
+        })();
+        noteHostWrites(host, run);
+        return run;
       }));
     } while (agentDefaultsAgain);
   })().finally(() => { agentDefaultsRun = null; });
@@ -1094,15 +1119,14 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
       }
     })();
 
-    // Wait for remote setup(s) to finish before flipping to 'connected'.
-    // If any setup failed, this throws and the outer catch marks the bridge as failed.
-    await Promise.all(setupPromises);
-
     // Agent Defaults (docs/agent-defaults.md §2.1): the settings the human ticked, given to
     // this host as recorded here, removals included. Like Deshittify it never gates
     // 'connected', and it runs only AFTER the setup above and Deshittify's script: all of them
     // read-modify-write the same remote files, and running beside them would lose a write.
-    void (async () => {
+    // Skipped when a setup failed, as the bridge is then marked failed.
+    const settled = Promise.allSettled(setupPromises);
+    const agentDefaulted = (async () => {
+      if ((await settled).some((r) => r.status === 'rejected')) return;
       await deshittified;
       try {
         const script = await commands.buildAgentDefaultsSetupScript();
@@ -1111,6 +1135,12 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
         logError("SSH MCP bridge: Agent Defaults setup failed: " + e);
       }
     })();
+    // A refresh of this host (refreshAgentDefaults) waits for all of it to land.
+    noteHostWrites(hostKey, Promise.all([settled, deshittified, agentDefaulted]));
+
+    // Wait for remote setup(s) to finish before flipping to 'connected'.
+    // If any setup failed, this throws and the outer catch marks the bridge as failed.
+    await Promise.all(setupPromises);
 
     // A teardown raced us (user logged out mid-setup) — don't resurrect the bridge.
     if ((bridgeEpoch.get(tabId) ?? 0) !== epoch) {

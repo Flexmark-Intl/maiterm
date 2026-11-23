@@ -89,7 +89,11 @@ is left alone everywhere, which is how a host keeps its own value.
   remote files), never gating `connected`; also appended last to "Install MCP for Current
   User". A tick, a value or the switch changed in Preferences also reaches hosts bridged NOW:
   the command emits `agent-defaults-changed` and every window runs the script on its connected
-  hosts (`refreshAgentDefaults`, serialized so the last change lands last). Without this, a host
+  hosts (`refreshAgentDefaults`). On each host it waits for the remote writes that window
+  already has in flight there (a connect's setup, Deshittify and Agent Defaults runs), and
+  refreshes are serialized, so within a window the last change lands last. Not ordered against
+  another window's writes or a connect that starts mid-refresh: seconds wide, and the next
+  connect or change corrects it. Without this, a host
   whose tabs bridged before the change kept its old values until a reconnect (2026-11-23:
   server02 had no advisor after the human ticked it). Two python3 snippets: a JSON merge for `~/.claude/settings.json` and
   `~/.gemini/antigravity-cli/settings.json` (`[path, value]` pairs; a removal also drops an
