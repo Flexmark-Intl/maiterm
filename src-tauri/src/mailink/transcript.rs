@@ -2481,15 +2481,6 @@ fn image_message_caption(blocks: &[Value]) -> String {
     strip_leading_image_refs(joined.trim()).trim().to_string()
 }
 
-/// Strip a leading run of image references (and surrounding whitespace) from `s`, leaving the bare
-/// caption byte-equal to what the phone sent. Two forms are consumed, in any leading order:
-///   - `[Image #N]` chips — Claude Code's native composer markers when an image is attached.
-///   - `…/maiterm-mailink-<uuid>.<ext>` temp paths — what the maiLink image inject types into the
-///     PTY when CC does NOT convert the path to a chip. Left in, they survive as a literal
-///     `"<path> <caption>"` user turn → a duplicate raw-path bubble on the phone on thread re-open.
-/// A whitespace-delimited leading token is treated as one of ours only if it is an absolute path
-/// containing the `maiterm-mailink-` sidecar marker, so ordinary user text is never touched.
-/// A no-op when the text starts with neither form.
 /// `/…` (macOS, Linux, an ssh host's `/tmp`) or a Windows drive path, `C:\…` / `C:/…`: on
 /// Windows the staged attachment is under `%TEMP%`, and a `/`-only test left its path in the
 /// thread as text.
@@ -2498,6 +2489,15 @@ fn is_absolute_path_token(token: &str) -> bool {
     token.starts_with('/') || (b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/'))
 }
 
+/// Strip a leading run of image references (and surrounding whitespace) from `s`, leaving the bare
+/// caption byte-equal to what the phone sent. Two forms are consumed, in any leading order:
+///   - `[Image #N]` chips — Claude Code's native composer markers when an image is attached.
+///   - `…/maiterm-mailink-<uuid>.<ext>` temp paths — what the maiLink image inject types into the
+///     PTY when CC does NOT convert the path to a chip. Left in, they survive as a literal
+///     `"<path> <caption>"` user turn → a duplicate raw-path bubble on the phone on thread re-open.
+/// A whitespace-delimited leading token is treated as one of ours only if it is an absolute path
+/// (`is_absolute_path_token`) containing the `maiterm-mailink-` sidecar marker, so ordinary user
+/// text is never touched. A no-op when the text starts with neither form.
 fn strip_leading_image_refs(s: &str) -> &str {
     let mut s = s.trim_start();
     loop {
