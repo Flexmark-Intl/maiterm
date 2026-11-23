@@ -89,7 +89,7 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "readMail",
-            "description": "Read one message: headers (from, to, cc, reply-to, date, Message-ID, list), the body as text (HTML converted; format:\"html\" for the raw HTML), its attachments (name, type, size, whether Mail downloaded it) and `open_url`, a message:// link that opens it in Mail for your human. Quoted reply history is trimmed unless full:true; long bodies page with offset/max_chars. Read-only: the message stays unread in Mail.",
+            "description": "Read one message: headers (from, to, cc, reply-to, date, Message-ID, list), the body as text (HTML converted; format:\"html\" for the raw HTML), its attachments (name, type, size, whether Mail downloaded it) and `open_url`, a message:// link that opens it in Mail for your human. A trailing block of `>`-quoted history (and its \"wrote:\" line) is cut unless full:true, and `quoted_history_trimmed` says when; history that isn't `>`-quoted (Outlook-style, or HTML mail) comes back whole. Long bodies page with offset/max_chars. Read-only: the message stays unread in Mail.",
             "inputSchema": { "type": "object", "properties": {
                 "tabId": tab, "id": id,
                 "format": { "type": "string", "enum": ["text", "html"], "description": "Body as text (default) or the raw HTML" },
@@ -100,7 +100,7 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "readMailThread",
-            "description": "Read the whole conversation a message belongs to, oldest first, each message's text with its quoted history trimmed (up to 50 messages, 4000 characters each). The cheap way to follow a back-and-forth. Read-only.",
+            "description": "Read the conversation a message belongs to: its newest 50 messages, shown oldest first, each message's text up to 4000 characters with a trailing `>`-quoted history cut (`quoted_history_trimmed`). A longer thread says how many older messages it left out (`older_not_shown`); `body_cut` marks a message readMail reads in full. The cheap way to follow a back-and-forth. Read-only.",
             "inputSchema": { "type": "object", "properties": { "tabId": tab, "id": id }, "required": ["id"] }
         }),
         json!({
@@ -573,8 +573,8 @@ fn read(ctx: &Ctx, args: &Value) -> Answer {
 
 fn thread(ctx: &Ctx, args: &Value) -> Answer {
     let row = ctx.row_for(args)?;
-    let (rows, total) = if row.conversation_id == 0 {
-        (vec![row.clone()], 1)
+    let (rows, total, capped) = if row.conversation_id == 0 {
+        (vec![row.clone()], 1, false)
     } else {
         store::thread_rows(&ctx.conn, row.conversation_id, THREAD_MAX, |r| ctx.visible(r)).map_err(|e| err("mail_read_failed", e.to_string()))?
     };
@@ -606,10 +606,11 @@ fn thread(ctx: &Ctx, args: &Value) -> Answer {
         })
         .collect();
     let mut out = json!({ "messages": messages, "thread_messages": total, "open_url": ctx.open_url(&row), "note": UNTRUSTED });
-    if total > messages.len() {
+    if total > messages.len() || capped {
+        if capped { out["thread_messages"] = json!(format!("at least {total}")); }
         out["older_not_shown"] = json!(format!(
             "This thread has {}{total} messages; these are the newest {}. Older ones: searchMail with subject and until, then readMail.",
-            if total >= store::THREAD_SCAN_CAP { "at least " } else { "" },
+            if capped { "at least " } else { "" },
             messages.len()
         ));
     }

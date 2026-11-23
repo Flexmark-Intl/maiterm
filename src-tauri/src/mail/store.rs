@@ -478,22 +478,25 @@ pub fn thread_size(conn: &Connection, conversation_id: i64) -> i64 {
 pub const THREAD_SCAN_CAP: usize = 5_000;
 
 /// The newest `limit` messages of a conversation that `keep` accepts, one per global id, returned
-/// oldest first, plus how many distinct accepted messages the conversation has in all. `keep`
+/// oldest first, plus how many distinct accepted messages it counted and whether it stopped
+/// counting at `THREAD_SCAN_CAP` rows (then the count is a floor). `keep`
 /// runs BEFORE the duplicate fold, so a copy that isn't kept (another account's) can't stand in
 /// for one that is.
-pub fn thread_rows(conn: &Connection, conversation_id: i64, limit: usize, keep: impl Fn(&Row) -> bool) -> rusqlite::Result<(Vec<Row>, usize)> {
+pub fn thread_rows(conn: &Connection, conversation_id: i64, limit: usize, keep: impl Fn(&Row) -> bool) -> rusqlite::Result<(Vec<Row>, usize, bool)> {
     let sql = format!("SELECT {ROW_COLS} {ROW_JOINS} WHERE m.conversation_id = ? AND +m.deleted = 0 ORDER BY m.date_received DESC, m.ROWID DESC");
     let mut st = conn.prepare(&sql)?;
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     // A notification "thread" can hold thousands of messages: count at most this many rows.
+    let mut scanned = 0;
     for r in st.query_map([conversation_id], row_from)?.flatten().take(THREAD_SCAN_CAP) {
+        scanned += 1;
         if keep(&r) && seen.insert(r.global_id) && out.len() < limit {
             out.push(r);
         }
     }
     out.reverse();
-    Ok((out, seen.len()))
+    Ok((out, seen.len(), scanned == THREAD_SCAN_CAP))
 }
 
 pub fn message_id_header(conn: &Connection, global_id: i64) -> Option<String> {
@@ -641,10 +644,10 @@ mod tests {
     #[test]
     fn threads_fold_duplicates_oldest_first() {
         let c = fixture();
-        let (rows, total) = thread_rows(&c, 7, 50, |_| true).unwrap();
-        assert_eq!((rows.len(), total), (1, 1));
+        let (rows, total, capped) = thread_rows(&c, 7, 50, |_| true).unwrap();
+        assert_eq!((rows.len(), total, capped), (1, 1, false));
         // A copy that isn't kept can't stand in for the one that is.
-        let (rows, _) = thread_rows(&c, 7, 50, |r| r.rowid == 10).unwrap();
+        let (rows, _, _) = thread_rows(&c, 7, 50, |r| r.rowid == 10).unwrap();
         assert_eq!(rows[0].rowid, 10);
         assert_eq!(thread_size(&c, 8), 1);
         assert_eq!(message_id_header(&c, 100).as_deref(), Some("<abc@acme.test>"));
