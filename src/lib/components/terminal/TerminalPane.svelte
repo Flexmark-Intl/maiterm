@@ -249,6 +249,15 @@
   // the selection mousedown handler passes clicks to xterm, so the highlight on
   // screen is xterm's own selection, not Rust's. Copy has to read that one too, or
   // Copy is greyed out and Cmd/Ctrl+C sends ^C over a visible selection.
+  //
+  // Only on the alternate screen: on the normal screen xterm's selection is a leftover
+  // nothing here clears (macOS's right-click selects a word in it, a left click never
+  // reaches it, frames never scroll it away), and honouring it there would turn a
+  // Cmd+C meant as ^C into a copy of one stale word.
+  function xtermSelectionIsLive(): boolean {
+    return lastFrameAlternateScreen && terminal.hasSelection();
+  }
+
   async function copyXtermSelection() {
     const text = terminal.getSelection();
     if (text) await clipboardWriteText(text);
@@ -1110,7 +1119,7 @@
             if (text) clipboardWriteText(text).catch(e => logError(String(e)));
             clearSelection(ptyId).then(applyFrame).catch(() => {});
           }).catch(e => logError(String(e)));
-        } else if (terminal.hasSelection()) {
+        } else if (xtermSelectionIsLive()) {
           copyXtermSelection().catch(e => logError(String(e)));
         } else {
           writeTerminal(ptyId, [0x03]).catch(e => logError(String(e)));
@@ -1878,7 +1887,7 @@
       {
         label: 'Copy',
         shortcut: `${modSymbol}C`,
-        disabled: !hasRustSelection && !terminal.hasSelection(),
+        disabled: !hasRustSelection && !xtermSelectionIsLive(),
         action: async () => {
           if (!hasRustSelection) {
             await copyXtermSelection();
