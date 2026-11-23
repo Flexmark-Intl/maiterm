@@ -854,6 +854,21 @@ fn clean(bytes: &[u8], max_chars: usize, tail: bool) -> String {
 
 /// The user's login PATH, read once. maiTerm launched from the Finder has only the system PATH,
 /// and a watch script calling `gh` or `jq` needs what the user's own terminal has.
+/// Windows has no login shell to ask: the PATH a new terminal would get is the one stored in the
+/// registry (machine, then user), which is what `windows_setup` reads for every tab.
+#[cfg(windows)]
+pub(crate) async fn login_path() -> String {
+    static PATH: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
+    PATH.get_or_init(|| async {
+        tokio::task::spawn_blocking(crate::windows_setup::fresh_path)
+            .await
+            .unwrap_or_else(|_| std::env::var("PATH").unwrap_or_default())
+    })
+    .await
+    .clone()
+}
+
+#[cfg(not(windows))]
 pub(crate) async fn login_path() -> String {
     static PATH: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
     PATH.get_or_init(|| async {
@@ -879,12 +894,38 @@ pub(crate) async fn login_path() -> String {
     .clone()
 }
 
-/// A tab's recorded folder is often home-relative (`last_cwd` = "~/repo").
+/// A tab's recorded folder is often home-relative (`last_cwd` = "~/repo"). On Windows it may
+/// also be Git Bash's spelling of a drive folder ("/c/Users/ann/repo", from its OSC 7), which
+/// Windows itself can't open.
 fn expand_home(cwd: &str) -> PathBuf {
     match (cwd.strip_prefix('~'), dirs::home_dir()) {
-        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => home.join(rest.trim_start_matches('/')),
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\') => {
+            home.join(rest.trim_start_matches(['/', '\\']))
+        }
+        _ if cfg!(windows) => PathBuf::from(msys_to_windows(cwd).unwrap_or_else(|| cwd.to_string())),
         _ => PathBuf::from(cwd),
     }
+}
+
+/// "/c/Users/ann" (Git Bash's mount) or "/C:/Users/ann" (a `file:///C:/…` OSC 7) →
+/// "C:\Users\ann"; None for anything that isn't a drive folder in one of those spellings.
+fn msys_to_windows(p: &str) -> Option<String> {
+    let rest = p.strip_prefix('/')?;
+    let mut chars = rest.chars();
+    let drive = chars.next().filter(|c| c.is_ascii_alphabetic())?;
+    let after = chars.as_str();
+    let after = after.strip_prefix(':').unwrap_or(after);
+    if !(after.is_empty() || after.starts_with('/')) {
+        return None;
+    }
+    Some(format!("{}:\\{}", drive.to_ascii_uppercase(), after.trim_start_matches('/').replace('/', "\\")))
+}
+
+/// A Windows path as Git Bash can take it as an argument or a variable: forward slashes
+/// ("C:/Users/ann/x.sh"), which its runtime opens like the native spelling.
+#[cfg(any(windows, test))]
+fn bash_path(p: &Path) -> String {
+    p.display().to_string().replace('\\', "/")
 }
 
 async fn read_capped<R: tokio::io::AsyncRead + Unpin>(r: Option<R>) -> Vec<u8> {
@@ -896,9 +937,223 @@ async fn read_capped<R: tokio::io::AsyncRead + Unpin>(r: Option<R>) -> Vec<u8> {
     buf
 }
 
-#[cfg(not(unix))]
-async fn execute(_c: &Candidate, _dir: &Path) -> Outcome {
-    Outcome::Broken("watch scripts run on macOS and Linux only".into())
+/// What the script's exit status means (the contract in the module header).
+fn outcome_of(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Outcome {
+    match code {
+        Some(0) => Outcome::Met(clean(stdout, REPORT_CHARS, false)),
+        Some(1) => Outcome::NotYet,
+        code => {
+            let why = code.map_or_else(|| "it was killed by a signal".to_string(), |n| format!("exit {n}"));
+            let err = clean(stderr, STDERR_CHARS, true);
+            Outcome::Broken(if err.is_empty() { why } else { format!("{why}: {err}") })
+        }
+    }
+}
+
+/// A kill-on-close job object holding one run's processes: Windows' process group. Dropping it
+/// terminates everything still in it — the script, the Git Bash launcher's real shell, and
+/// whatever they started — so no exit path leaves anything behind.
+#[cfg(windows)]
+struct RunJob(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+unsafe impl Send for RunJob {}
+
+#[cfg(windows)]
+impl RunJob {
+    fn new() -> Result<Self, String> {
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        // SAFETY: plain Win32 calls on a handle this function owns; the struct is zeroed POD.
+        unsafe {
+            let h = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if h.is_null() {
+                return Err(format!("could not create a job object: {}", std::io::Error::last_os_error()));
+            }
+            let job = RunJob(h);
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok = SetInformationJobObject(
+                h,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if ok == 0 {
+                return Err(format!("could not set up the job object: {}", std::io::Error::last_os_error()));
+            }
+            Ok(job)
+        }
+    }
+
+    /// Put a process that was started suspended into the job, then let it run. Assigning before
+    /// its first instruction is what makes "everything it starts" true: a child created before
+    /// the assignment would be outside the job.
+    fn adopt_and_resume(&self, process: std::os::windows::io::RawHandle, pid: u32) -> Result<(), String> {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+        };
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+        // SAFETY: `process` is the live child's handle (owned by tokio's Child, which outlives
+        // this call); every handle opened here is closed here.
+        unsafe {
+            if AssignProcessToJobObject(self.0, process as _) == 0 {
+                return Err(format!("could not put it in a job object: {}", std::io::Error::last_os_error()));
+            }
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if snap == INVALID_HANDLE_VALUE {
+                return Err(format!("could not list its threads: {}", std::io::Error::last_os_error()));
+            }
+            let mut entry: THREADENTRY32 = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            let mut resumed = 0;
+            let mut more = Thread32First(snap, &mut entry) != 0;
+            while more {
+                if entry.th32OwnerProcessID == pid {
+                    let t = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                    if !t.is_null() {
+                        if ResumeThread(t) != u32::MAX {
+                            resumed += 1;
+                        }
+                        CloseHandle(t);
+                    }
+                }
+                more = Thread32Next(snap, &mut entry) != 0;
+            }
+            CloseHandle(snap);
+            if resumed == 0 {
+                return Err("could not start it: its thread wouldn't resume".into());
+            }
+            Ok(())
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for RunJob {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+        // SAFETY: the handle is ours and closed exactly once.
+        unsafe {
+            TerminateJobObject(self.0, 1);
+            CloseHandle(self.0);
+        }
+    }
+}
+
+/// One run on Windows: the same contract as on macOS and Linux, run by Git Bash — the shell
+/// maiTerm's Claude setup already requires there, and the one an agent's POSIX script means —
+/// inside a kill-on-close job object in place of a process group.
+#[cfg(windows)]
+async fn execute(c: &Candidate, dir: &Path) -> Outcome {
+    use std::process::Stdio;
+    const CREATE_SUSPENDED: u32 = 0x0000_0004;
+    // bash.exe is a console program: without this every run would flash a console window.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        return Outcome::Broken(format!("could not create {}: {e}", dir.display()));
+    }
+    let script_path = dir.join(format!("{}.sh", c.id));
+    let state_path = dir.join(format!("{}.state", c.id));
+    // Written on every run from the stored text — the approved text is the only one that runs.
+    if let Err(e) = std::fs::write(&script_path, &c.script) {
+        return Outcome::Broken(format!("could not write the script: {e}"));
+    }
+    if !state_path.exists() {
+        let _ = std::fs::write(&state_path, b"");
+    }
+    let cwd = expand_home(&c.cwd);
+    if !cwd.is_dir() {
+        return Outcome::Broken(format!("its folder {} no longer exists", c.cwd));
+    }
+    let Some(bash) = crate::windows_setup::git_bash_for_spawn() else {
+        return Outcome::Broken(
+            "watch scripts on Windows run under Git Bash, and Git for Windows isn't installed".into(),
+        );
+    };
+
+    let mut cmd = tokio::process::Command::new(&bash);
+    // A shebang names its own interpreter; Git Bash's runtime honours one when the file is run
+    // as a program, which `exec` does. Without one, the file is bash's script.
+    if c.script.starts_with("#!") {
+        cmd.args(["-c", "exec \"$0\""]).arg(bash_path(&script_path));
+    } else {
+        cmd.arg(bash_path(&script_path));
+    }
+    cmd.current_dir(&cwd)
+        .env_clear()
+        .env("PATH", login_path().await)
+        .env("LANG", std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".into()))
+        .env("MAITERM_WATCH_STATE", bash_path(&state_path))
+        .env("MAITERM_WATCH_LAST_RUN", c.last_run.map(|t| t.to_string()).unwrap_or_default())
+        .env("MAITERM_TAB_ID", &c.tab_id);
+    if let Some(home) = dirs::home_dir() {
+        cmd.env("HOME", bash_path(&home));
+    }
+    // What Windows programs need to start at all (SystemRoot above all), and the user's own
+    // folders — still never the agent's environment.
+    for key in [
+        "SystemRoot", "SystemDrive", "windir", "ComSpec", "PATHEXT", "TEMP", "TMP", "USERPROFILE",
+        "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "ProgramData", "ProgramFiles",
+        "ProgramFiles(x86)", "ProgramW6432", "CommonProgramFiles", "CommonProgramFiles(x86)",
+        "CommonProgramW6432", "USERNAME", "USERDOMAIN", "COMPUTERNAME", "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE", "OS",
+    ] {
+        if let Ok(v) = std::env::var(key) {
+            cmd.env(key, v);
+        }
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW)
+        .kill_on_drop(true);
+
+    let job = match RunJob::new() {
+        Ok(j) => j,
+        Err(e) => return Outcome::Broken(e),
+    };
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return Outcome::Broken(format!("it could not start: {e}")),
+    };
+    let adopted = match (child.raw_handle(), child.id()) {
+        (Some(h), Some(pid)) => job.adopt_and_resume(h, pid),
+        _ => Err("it exited before it could start".into()),
+    };
+    if let Err(e) = adopted {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        return Outcome::Broken(e);
+    }
+    let out_task = tokio::spawn(read_capped(child.stdout.take()));
+    let err_task = tokio::spawn(read_capped(child.stderr.take()));
+
+    let status = tokio::time::timeout(c.timeout, child.wait()).await;
+    // Whatever happened, nothing the script started outlives it.
+    drop(job);
+    let status = match status {
+        Ok(Ok(s)) => Some(s),
+        Ok(Err(e)) => return Outcome::Broken(format!("waiting for it failed: {e}")),
+        Err(_) => {
+            let _ = child.wait().await;
+            None
+        }
+    };
+    let grab = |t: tokio::task::JoinHandle<Vec<u8>>| async move {
+        tokio::time::timeout(Duration::from_secs(1), t).await.ok().and_then(|r| r.ok()).unwrap_or_default()
+    };
+    let (stdout, stderr) = (grab(out_task).await, grab(err_task).await);
+    let Some(status) = status else {
+        return Outcome::Broken(format!("it timed out after {}s", c.timeout.as_secs()));
+    };
+    outcome_of(status.code(), &stdout, &stderr)
 }
 
 /// One run, its script and state files in `dir`.
@@ -992,15 +1247,7 @@ async fn execute(c: &Candidate, dir: &Path) -> Outcome {
     let Some(status) = status else {
         return Outcome::Broken(format!("it timed out after {}s", c.timeout.as_secs()));
     };
-    match status.code() {
-        Some(0) => Outcome::Met(clean(&stdout, REPORT_CHARS, false)),
-        Some(1) => Outcome::NotYet,
-        code => {
-            let why = code.map_or_else(|| "it was killed by a signal".to_string(), |n| format!("exit {n}"));
-            let err = clean(&stderr, STDERR_CHARS, true);
-            Outcome::Broken(if err.is_empty() { why } else { format!("{why}: {err}") })
-        }
-    }
+    outcome_of(status.code(), &stdout, &stderr)
 }
 
 #[cfg(all(test, unix))]
@@ -1409,5 +1656,150 @@ mod tests {
         assert!(runs(false, true), "the waiver is on");
         // ...and turning the waiver off withdraws it: nothing was stored on the script.
         assert!(!runs(false, false));
+    }
+}
+
+/// Platform-free pieces of the Windows runner.
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn git_bash_drive_folders_become_windows_paths() {
+        assert_eq!(msys_to_windows("/c/Users/ann/repo").as_deref(), Some(r"C:\Users\ann\repo"));
+        assert_eq!(msys_to_windows("/d").as_deref(), Some(r"D:\"));
+        assert_eq!(msys_to_windows("/d/").as_deref(), Some(r"D:\"));
+        assert_eq!(msys_to_windows("/C:/Users/ann").as_deref(), Some(r"C:\Users\ann"));
+        assert_eq!(msys_to_windows("/C:").as_deref(), Some(r"C:\"));
+        // Not a drive mount: a real POSIX folder, or a Windows path already.
+        assert_eq!(msys_to_windows("/usr/bin"), None);
+        assert_eq!(msys_to_windows(r"C:\Users\ann"), None);
+        assert_eq!(msys_to_windows("relative/c"), None);
+    }
+
+    #[test]
+    fn bash_gets_forward_slashes() {
+        assert_eq!(bash_path(Path::new(r"C:\Users\ann\x.sh")), "C:/Users/ann/x.sh");
+    }
+}
+
+/// The Windows runner, for real: Git Bash is on every windows-latest CI runner, and the Test
+/// workflow's Windows job is the only place this compiles and runs before a human tries it.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    fn candidate(script: &str, cwd: &Path, timeout: u64) -> Candidate {
+        Candidate {
+            id: format!("test-{}", uuid::Uuid::new_v4()),
+            tab_id: "tab".into(),
+            script: script.into(),
+            cwd: cwd.display().to_string(),
+            host: None,
+            every: Duration::from_secs(60),
+            timeout: Duration::from_secs(timeout),
+            last_run: Some(1_700_000_000),
+        }
+    }
+
+    fn scratch() -> PathBuf {
+        std::env::temp_dir().join(format!("maiterm-watch-test-{}", uuid::Uuid::new_v4()))
+    }
+
+    async fn run_in(script: &str, cwd: &Path, timeout: u64) -> Outcome {
+        let dir = scratch();
+        let o = execute(&candidate(script, cwd, timeout), &dir).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        o
+    }
+
+    async fn run(script: &str, timeout: u64) -> Outcome {
+        run_in(script, &std::env::temp_dir(), timeout).await
+    }
+
+    /// Has the Windows process `pid` exited (waiting at most `secs` — a deadline that turns a
+    /// hang into a failure, never a guess at how long a kill takes)?
+    fn exited(pid: u32, secs: u32) -> bool {
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
+        // SAFETY: a handle opened and closed here.
+        unsafe {
+            let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+            if h.is_null() {
+                return true; // no such process any more
+            }
+            let r = WaitForSingleObject(h, secs * 1000);
+            CloseHandle(h);
+            r == WAIT_OBJECT_0
+        }
+    }
+
+    #[tokio::test]
+    async fn exit_codes_mean_met_not_yet_and_broken() {
+        let o = run("echo '3 new files'\nexit 0\n", 20).await;
+        assert!(matches!(o, Outcome::Met(ref s) if s == "3 new files"), "{o:?}");
+        let o = run("exit 1", 20).await;
+        assert!(matches!(o, Outcome::NotYet), "{o:?}");
+        let o = run("echo oops >&2; exit 2", 20).await;
+        assert!(matches!(o, Outcome::Broken(ref s) if s == "exit 2: oops"), "{o:?}");
+    }
+
+    #[tokio::test]
+    async fn a_shebang_runs_as_itself() {
+        let o = run("#!/bin/bash\n[[ -n \"$BASH_VERSION\" ]] && echo bash\n", 20).await;
+        assert!(matches!(o, Outcome::Met(ref s) if s == "bash"), "{o:?}");
+    }
+
+    #[tokio::test]
+    async fn it_runs_in_the_tab_folder_with_state_and_posix_tools() {
+        let folder = scratch();
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("out.csv"), "a,b\n").unwrap();
+        let dir = scratch();
+        let c = candidate(
+            "test -s out.csv || exit 3\nn=$(cat \"$MAITERM_WATCH_STATE\"); n=$((${n:-0}+1)); echo $n > \"$MAITERM_WATCH_STATE\"\n\
+             [ \"$n\" -ge 2 ] && { echo \"run $n after $MAITERM_WATCH_LAST_RUN\"; exit 0; }; exit 1\n",
+            &folder,
+            20,
+        );
+        let first = execute(&c, &dir).await;
+        let second = execute(&c, &dir).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&folder);
+        assert!(matches!(first, Outcome::NotYet), "{first:?}");
+        assert!(matches!(second, Outcome::Met(ref s) if s == "run 2 after 1700000000"), "{second:?}");
+    }
+
+    #[tokio::test]
+    async fn a_git_bash_spelled_folder_is_found() {
+        let folder = scratch();
+        std::fs::create_dir_all(&folder).unwrap();
+        let p = folder.display().to_string().replace('\\', "/");
+        let (drive, rest) = p.split_once(":/").unwrap();
+        let msys = format!("/{}/{}", drive.to_ascii_lowercase(), rest);
+        let o = run_in("pwd -W", Path::new(&msys), 20).await;
+        let _ = std::fs::remove_dir_all(&folder);
+        assert!(matches!(o, Outcome::Met(ref s) if s.eq_ignore_ascii_case(&p)), "{o:?} (wanted {p})");
+    }
+
+    /// Everything a run started is gone once it ends, finished or timed out: the job object.
+    #[tokio::test]
+    async fn nothing_it_started_outlives_it() {
+        // A native Windows program in the background; its Windows pid is what the script prints.
+        let o = run("ping -n 60 127.0.0.1 > /dev/null &\necho \"$(cat /proc/$!/winpid)\"\nexit 0\n", 20).await;
+        let Outcome::Met(pid) = o else { panic!("{o:?}") };
+        let pid: u32 = pid.trim().parse().expect("a pid");
+        assert!(exited(pid, 10), "the background program outlived a finished run");
+
+        let marker = scratch();
+        let script = format!(
+            "ping -n 60 127.0.0.1 > /dev/null &\ncat /proc/$!/winpid > '{}'\nsleep 60\n",
+            bash_path(&marker)
+        );
+        let o = run(&script, 3).await;
+        assert!(matches!(o, Outcome::Broken(ref s) if s.contains("timed out")), "{o:?}");
+        let pid: u32 = std::fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+        let _ = std::fs::remove_file(&marker);
+        assert!(exited(pid, 10), "the background program outlived a timed-out run");
     }
 }

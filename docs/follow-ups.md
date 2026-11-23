@@ -452,7 +452,17 @@ waits on conditions on THAT machine, so its script runs there:
 - **Exempt tabs,** and when maiTerm can't tell the tab's folder.
 - **When follow-ups are off,** as for every follow-up.
 
-Windows has no process groups here: a script there is a broken run, reported after three.
+**Windows** (built 2026-11-22, `watch.rs` `#[cfg(windows)] execute`): the same contract, run by
+Git Bash (`windows_setup::git_bash_for_spawn`, the `bin\bash.exe` launcher, which Claude's hooks
+already require there) with `CREATE_NO_WINDOW`. A kill-on-close **job object** stands in for the
+process group: the shell is started SUSPENDED, put in the job, and only then resumed, so nothing it
+starts can be outside the job, and the job is terminated when the run ends or times out
+(`RunJob`). Paths reach bash with forward slashes (`C:/…`, `$MAITERM_WATCH_STATE` too); the tab
+folder may be `C:\…`, Git Bash's `/c/…` or an OSC 7 `/C:/…` (`msys_to_windows`). The environment
+is the same minimum plus what Windows programs need to start (`SystemRoot`, `ComSpec`, `TEMP`,
+`USERPROFILE`, …), and `PATH` is the registry's (`windows_setup::fresh_path`), what a new terminal
+gets. Without Git for Windows a run is broken, saying so. A remote script from a Windows desktop
+is untested: it relies on the tunnel's ControlMaster socket, which Windows' OpenSSH doesn't have.
 
 **Approval** (decided 2026-10-01). Today every command an agent runs passes its runtime's
 permission check at the moment it runs, while a human could see it. A watch script runs later,

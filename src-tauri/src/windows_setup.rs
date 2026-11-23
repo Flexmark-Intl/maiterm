@@ -307,6 +307,12 @@ mod platform {
         Places { path_dirs: fresh_path_dirs(), ..known_places() }
     }
 
+    /// The PATH a terminal opened now would get, joined: what a watch script runs with
+    /// (`watch::login_path`). Reads the registry, so never on the main thread.
+    pub fn fresh_path() -> String {
+        fresh_path_dirs().join(";")
+    }
+
     /// Without the PATH walk: what every spawn uses, where a file check per PATH folder could
     /// stall on an unreachable network folder. A Git found only through PATH is one Claude
     /// finds the same way, so a spawn needs no variable for it.
@@ -495,7 +501,7 @@ mod platform {
 }
 
 #[cfg(windows)]
-pub use platform::{git_bash, git_bash_for_spawn, tab_env};
+pub use platform::{fresh_path, git_bash, git_bash_for_spawn, tab_env};
 
 #[tauri::command]
 pub async fn detect_claude_setup(state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>) -> Result<ClaudeSetupReport, String> {

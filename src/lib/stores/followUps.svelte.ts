@@ -480,9 +480,12 @@ function createFollowUpsStore() {
     // Ssh without a tunnel of maiTerm's: running it here would check the wrong machine.
     const remote = { ok: false as const, reason: 'remote_tab', detail: 'This tab runs over ssh, but maiTerm has no connection of its own to that host (its SSH bridge isn’t up), so it can’t run the script there. Use a time follow-up, or a service or task trigger.' };
     if (sshNow || tab.restore_ssh_command || tab.auto_resume_ssh_command) return remote;
-    // `last_cwd` is often home-relative ("~/repo"); Rust expands a leading `~` when it runs.
+    // `last_cwd` is often home-relative ("~/repo"); Rust expands a leading `~` when it runs. On
+    // Windows a folder is `C:\…` (or a `\\server\share`), and Git Bash's own spelling `/c/…` or an
+    // OSC 7 `/C:/…` both start with `/`; Rust maps those to the Windows path (`watch::expand_home`).
     const cwd = terminalsStore.getOsc(tab.id)?.cwd || tab.last_cwd || '';
-    if (!(cwd.startsWith('/') || cwd === '~' || cwd.startsWith('~/'))) {
+    const windowsAbsolute = /^[A-Za-z]:[\\/]/.test(cwd) || cwd.startsWith('\\\\');
+    if (!(cwd.startsWith('/') || cwd === '~' || cwd.startsWith('~/') || windowsAbsolute)) {
       return { ok: false, reason: 'no_folder', detail: 'maiTerm can’t tell which folder this tab is in, so it doesn’t know where to run the script.' };
     }
     return { ok: true, cwd };
