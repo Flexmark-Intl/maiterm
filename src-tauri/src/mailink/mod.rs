@@ -5637,7 +5637,7 @@ pub(crate) fn mod_ask_for_prompt(app: &AppState, tab_id: &str, kind: &str) -> Op
 /// The tab's current agent session: the one its agent last started as (the session id saved on
 /// the tab at SessionStart, which `--resume` uses), when that session has a record; else the
 /// highest-ranked record, ties broken by id so every poll agrees.
-fn current_session_id(app: &AppState, tab_id: &str) -> Option<String> {
+pub(crate) fn current_session_id(app: &AppState, tab_id: &str) -> Option<String> {
     let saved = persisted_session_for_tab(app, tab_id).map(|(_, id)| id);
     let sessions = app.agent_sessions.read();
     if let Some(id) = saved {

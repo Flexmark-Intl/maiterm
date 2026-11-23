@@ -543,6 +543,21 @@ export interface AgentLiveness {
   agent_running: boolean;
   ssh_foreground: boolean;
 }
+/** A tab's current agent session as Rust tracks it — what a reloaded page rebuilds its
+ *  agent state from (it otherwise learns of agents only from hook events). */
+export interface LiveAgentSession {
+  tab_id: string;
+  session_id: string;
+  runtime: AgentRuntime;
+  state: 'active' | 'idle' | 'permission';
+  tool_name: string | null;
+  tool_detail: string | null;
+  cwd: string | null;
+}
+export async function getLiveAgentSessions(tabIds: string[]): Promise<LiveAgentSession[]> {
+  return invoke('get_live_agent_sessions', { tabIds });
+}
+
 export async function getAgentLiveness(ptyId: string): Promise<AgentLiveness> {
   return invoke('get_agent_liveness', { ptyId });
 }

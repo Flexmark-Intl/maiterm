@@ -20,6 +20,54 @@ pub fn claude_code_respond(
     }
 }
 
+/// One tab's live agent session, as a window's page needs it to rebuild its agent state.
+#[derive(serde::Serialize)]
+pub struct LiveAgentSession {
+    pub tab_id: String,
+    pub session_id: String,
+    pub runtime: &'static str,
+    /// The page's states: "active" | "idle" | "permission".
+    pub state: &'static str,
+    pub tool_name: Option<String>,
+    pub tool_detail: Option<String>,
+    pub cwd: Option<String>,
+}
+
+/// The agent sessions Rust is tracking for these tabs, one per tab (its current session).
+///
+/// A window's page learns about agents only from hook events, so a page that reloads (a
+/// WebKit crash, a window reload) starts with none: every idle agent read as offline and a
+/// mesh opened its readiness dialog over agents that were all still running. The page asks
+/// this once on load; a hook that has already arrived wins over it.
+#[tauri::command]
+pub fn get_live_agent_sessions(
+    state: State<'_, Arc<AppState>>,
+    tab_ids: Vec<String>,
+) -> Vec<LiveAgentSession> {
+    use crate::state::app_state::AgentSessionState as S;
+    let mut out = Vec::new();
+    for tab_id in tab_ids {
+        let Some(sid) = crate::mailink::current_session_id(&state, &tab_id) else { continue };
+        let sessions = state.agent_sessions.read();
+        let Some(s) = sessions.get(&sid) else { continue };
+        let page_state = match s.state {
+            S::Active => "active",
+            S::WaitingPermission => "permission",
+            S::WaitingInput | S::Stopped => "idle",
+        };
+        out.push(LiveAgentSession {
+            tab_id,
+            session_id: sid.clone(),
+            runtime: s.runtime.as_key(),
+            state: page_state,
+            tool_name: s.tool_name.clone(),
+            tool_detail: s.tool_detail.clone(),
+            cwd: s.cwd.clone(),
+        });
+    }
+    out
+}
+
 /// Called by the frontend to forward a notification (e.g. selection change) to Claude CLI.
 #[tauri::command]
 pub fn claude_code_notify_selection(

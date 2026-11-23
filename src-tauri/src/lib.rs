@@ -1210,6 +1210,7 @@ pub fn run() {
             commands::editor::ssh_list_files,
             commands::claude_code::claude_code_respond,
             commands::claude_code::claude_code_notify_selection,
+            commands::claude_code::get_live_agent_sessions,
             commands::claude_code::refresh_agent_integrations,
             commands::agent_defaults::agent_defaults_status,
             commands::agent_defaults::agent_defaults_set,

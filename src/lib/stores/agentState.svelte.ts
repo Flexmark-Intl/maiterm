@@ -1,7 +1,7 @@
 import { untrack } from 'svelte';
 import { SvelteMap } from 'svelte/reactivity';
 import { countedListen as listen } from '$lib/utils/listenCounter';
-import { info as logInfo } from '@tauri-apps/plugin-log';
+import { info as logInfo, warn as logWarn } from '@tauri-apps/plugin-log';
 import { setVariable, handleEnableAutoResume } from './triggers.svelte';
 import { terminalsStore } from './terminals.svelte';
 import { workspacesStore } from './workspaces.svelte';
@@ -11,6 +11,7 @@ import { dispatch } from './notificationDispatch';
 import { preferencesStore } from './preferences.svelte';
 import { getResumeCommand, sessionIdVar } from '$lib/agents/resume';
 import { getDescriptor } from '$lib/agents/descriptor';
+import * as commands from '$lib/tauri/commands';
 import type { AgentRuntime, AgentState, WorkspaceAgentState } from '$lib/agents/types';
 
 /** Per-runtime auto-resume preference. Gates whether agent init auto-configures auto-resume. */
@@ -229,6 +230,7 @@ function createAgentStateStore() {
   }
 
   function setState(tabId: string, sessionId: string, state: AgentState, toolName?: string, toolDetail?: string, runtime: AgentRuntime = 'claude', activity = true, freshStart = false) {
+    noteEvent(tabId);
     const current = sessions.get(tabId);
     // `freshStart` (a SessionStart) never short-circuits: a relaunch that resumes the SAME
     // session id over a stale idle entry (its SessionEnd never arrived) is still a new start.
@@ -281,7 +283,48 @@ function createAgentStateStore() {
     }
   }
 
+  // Reload backfill. The page learns about agents only from hook events, so after it reloads (a
+  // WebKit crash, a window reload) every agent sitting idle at its prompt read as offline: the
+  // mesh drew it grey and opened its readiness dialog over agents that were all still running.
+  // So each tab is asked of Rust once — the sessions it still tracks — and seeded from that.
+  // Any event the tab's agent sends after the request went out wins, a SessionEnd included:
+  // `tabEventAt` records the event sequence number each tab last heard.
+  let listening = false;
+  const backfillAsked = new Set<string>();
+  let eventSeq = 0;
+  const tabEventAt = new Map<string, number>();
+  function noteEvent(tabId: string) {
+    tabEventAt.set(tabId, ++eventSeq);
+  }
+  function backfill(ids: ReadonlySet<string>) {
+    if (!listening) return;
+    const ask = [...ids].filter((id) => !backfillAsked.has(id) && !sessions.get(id));
+    if (!ask.length) return;
+    for (const id of ask) backfillAsked.add(id);
+    const askedAt = eventSeq;
+    commands.getLiveAgentSessions(ask).then((live) => {
+      let seeded = 0;
+      for (const s of live) {
+        if ((tabEventAt.get(s.tab_id) ?? 0) > askedAt || sessions.get(s.tab_id)) continue;
+        seeded++;
+        // A working agent is active now; an idle one did nothing new (as at SessionStart).
+        setState(s.tab_id, s.session_id, s.state, s.tool_name ?? undefined, s.tool_detail ?? undefined, s.runtime, s.state !== 'idle');
+        const cur = sessions.get(s.tab_id);
+        if (cur && s.cwd && !cur.cwd) sessions.set(s.tab_id, { ...cur, cwd: s.cwd });
+        // Coming back after a reload is not a result the human missed (as at SessionStart).
+        if (s.state === 'idle') markReadInternal(s.tab_id);
+        workspacesStore.setTabRuntimeLocal(s.tab_id, s.runtime);
+      }
+      logInfo(`Agent state: reload backfill — Rust tracks ${live.length} of ${ask.length} asked tab(s), seeded ${seeded}`);
+    }).catch((e) => {
+      // Ask again on the next tab change rather than never.
+      for (const id of ask) backfillAsked.delete(id);
+      logWarn(`Agent state: reload backfill failed: ${e}`);
+    });
+  }
+
   function removeSession(tabId: string, expectedSessionId?: string) {
+    noteEvent(tabId);
     const was = sessions.get(tabId);
     if (!was) return;
     // A synthetic/stale SessionEnd may name a session already superseded in this
@@ -452,7 +495,10 @@ function createAgentStateStore() {
           for (const ws of workspacesStore.workspaces)
             for (const pane of ws.panes)
               for (const tab of pane.tabs) ids.add(tab.id);
-          untrack(() => sessions.seed(ids));
+          untrack(() => {
+            sessions.seed(ids);
+            backfill(ids);
+          });
         });
       });
 
@@ -719,11 +765,22 @@ function createAgentStateStore() {
         }
       });
       unlisteners.push(u9);
+
+      // Every listener is attached: from here a hook can't be missed between Rust's answer and
+      // the page applying it, so the backfill may run.
+      listening = true;
+      const ids = new Set<string>();
+      for (const ws of workspacesStore.workspaces)
+        for (const pane of ws.panes)
+          for (const tab of pane.tabs) ids.add(tab.id);
+      backfill(ids);
     },
 
     destroy() {
       stopSeeding?.();
       stopSeeding = null;
+      listening = false;
+      backfillAsked.clear();
       for (const u of unlisteners) u();
       unlisteners.length = 0;
       for (const timer of staleTimers.values()) clearTimeout(timer);
