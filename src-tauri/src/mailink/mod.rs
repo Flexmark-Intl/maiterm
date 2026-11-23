@@ -5473,16 +5473,20 @@ pub(crate) fn pty_for_tab(app: &AppState, tab_id: &str) -> Option<String> {
     app.tab_pty_map.read().get(tab_id).cloned()
 }
 
-/// The (runtime, session id) whose transcript we read for a tab. If a tab has more than one
-/// tracked session (e.g. after a resume minted a new id), prefer the most attention-worthy —
-/// consistent with how `session_states` picks the tab's displayed state.
+/// The (runtime, session id) whose transcript we read for a tab: its CURRENT session
+/// (`current_session_id` — the one its agent last started as, when that has a record).
+///
+/// A tab can hold a second, stale record: a SessionEnd that never arrived (Git Bash on Windows
+/// can miss the hook's 5 s), a resume that minted a new id. This used to pick the most
+/// attention-worthy record, as `session_states` does for the status, with no tie-break. While
+/// the live agent worked it was `Active` and won; once it went idle the stale record tied or
+/// outranked it and won instead, so the phone's thread fell back to the pre-reload transcript
+/// whenever the agent rested (Darryl's Windows PC, 2026-11-22). Rank still picks among records
+/// when none is the saved session, with ties broken by id so every poll agrees.
 fn live_session_for_tab(app: &AppState, tab_id: &str) -> Option<(AgentRuntime, String)> {
-    let sessions = app.agent_sessions.read();
-    sessions
-        .iter()
-        .filter(|(_, s)| s.tab_id == tab_id)
-        .max_by_key(|(_, s)| rank(s.state))
-        .map(|(id, s)| (s.runtime, id.clone()))
+    let id = current_session_id(app, tab_id)?;
+    let runtime = app.agent_sessions.read().get(&id)?.runtime;
+    Some((runtime, id))
 }
 
 /// The tab's persisted resume session id — the runtime's `<runtime>SessionId` trigger variable
@@ -8642,6 +8646,41 @@ mod tests {
         assert_eq!(reply["status"], "unreachable");
         assert!(reply["detail"].as_str().unwrap().contains("attach files once"), "{reply}");
         assert_eq!(app.app_data.read().windows[0].workspaces[0].hive.as_ref().unwrap().status, crate::hive::record::STATUS_DONE, "nothing woke it");
+    }
+
+    #[test]
+    fn a_stale_session_on_the_tab_never_takes_the_transcript_from_the_current_one() {
+        use crate::state::app_state::AgentSessionInfo;
+        use crate::state::workspace::{WindowData, Workspace};
+        let app = AppState::new();
+        let tab = {
+            let mut data = app.app_data.write();
+            let mut win = WindowData::new("main".into());
+            let mut ws = Workspace::new("w".into());
+            let t = &mut ws.panes[0].tabs[0];
+            t.runtime = Some(AgentRuntime::Claude);
+            t.trigger_variables.insert("claudeSessionId".into(), "live".into());
+            let id = t.id.clone();
+            win.workspaces.push(ws);
+            data.windows.push(win);
+            id
+        };
+        let row = |state| AgentSessionInfo {
+            runtime: AgentRuntime::Claude, tab_id: tab.clone(), cwd: None, state,
+            tool_name: None, tool_detail: None, pending_question: None, pending_question_at: None,
+            pending_approvals: Vec::new(), approval_seq: 0, recent_tool_calls: Vec::new(),
+            claude_gate: Default::default(), model: None, transcript_path: None,
+            finished_a_turn: false, connection_id: None,
+        };
+        // The leftover row sits at an empty prompt; the live agent has just stopped (rank 0).
+        app.agent_sessions.write().insert("stale".into(), row(AgentSessionState::WaitingInput));
+        app.agent_sessions.write().insert("live".into(), row(AgentSessionState::Stopped));
+        assert_eq!(live_session_for_tab(&app, &tab), Some((AgentRuntime::Claude, "live".into())));
+        // With no saved session to go by, rank decides and a tie breaks the same way every time.
+        app.app_data.write().windows[0].workspaces[0].panes[0].tabs[0].trigger_variables.clear();
+        assert_eq!(live_session_for_tab(&app, &tab).unwrap().1, "stale", "the higher rank");
+        app.agent_sessions.write().get_mut("live").unwrap().state = AgentSessionState::WaitingInput;
+        assert_eq!(live_session_for_tab(&app, &tab).unwrap().1, "stale", "ties go to the larger id, on every poll");
     }
 
     #[test]
