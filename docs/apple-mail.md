@@ -1,8 +1,16 @@
 # Apple Mail for agents
 
-**Status: BUILT 2026-11-23, not yet deployed** (`src-tauri/src/mail/`, Preferences → Mail,
-`components/mail/MailPane.svelte`). The tools answer only from an installed build, so agents
-can't use them until a deploy. Probe results in §2 were measured on a real Mail store (V10,
+**Status: BUILT and DEPLOYED 2026-11-23, all six tools tried live** (`src-tauri/src/mail/`,
+Preferences → Mail, `components/mail/MailPane.svelte`). The live check went through the
+installed build's MCP endpoint with one account ticked:
+- every call answered in about 0.1 s;
+- paging with `before` worked, and a body search worked;
+- `readMail`, `readMailThread` and `saveMailAttachment` worked, saving attachments by index and by name, and the files were valid;
+- an unticked account was refused with `unknown_account`.
+
+maiTerm's own MCP server never sends `tools/list_changed`, so an agent that was already
+running when Mail was switched on doesn't see the tools until its tab reloads. The same is
+true of every other preference-gated tool set. Probe results in §2 were measured on a real Mail store (V10,
 13 accounts, ~706k messages) the same day. The `#[ignore]`d `mail::tests::real_store` re-runs
 every tool against this Mac's store and prints counts and timings only: 25 recent rows in
 ~20 ms, an indexed search in ~30 ms, a body search over 128 messages in ~0.1 s, 40/40
