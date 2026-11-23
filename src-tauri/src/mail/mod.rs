@@ -89,18 +89,18 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "readMail",
-            "description": "Read one message: headers (from, to, cc, reply-to, date, Message-ID, list), the body as text (HTML converted; format:\"html\" for the raw HTML), its attachments (name, type, size, whether Mail downloaded it) and `open_url`, a message:// link that opens it in Mail for your human. A trailing block of `>`-quoted history (and its \"wrote:\" line) is cut unless full:true, and `quoted_history_trimmed` says when; history that isn't `>`-quoted (Outlook-style, or HTML mail) comes back whole. Long bodies page with offset/max_chars. Read-only: the message stays unread in Mail.",
+            "description": "Read one message: headers (from, to, cc, reply-to, date, Message-ID, list), the body as text (HTML converted; format:\"html\" for the raw HTML), its attachments (name, type, size, whether Mail downloaded it) and `open_url`, a message:// link that opens it in Mail for your human. The body is the whole text, quoted history and forwarded content included (trim_quotes:true cuts a reply's trailing quote). Long bodies page with offset/max_chars. Read-only: the message stays unread in Mail.",
             "inputSchema": { "type": "object", "properties": {
                 "tabId": tab, "id": id,
                 "format": { "type": "string", "enum": ["text", "html"], "description": "Body as text (default) or the raw HTML" },
-                "full": { "type": "boolean", "description": "Keep the quoted reply history" },
+                "trim_quotes": { "type": "boolean", "description": "Cut a reply's trailing quoted history (a `>`-quoted block with its \"wrote:\" line) to save space. Off by default: the whole text is returned" },
                 "offset": { "type": "integer", "description": "Start the body at this character (the previous answer's next_offset)" },
                 "max_chars": { "type": "integer", "description": "Body characters to return, default 20000" }
             }, "required": ["id"] }
         }),
         json!({
             "name": "readMailThread",
-            "description": "Read the conversation a message belongs to: its newest 50 messages, shown oldest first, each message's text up to 4000 characters with a trailing `>`-quoted history cut (`quoted_history_trimmed`). A longer thread says how many older messages it left out (`older_not_shown`); `body_cut` marks a message readMail reads in full. The cheap way to follow a back-and-forth. Read-only.",
+            "description": "Read the conversation a message belongs to: its newest 50 messages, shown oldest first, each message's text up to 4000 characters with a reply's trailing quoted history cut (`quoted_history_trimmed`: the earlier messages are in the thread; forwarded content is never cut). A longer thread says how many older messages it left out (`older_not_shown`); `body_cut` marks a message readMail reads in full. The cheap way to follow a back-and-forth. Read-only.",
             "inputSchema": { "type": "object", "properties": { "tabId": tab, "id": id }, "required": ["id"] }
         }),
         json!({
@@ -542,13 +542,14 @@ fn read(ctx: &Ctx, args: &Value) -> Answer {
         return Ok(Outcome::Answer(out));
     };
     let html = args.get("format").and_then(Value::as_str) == Some("html");
-    let full = args.get("full").and_then(Value::as_bool).unwrap_or(false);
+    // Whole by default: trimming is opt-in here, since a wrong cut loses the message itself.
+    let trim = args.get("trim_quotes").and_then(Value::as_bool).unwrap_or(false);
     let (body, trimmed) = if html {
         (p.html.clone().unwrap_or_default(), false)
-    } else if full {
-        (p.text.clone(), false)
-    } else {
+    } else if trim {
         emlx::trim_quoted(&p.text)
+    } else {
+        (p.text.clone(), false)
     };
     let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
     let max = args.get("max_chars").and_then(Value::as_u64).map(|n| n.max(1) as usize).unwrap_or(DEFAULT_BODY_CHARS);
@@ -565,7 +566,7 @@ fn read(ctx: &Ctx, args: &Value) -> Answer {
     out["body"] = json!(slice);
     out["body_chars"] = json!(total);
     if offset.saturating_add(max) < total { out["next_offset"] = json!(offset + max); }
-    if trimmed { out["quoted_history_trimmed"] = json!("Quoted reply history was cut; full:true keeps it, or readMailThread reads each message of the thread."); }
+    if trimmed { out["quoted_history_trimmed"] = json!("A reply's quoted history was cut at your trim_quotes:true; call without it for the whole text."); }
     if html && p.html.is_none() { out["body_note"] = json!("This message has no HTML part."); }
     out["attachments"] = json!(p.attachments);
     Ok(Outcome::Answer(out))

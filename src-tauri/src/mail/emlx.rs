@@ -215,14 +215,15 @@ pub fn attachment_bytes(bytes: &[u8], located: Option<&Located>, rowid: i64, ind
     }
 }
 
-/// Cut the quoted history at the END of a reply: the trailing run of `>`-quoted lines, and the
-/// "… wrote:" attribution just above it. Returns the text and whether anything was cut.
+/// Cut a reply's quoted history at its END: the trailing run of `>`-quoted lines that carries a
+/// "… wrote:" attribution, and that attribution. Returns the text and whether anything was cut.
 ///
-/// Only text the sender's client explicitly marked as quoted is cut. Guessing from wording ("On …
-/// wrote:", "Original Message", Outlook's "From:/Sent:") was tried twice and each version either
-/// dropped a bottom-posted reply or missed Apple Mail's own format, so it is deliberately not
-/// done: a missed trim costs space, a wrong one loses the reply. HTML-only mail (no `>` once
-/// converted) and Outlook-style history therefore come back whole.
+/// It cuts only on two pieces of positive evidence: the client marked the text as quoted (`>`),
+/// and marked it as a REPLY's quote ("wrote:"). Three looser versions each lost text in review:
+/// wording alone dropped bottom-posted answers, then missed Apple Mail's format, and `>` alone
+/// cut Apple Mail forwards (their whole content is `>`-quoted). A missed trim costs space, a
+/// wrong one loses the message, so `readMail` doesn't trim unless asked; only `readMailThread`,
+/// where the other messages carry the history, trims by default.
 pub fn trim_quoted(text: &str) -> (String, bool) {
     let lines: Vec<&str> = text.lines().collect();
     let blank = |l: &str| l.trim().is_empty();
@@ -234,13 +235,20 @@ pub fn trim_quoted(text: &str) -> (String, bool) {
     if start == end || !lines[start..end].iter().any(|l| quoted(l)) {
         return (text.trim_end().to_string(), false);
     }
-    // The attribution line(s) right above the quote: "On … wrote:", possibly wrapped onto two.
+    // Only a REPLY's quote is cut, known by its "… wrote:" attribution: above the block (most
+    // clients) or as the block's first quoted line (Apple Mail / iOS). A `>` block without one is
+    // something else — Apple Mail quotes a whole forwarded message that way, and that is the
+    // content, not history.
+    let wrote = |l: &str| l.trim_end().ends_with(':') && l.contains("wrote");
+    let first_quoted = lines[start..end].iter().find(|l| !blank(l)).copied().unwrap_or("");
     let mut cut = start;
-    if cut > 0 && lines[cut - 1].trim_end().ends_with(':') && lines[cut - 1].contains("wrote") {
+    if cut > 0 && wrote(lines[cut - 1]) {
         cut -= 1;
         if cut > 0 && lines[cut - 1].trim_start().starts_with("On ") && !lines[cut].trim_start().starts_with("On ") {
             cut -= 1;
         }
+    } else if !wrote(first_quoted.trim_start().trim_start_matches('>')) {
+        return (text.trim_end().to_string(), false);
     }
     let kept = lines[..cut].join("\n");
     let kept = kept.trim_end();
@@ -386,6 +394,11 @@ mod tests {
         // Unmarked history (Outlook, HTML converted to text) is left whole.
         let (t, cut) = trim_quoted("Yes.\n-----Original Message-----\nFrom: a\nSent: b");
         assert_eq!((t.as_str(), cut), ("Yes.\n-----Original Message-----\nFrom: a\nSent: b", false));
+        // An Apple Mail forward is `>`-quoted with no "wrote:": it is the content, never cut.
+        let fwd = "FYI, see below.\n\nSent from my iPhone\n\nBegin forwarded message:\n\n> From: Billing <b@acme.test>\n> Subject: Invoice\n>\n> Please pay $1,200 by Friday.\n";
+        assert_eq!(trim_quoted(fwd), (fwd.trim_end().to_string(), false));
+        let (_, cut) = trim_quoted("Begin forwarded message:\n\n> From: a\n> Please pay by Friday.");
+        assert!(!cut);
         // Nothing but a quote: kept.
         let (_, cut) = trim_quoted("> only a quote");
         assert!(!cut);
