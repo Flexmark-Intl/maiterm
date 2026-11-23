@@ -4,6 +4,13 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.30 changelog** (2026-11-22). Additive: **text files in a message**. `POST
+> /chats/{tabId}/message`'s `images` items may be `.log`, `.txt`, `.csv` or `.md` files
+> (`text/plain`, `text/csv`, `text/markdown`, or a generic mime with such a `name`), saved under
+> their own extension. Anything else that isn't an image is refused whole as
+> `reason:"unsupported_attachment"` with a `detail` to show. Gate on the version: an older desktop
+> saves a text file as a `.png`.
+>
 > **v0.29 changelog** (2026-11-22). Additive: **one phone, several desktops** (§6.3).
 > - **Every push says which desktop rang**: `serverFp` in the APNs custom keys and the FCM
 >   `data`, the same `sha256/…` the phone pinned at pairing. A tap opens the thread on THAT
@@ -1406,6 +1413,15 @@ shortcut; this guarantees it can't corrupt a TUI mid-prompt.
   transfer never types half a batch). `{status:"unsupported", reason:"unsupported_ssh"}` now means
   only "no usable bridge" (tunnel down/disabled, mosh) or "staging failed" — render it as the same
   in-app notice as before; a retry after the bridge reconnects can succeed.
+  **Text files (0.30)** ride the same `images` array with the same `{data, mime, name?}` items:
+  `text/plain`, `text/csv` and `text/markdown` are saved as `.log`/`.txt`, `.csv` and `.md` under
+  the same stem (so echo-stripping, SSH staging and the 32 MiB budget hold unchanged). `name`
+  picks `.log`/`.md` under `text/plain`, and picks the extension outright when the mime is generic
+  (`application/octet-stream`, empty, another `text/…`) and the name ends in one of the four. Any
+  other non-image item fails the whole send, before anything is staged, with
+  `{status:"unsupported", reason:"unsupported_attachment", detail}`: show `detail`. An unknown
+  `image/*` still saves as `.png`, as before. **Never send a text file to a desktop older than
+  0.30**: it would save it as a `.png`.
 - **Answer a permission/question** (`POST .../respond {choice, prompt_id}`). Two guards since
   2026-09-30/10-02, same wire: a permission's `prompt_id` digest leaves out the unattended-session
   auto-deny countdown (it ticks every second, so the id changed under every card), and a
@@ -2640,6 +2656,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.27` | adds `MaitermTask.blocker.run` (`agent` / `tab` / `null`) and `POST /tasks/{id}/run` |
 | `0.28` | adds `MaitermTask.blocker.runIn` (`{ tabId, tabTitle }` / `null`): the command is for another agent's tab, and `run` describes that tab |
 | `0.29` | adds the push's `serverFp` (and `serverName` when the phone gave an `alert_name`), `alert_name` on `POST /push-register`, and `POST /unpair` (§6.3) |
+| `0.30` | `POST /chats/{tabId}/message` takes `.log`/`.txt`/`.csv`/`.md` files in `images`, and refuses other non-images as `unsupported_attachment` |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,

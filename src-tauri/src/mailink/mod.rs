@@ -536,7 +536,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.29";
+const PROTOCOL_VERSION: &str = "0.30";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -1302,8 +1302,10 @@ struct MessageBody {
     images: Vec<ImageInput>,
 }
 
-/// One inline image from the phone. `data` is base64 with NO `data:` prefix; `mime` carries the
-/// type separately ("image/png" | "image/jpeg" | "image/webp"); `name` is display/debug only. The
+/// One inline image from the phone, or since 0.30 a text file (see `attachment_ext`). `data` is
+/// base64 with NO `data:` prefix; `mime` carries the type separately ("image/png" | "image/jpeg"
+/// | "image/webp" | "text/plain" | "text/csv" | "text/markdown"); `name` picks a text file's
+/// extension when its mime is generic, and names it in a refusal. The
 /// phone pre-downscales each to <=1568px and caps 6/message. Per-image size varies a lot by
 /// source — JPEG photos land under ~500 KB, but PNG screenshots have been seen at ~750 KB, and
 /// base64 inflates ~1.37× on top. Budget by TOTAL bytes, not count: the real ceiling is
@@ -1312,8 +1314,8 @@ struct MessageBody {
 struct ImageInput {
     data: String,
     mime: String,
+    /// The temp filename stays uuid-based; only the extension may come from this.
     #[serde(default)]
-    #[allow(dead_code)] // display/debug only; the temp filename is uuid-based, not name-derived.
     name: Option<String>,
 }
 
@@ -1349,6 +1351,13 @@ async fn post_message(
             return Ok(Json(json!({ "status": "unsupported", "reason": "unsupported_runtime",
                 "detail": "This agent can't accept images yet." })));
         }
+        // 0.30: an image or a .log/.txt/.csv/.md file. Anything else is refused whole, before a
+        // byte is staged, rather than saved as a .png.
+        if let Some(bad) = body.images.iter().find(|i| attachment_ext(&i.mime, i.name.as_deref()).is_none()) {
+            let what = bad.name.as_deref().filter(|n| !n.trim().is_empty()).unwrap_or(&bad.mime);
+            return Ok(Json(json!({ "status": "unsupported", "reason": "unsupported_attachment",
+                "detail": format!("{what} can't be attached. Attach an image, or a .log, .txt, .csv or .md file.") })));
+        }
         // foreground_command is Some only for a live ssh/mosh: the temp files are LOCAL paths the
         // remote claude can't see. With a live bridge tunnel we stage the bytes on the remote host
         // over its mux socket and type THOSE paths; no tunnel (mosh, bridge down/disabled) or a
@@ -1379,7 +1388,7 @@ async fn post_message(
         } else {
             let mut paths = Vec::with_capacity(body.images.len());
             for img in &body.images {
-                paths.push(save_image_temp(&img.data, &img.mime).map_err(|e| {
+                paths.push(save_image_temp(img).map_err(|e| {
                     log::warn!("[maiLink] local image staging failed for tab {tab_id}: {e}");
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?);
@@ -4429,16 +4438,38 @@ async fn stage_files_for_tab(app: &Arc<AppState>, tab_id: &str, pty: &str, files
     Ok(out)
 }
 
-/// The temp-file extension for an image mime. Claude Code sniffs images BY EXTENSION, so unknown
-/// mimes default to a recognized one rather than failing the attach.
-fn image_ext(mime: &str) -> &'static str {
+/// The text files the phone may attach (0.30), by the extension they are saved under.
+const TEXT_ATTACHMENT_EXTS: &[&str] = &["log", "txt", "csv", "md"];
+
+/// The temp-file extension for one attachment, or `None` when it is neither an image nor one of
+/// [`TEXT_ATTACHMENT_EXTS`]. Claude Code sniffs images BY EXTENSION, so an unknown `image/*` mime
+/// still defaults to a recognized one (as before 0.30). A text file keeps its own extension: the
+/// mime picks it, or the name does when the phone reports a generic type (an Android `.log` is
+/// often `application/octet-stream`). Anything else is refused rather than saved as a `.png`
+/// Claude would try to read as a picture.
+fn attachment_ext(mime: &str, name: Option<&str>) -> Option<&'static str> {
+    let mime = mime.trim().to_ascii_lowercase();
+    let mime = mime.split(';').next().unwrap_or("").trim();
+    let named = name
+        .and_then(|n| n.rsplit_once('.'))
+        .map(|(_, ext)| ext.to_ascii_lowercase())
+        .and_then(|ext| TEXT_ATTACHMENT_EXTS.iter().copied().find(|e| *e == ext));
     match mime {
-        "image/png" => "png",
-        "image/jpeg" => "jpg",
-        "image/webp" => "webp",
-        "image/gif" => "gif",
-        _ => "png",
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpg"),
+        "image/webp" => Some("webp"),
+        "image/gif" => Some("gif"),
+        m if m.starts_with("image/") => Some("png"),
+        "text/csv" => Some("csv"),
+        "text/markdown" | "text/x-markdown" => Some("md"),
+        "text/plain" => Some(named.unwrap_or("txt")),
+        m if m.starts_with("text/") || m.is_empty() || m == "application/octet-stream" => named,
+        _ => None,
     }
+}
+
+fn image_ext(img: &ImageInput) -> &'static str {
+    attachment_ext(&img.mime, img.name.as_deref()).unwrap_or("png")
 }
 
 fn decode_image(data_base64: &str) -> Result<Vec<u8>, String> {
@@ -4450,10 +4481,10 @@ fn decode_image(data_base64: &str) -> Result<Vec<u8>, String> {
 /// Decode a base64 image and write it to a temp file whose extension Claude Code recognizes as an
 /// image. Returns the absolute path. Sibling of commands::editor::save_clipboard_image; kept local
 /// so the maiLink path has no UI-command dep.
-fn save_image_temp(data_base64: &str, mime: &str) -> Result<String, String> {
-    let bytes = decode_image(data_base64)?;
+fn save_image_temp(img: &ImageInput) -> Result<String, String> {
+    let bytes = decode_image(&img.data)?;
     let path = std::env::temp_dir()
-        .join(format!("maiterm-mailink-{}.{}", uuid::Uuid::new_v4(), image_ext(mime)));
+        .join(format!("maiterm-mailink-{}.{}", uuid::Uuid::new_v4(), image_ext(img)));
     std::fs::write(&path, &bytes).map_err(|e| format!("cannot write temp image: {e}"))?;
     log::info!("[maiLink] staged {} image bytes → {:?}", bytes.len(), path);
     Ok(path.to_string_lossy().to_string())
@@ -4477,7 +4508,7 @@ async fn stage_images_remote(
     for img in images {
         let bytes = decode_image(&img.data)?;
         let remote_path =
-            format!("/tmp/maiterm-mailink-{}.{}", uuid::Uuid::new_v4(), image_ext(&img.mime));
+            format!("/tmp/maiterm-mailink-{}.{}", uuid::Uuid::new_v4(), image_ext(img));
         push_bytes_remote(host_key, ssh_args, &bytes, &remote_path).await?;
         log::info!(
             "[maiLink] staged {} image bytes → {}:{}",
@@ -8608,6 +8639,22 @@ mod tests {
         assert_eq!(reply["status"], "unreachable");
         assert!(reply["detail"].as_str().unwrap().contains("attach files once"), "{reply}");
         assert_eq!(app.app_data.read().windows[0].workspaces[0].hive.as_ref().unwrap().status, crate::hive::record::STATUS_DONE, "nothing woke it");
+    }
+
+    #[test]
+    fn an_attachment_is_an_image_or_one_of_four_text_files() {
+        assert_eq!(attachment_ext("image/jpeg", None), Some("jpg"));
+        assert_eq!(attachment_ext("image/heic", None), Some("png"), "unknown image mimes keep the old default");
+        assert_eq!(attachment_ext("text/plain", Some("app.LOG")), Some("log"));
+        assert_eq!(attachment_ext("text/plain", Some("notes")), Some("txt"));
+        assert_eq!(attachment_ext("text/plain; charset=utf-8", Some("README.md")), Some("md"));
+        assert_eq!(attachment_ext("text/csv", Some("x.txt")), Some("csv"));
+        assert_eq!(attachment_ext("text/markdown", None), Some("md"));
+        assert_eq!(attachment_ext("application/octet-stream", Some("crash.log")), Some("log"));
+        assert_eq!(attachment_ext("", Some("data.csv")), Some("csv"));
+        assert_eq!(attachment_ext("application/octet-stream", Some("tool.exe")), None);
+        assert_eq!(attachment_ext("application/pdf", Some("a.txt")), None, "a declared non-text type is not renamed");
+        assert_eq!(attachment_ext("text/html", Some("page.html")), None);
     }
 
     #[test]
