@@ -727,8 +727,8 @@ pub fn tool_list_response(gates: ToolGates) -> Value {
             "context": { "type": "string", "description": "Two or three sentences: what you found and what each choice costs, in the same plain terms as the question. Markdown: write a list as a list." },
             "options": { "type": "array", "maxItems": 6, "description": "Decision only. The choices, each its own entry: `label` is the choice itself in a few words ('Load the reviews only when opened'), `detail` what it does or costs, and `recommended: true` on what you recommend. Omit for a free-text answer.", "items": { "type": "object", "properties": { "label": { "type": "string" }, "detail": { "type": "string" }, "recommended": { "type": "boolean" } }, "required": ["label"] } },
             "pick": { "type": "string", "enum": ["one", "many"], "description": "Decision only. 'one' (the default): the human picks one option. 'many': the options are separate changes the human may make any of — they tick the ones to do, starting from the ones you marked recommended, and the answer names every option as done or not. Use 'many' instead of asking several yes/no questions in one sentence." },
-            "command": { "type": "string", "description": "Action only: the exact command the human has to run." },
-            "run_in": { "type": "string", "description": "Action only, and only when the command is for ANOTHER agent's tab, not yours: that agent's name or handle as sendToBridgedAgent takes it (a mesh peer, or your bridge partner). The card then says it runs there, also shows on that tab, and its Run runs the command there; you are told when it ran. Omit for a command for your own tab." }
+            "command": { "type": "string", "description": "Action only: the exact command the card's Run button executes. Without a leading '!' (or if multi-line, or on a non-Claude tab), Run opens a NEW terminal tab that inherits the target tab's cwd — and if that tab is on SSH, auto-logs into that SSH session and remote cwd first — THEN runs your command there (so do NOT wrap it in 'ssh <host>'; use this for sudo, logins, or interactive prompts; you won't see its output and the card stays open until the human clicks Done). With a leading '!' on a single line for a Claude tab ('! <cmd>'), Run types it directly into that Claude tab's shell mode (same host/cwd), where Claude sees the output and the card closes automatically." },
+            "run_in": { "type": "string", "description": "Action only, and only when the command is for ANOTHER agent's tab, not yours: that agent's name or handle as sendToBridgedAgent takes it (a mesh peer, or your bridge partner). The card then says it runs there, also shows on that tab, and its Run runs the command there (inheriting that peer tab's SSH session and cwd); you are told when it ran. Omit for a command for your own tab." }
         },
         "required": ["kind", "question"]
     });
@@ -1845,5 +1845,22 @@ mod tests {
         assert!(top_props.contains_key("workstream"), "top-level workstream present");
         let item_props = create["inputSchema"]["properties"]["tasks"]["items"]["properties"].as_object().unwrap();
         assert_eq!(item_props["workstream"]["type"], "string", "per-task workstream present");
+    }
+
+    #[test]
+    fn action_blocker_command_schema_explains_new_tab_ssh_autologin_and_bang_mode() {
+        let tools = tool_list_response(ToolGates { tasks: true, ..ToolGates::from_prefs(&crate::state::workspace::Preferences::default()) });
+        let create = tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "createTasks")
+            .expect("createTasks listed");
+        let cmd_desc = create["inputSchema"]["properties"]["tasks"]["items"]["properties"]["blocker"]["properties"]["command"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(cmd_desc.contains("NEW terminal tab"), "explains new terminal tab behavior");
+        assert!(cmd_desc.contains("auto-logs into that SSH"), "explains SSH auto-login before running");
+        assert!(cmd_desc.contains("! <cmd>"), "explains one-line ! shell mode on Claude tabs");
     }
 }
