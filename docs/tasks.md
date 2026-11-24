@@ -548,21 +548,40 @@ runtime; they ride the SSH bridge like every other maiterm tool.
 listTasks({ scope?: 'tab' | 'workspace',     // default 'workspace'
             ready?: boolean, status?: TaskStatus[], limit?: number })
   → { workspace, scope, workstreams: [{ workstream: string|null, tasks: [...] }],
-      truncated?: { shown, matched, detail }, all_workstreams?: string[] }
+      truncated?: { shown, matched, detail }, all_workstreams?: string[],
+      warnings?: string[] }
 
-createTasks({ workstream?: string,           // a NAME; created if new, reused if not
-              tasks: [{ title, detail?, status?, blocked_by?, assign_to_me? }] })
-  → { created: string[], workstream?, already_tracked?: string[] }
+createTasks({ workstream?: string,           // default workstream NAME; created if new, reused if not
+              tasks: [{ title, detail?, workstream?, status?, blocked_by?, assign_to_me?, blocker? }] })
+  → { created: string[], workstream?, already_tracked?: string[],
+      tasks: [{ id, title, status, workstream? }], warnings?: string[] }
 
 updateTasks({ updates: [{ id, status?, title?, detail?, note?, workstream?,
-                          blocked_by?, block_on?, unblock_from?,
+                          blocked_by?, block_on?, unblock_from?, blocker?,
                           assign_to? }] })                 // tab id | "me" | null
-  → { updated: string[], missing: string[], refused?: [{ id, reason, detail }] }
+  → { updated: string[], missing?: string[], refused?: [{ id, reason, detail }],
+      handoffs?: [...], warnings?: string[] }
 
 deleteTasks({ ids?: string[], workstreams?: string[] })     // names; all-or-nothing
   → { deleted: [{ id, title }], workstreams_removed?, workstreams_kept?,
-      refused?: [{ id, title, reason, detail }], missing?, unknown_workstreams? }
+      refused?: [{ id, title, reason, detail }], missing?, unknown_workstreams?,
+      warnings?: string[] }
 ```
+
+**Per-task `workstream` and unknown-key warnings (2026-11-24).** Because the MCP layer is
+hand-rolled JSON-RPC with no runtime schema enforcement, an unknown key sent by an agent
+(such as `notes` instead of `detail`, or `workstream` on a `createTasks` item before per-task
+workstreams existed) was silently dropped while the call succeeded. Two fixes:
+
+- `createTasks` now accepts `workstream` on each task item as well as at the top level
+  (per-task wins; `""` or `null` overrides a top-level workstream to leave that task loose).
+  Each returned task includes its `workstream` when grouped, and the top-level `workstream`
+  is returned when every row in the call belongs to the same workstream.
+- All four task tools inspect incoming arguments (including nested `blocker` and
+  `blocker.options` objects, plus skipped array items missing `title`/`id`) via pure helpers
+  in `src/lib/tasks/toolArgs.ts` and return a `warnings` list naming any ignored key with a
+  "did you mean …?" hint where applicable — warning rather than refusing so older callers
+  keep working while agents see immediately when a field was ignored.
 
 ### `detail` is the spec; `notes` is the log (2026-09-10)
 

@@ -750,12 +750,12 @@ pub fn tool_list_response(gates: ToolGates) -> Value {
         },
         {
             "name": "createTasks",
-            "description": "Add tasks to this project. Batch related items into ONE call. If you are working on more than one distinct thing, pass a `workstream` name per call so each job stays separate — that name is what your human sees as the group heading. Creation is idempotent: an item whose title matches one already on your tab in the same workstream returns the existing task instead of duplicating it, so re-sending your list is safe. Tasks default to assigned to you; pass assign_to_me false to leave one unassigned for whoever picks it up. Status defaults to 'todo' — use 'backlog' ONLY to park something you are deliberately deferring (next month, a future idea), since parked tasks are excluded from progress tracking.",
+            "description": "Add tasks to this project. Batch related items into ONE call. If you are working on more than one distinct thing, pass a `workstream` name at the call level or on each task (per-task overrides call-level) so each job stays separate — that name is what your human sees as the group heading. Creation is idempotent: an item whose title matches one already on your tab in the same workstream returns the existing task instead of duplicating it, so re-sending your list is safe. Tasks default to assigned to you; pass assign_to_me false to leave one unassigned for whoever picks it up. Status defaults to 'todo' — use 'backlog' ONLY to park something you are deliberately deferring (next month, a future idea), since parked tasks are excluded from progress tracking.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
-                    "workstream": { "type": "string", "description": "Name of the job these tasks belong to, e.g. 'Auth refactor'. Reused if it already exists; created if not. Omit for loose tasks." },
+                    "workstream": { "type": "string", "description": "Default workstream name for tasks in this call, e.g. 'Auth refactor'. Reused if it already exists; created if not. Omit for loose tasks; a per-task `workstream` overrides this." },
                     "tasks": {
                         "type": "array",
                         "items": {
@@ -763,6 +763,7 @@ pub fn tool_list_response(gates: ToolGates) -> Value {
                             "properties": {
                                 "title": { "type": "string", "description": "One line, imperative — 'Add the auth guard'" },
                                 "detail": { "type": "string", "description": "Optional body: acceptance criteria, links, notes. Markdown." },
+                                "workstream": { "type": "string", "description": "Optional per-task workstream name; overrides the top-level workstream for this task. Pass \"\" to leave this task loose when a top-level workstream is set." },
                                 "status": { "type": "string", "enum": ["backlog", "todo", "active", "blocked", "review", "done"], "description": "Defaults to 'todo'. 'backlog' means deliberately parked, not 'not started yet'." },
                                 "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Task ids that must finish first" },
                                 "assign_to_me": { "type": "boolean", "description": "Default true" },
@@ -1829,5 +1830,20 @@ mod tests {
         assert!(gallery(listed(None)).is_empty(), "an ordinary agent carries no gallery schema");
         assert_eq!(gallery(listed(Some("worker"))), crate::hive::gallery::tools::WORKER_GALLERY_TOOLS.to_vec());
         assert_eq!(gallery(listed(Some("coordinator"))), crate::hive::gallery::tools::COORDINATOR_GALLERY_TOOLS.to_vec());
+    }
+
+    #[test]
+    fn create_tasks_schema_accepts_workstream_at_top_level_and_per_task() {
+        let tools = tool_list_response(ToolGates { tasks: true, ..ToolGates::from_prefs(&crate::state::workspace::Preferences::default()) });
+        let create = tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "createTasks")
+            .expect("createTasks listed");
+        let top_props = create["inputSchema"]["properties"].as_object().unwrap();
+        assert!(top_props.contains_key("workstream"), "top-level workstream present");
+        let item_props = create["inputSchema"]["properties"]["tasks"]["items"]["properties"].as_object().unwrap();
+        assert_eq!(item_props["workstream"]["type"], "string", "per-task workstream present");
     }
 }

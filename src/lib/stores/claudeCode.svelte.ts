@@ -20,6 +20,7 @@ import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
 import { normalizeTabBatch } from '$lib/stores/tabBatch';
 import { tasksStore } from '$lib/stores/tasks.svelte';
 import { agentTaskDeleteRefusal, agentTaskWriteRefusal, appendNote, blockerNote, blocking, coerceStatus, effectiveStatus, findWorkstream, hasUnmetDeps, isDelegation, isInFlight, isReservedTaskTitle, isRetired, normalizeTitle, parseBlocker, resolveBlockers, resolveEdges, TASK_NOTE_CAP, type BlockerInput } from '$lib/tasks/model';
+import { checkCreateTasksArgs, checkDeleteTasksArgs, checkListTasksArgs, checkUpdateTasksArgs, resolveCreateTaskWorkstream } from '$lib/tasks/toolArgs';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { navHistoryStore } from '$lib/stores/navHistory.svelte';
@@ -1965,9 +1966,10 @@ function createClaudeCodeStore() {
   // refused outright before reaching here.
 
   interface TaskToolInput {
-    /** Only on updates — creates carry the workstream once, at the call level. */
     title?: string;
     detail?: string;
+    /** Optional per-task workstream name; overrides the call-level `workstream` (empty/null leaves loose). */
+    workstream?: string | null;
     /** Declared as an enum in the schema, but nothing enforces it at runtime — typed as a
      *  plain string so the coercion is visibly required rather than assumed. */
     status?: string;
@@ -1982,7 +1984,7 @@ function createClaudeCodeStore() {
     status?: string;
     title?: string;
     detail?: string;
-    workstream?: string;
+    workstream?: string | null;
     blocked_by?: string[];
     /** Incremental dependency edits. `blocked_by` replaces the whole array, which is
      *  last-write-wins against any concurrent edit (docs/tasks.md §8.2 — the store persists
@@ -2112,6 +2114,7 @@ function createClaudeCodeStore() {
       if (!groups.has(key)) groups.set(key, { workstream: nameOf(t.workstream_id) ?? null, tasks: [] });
       groups.get(key)!.tasks.push(taskForAgent(t, all, loc.tab.id, nameOf(t.workstream_id), noteTail));
     }
+    const warnings = checkListTasksArgs(args);
     return {
       workspace: loc.workspace.name,
       scope: tabScope ? 'tab' : 'workspace',
@@ -2134,37 +2137,50 @@ function createClaudeCodeStore() {
         ? { all_workstreams: tasksStore.workstreams(loc.workspace.id).map((w) => w.name) }
         : {}),
       ...(matched !== total ? { filtered_from: total } : {}),
+      ...(warnings.length ? { warnings } : {}),
     };
   }
 
   function handleCreateTasks(args: { tabId?: string; workstream?: string; tasks?: TaskToolInput[] }) {
     const loc = resolveActiveTab(args.tabId);
     if ('error' in loc) return loc;
-    const inputs = (args.tasks ?? []).filter((t) => t?.title?.trim());
-    if (!inputs.length) return { error: 'tasks must be a non-empty array of { title }.' };
-    const reserved = inputs.find((t) => isReservedTaskTitle(t.title!));
+    const rawTasks = Array.isArray(args.tasks) ? args.tasks : [];
+    const indexedInputs = rawTasks
+      .map((t, rawIdx) => ({ t, rawIdx }))
+      .filter((x): x is { t: TaskToolInput; rawIdx: number } => Boolean(x.t && typeof x.t === 'object' && typeof x.t.title === 'string' && x.t.title.trim()));
+    const warnings = checkCreateTasksArgs(args, { reportSkipped: indexedInputs.length > 0 });
+    const warnField = warnings.length ? { warnings } : {};
+    if (!indexedInputs.length) {
+      return { error: 'tasks must be a non-empty array of { title }.', ...warnField };
+    }
+    const reserved = indexedInputs.find(({ t }) => isReservedTaskTitle(t.title!));
     if (reserved) {
-      return { error: `"${reserved.title!.trim()}" is a title maiTerm keeps for its own questions to your human. Nothing was created.` };
+      return { error: `"${reserved.t.title!.trim()}" is a title maiTerm keeps for its own questions to your human. Nothing was created.`, ...warnField };
     }
     // Validated before anything is written, so a bad blocker on the third item doesn't leave
     // the first two created and the agent unsure which of its list landed.
     const blockers = new Map<number, TaskBlocker>();
-    for (const [i, t] of inputs.entries()) {
+    for (const [i, { t, rawIdx }] of indexedInputs.entries()) {
       if (!t.blocker) continue;
       const parsed = agentBlocker(t.blocker, loc.tab.id);
       if (parsed.ok && parsed.blocker.run_in && t.assign_to_me === false) {
-        return { error: `tasks[${i}] "${t.title!.trim()}": a card whose command is for another tab (blocker.run_in) stays on the tab that asked, so it can't go on an unassigned task. Nothing was created.` };
+        return { error: `tasks[${rawIdx}] "${t.title!.trim()}": a card whose command is for another tab (blocker.run_in) stays on the tab that asked, so it can't go on an unassigned task. Nothing was created.`, ...warnField };
       }
-      if (!parsed.ok) return { error: `tasks[${i}] "${t.title!.trim()}": ${parsed.detail} Nothing was created.` };
+      if (!parsed.ok) return { error: `tasks[${rawIdx}] "${t.title!.trim()}": ${parsed.detail} Nothing was created.`, ...warnField };
       blockers.set(i, parsed.blocker);
     }
     // Agents pass a workstream NAME, not an id — requiring a round trip just to record
     // work would make the common case worse. Reused if it exists, created if not.
-    const stream = args.workstream ? tasksStore.ensureWorkstream(loc.workspace.id, args.workstream) : null;
+    // Resolved per task (per-task overrides call-level) AFTER validation so a rejected call
+    // or an overridden call-level name never leaves an empty workstream behind.
+    const resolvedStreams = indexedInputs.map(({ t }) => {
+      const name = resolveCreateTaskWorkstream(t.workstream, args.workstream);
+      return name ? tasksStore.ensureWorkstream(loc.workspace.id, name) : null;
+    });
     const before = new Set(tasksStore.forWorkspace(loc.workspace.id).map((t) => t.id));
     const rows = tasksStore.addMany(
       loc.workspace.id,
-      inputs.map((t, i) => ({
+      indexedInputs.map(({ t }, i) => ({
         title: t.title!.trim(),
         detail: t.detail ?? null,
         // Left undefined when the agent sent none, rather than coerced to 'todo': a re-sent
@@ -2177,7 +2193,7 @@ function createClaudeCodeStore() {
         tab_id: t.assign_to_me === false ? null : loc.tab.id,
         blocked_by: t.blocked_by ?? [],
         origin: 'agent' as const,
-        workstream_id: stream?.id ?? null,
+        workstream_id: resolvedStreams[i]?.id ?? null,
         // Applies to NEW rows only. A re-sent item matching an existing row leaves that row's
         // blocker alone, so re-sending a list after a compact doesn't re-ask the question.
         blocker: blockers.get(i) ?? null,
@@ -2190,15 +2206,24 @@ function createClaudeCodeStore() {
     // the agent it made two tasks, and an agent reconciling counts would retry forever.
     const created = [...new Set(rows.filter((r) => !before.has(r.id)).map((r) => r.id))];
     const existing = [...new Set(rows.filter((r) => before.has(r.id)).map((r) => r.id))];
+    const dedupedRows = [...new Map(rows.map((r) => [r.id, r])).values()];
+    const nameOf = (id: string | null | undefined) => tasksStore.workstream(loc.workspace.id, id)?.name;
+    const rowStreams = new Set(dedupedRows.map((r) => nameOf(r.workstream_id) ?? null));
+    const singleStream = rowStreams.size === 1 ? [...rowStreams][0] : null;
     return {
       created,
-      ...(stream ? { workstream: stream.name } : {}),
+      ...(singleStream ? { workstream: singleStream } : {}),
       ...(existing.length ? { already_tracked: existing } : {}),
-      tasks: [...new Map(rows.map((r) => [r.id, r])).values()].map((r) => ({
-        id: r.id,
-        title: r.title,
-        status: r.status,
-      })),
+      tasks: dedupedRows.map((r) => {
+        const ws = nameOf(r.workstream_id);
+        return {
+          id: r.id,
+          title: r.title,
+          status: r.status,
+          ...(ws ? { workstream: ws } : {}),
+        };
+      }),
+      ...warnField,
     };
   }
 
@@ -2219,8 +2244,11 @@ function createClaudeCodeStore() {
   function handleUpdateTasks(args: { tabId?: string; updates?: TaskToolUpdate[] }) {
     const loc = resolveActiveTab(args.tabId);
     if ('error' in loc) return loc;
-    const updates = (args.updates ?? []).filter((u) => u?.id);
-    if (!updates.length) return { error: 'updates must be a non-empty array of { id, ... }.' };
+    const rawUpdates = Array.isArray(args.updates) ? args.updates : [];
+    const updates = rawUpdates.filter((u): u is TaskToolUpdate => Boolean(u && typeof u === 'object' && typeof u.id === 'string' && u.id.trim()));
+    const warnings = checkUpdateTasksArgs(args, { reportSkipped: updates.length > 0 });
+    const warnField = warnings.length ? { warnings } : {};
+    if (!updates.length) return { error: 'updates must be a non-empty array of { id, ... }.', ...warnField };
     const updated: string[] = [];
     const missing: string[] = [];
     /** Updates that named a real row but asked for something we would not do. Reported
@@ -2336,7 +2364,7 @@ function createClaudeCodeStore() {
         // the spec. Trimmed here and again by Rust before disk.
         if (u.note?.trim()) patch.notes = appendNote({ ...list[idx], notes: patch.notes ?? list[idx].notes }, u.note, 'agent');
         if (u.workstream !== undefined) {
-          patch.workstream_id = u.workstream.trim()
+          patch.workstream_id = typeof u.workstream === 'string' && u.workstream.trim()
             ? (tasksStore.ensureWorkstream(loc.workspace.id, u.workstream)?.id ?? null)
             : null;
         }
@@ -2399,6 +2427,7 @@ function createClaudeCodeStore() {
       ...(missing.length ? { missing } : {}),
       ...(refused.length ? { refused } : {}),
       ...(handoffs.length ? { handoffs } : {}),
+      ...warnField,
     };
   }
 
@@ -2418,9 +2447,11 @@ function createClaudeCodeStore() {
     const loc = resolveActiveTab(args.tabId);
     if ('error' in loc) return loc;
     const wsId = loc.workspace.id;
+    const warnings = checkDeleteTasksArgs(args);
+    const warnField = warnings.length ? { warnings } : {};
     const ids = (args.ids ?? []).filter((id) => typeof id === 'string' && id);
     const names = (args.workstreams ?? []).filter((n) => typeof n === 'string' && n.trim());
-    if (!ids.length && !names.length) return { error: 'Pass ids, workstreams, or both.' };
+    if (!ids.length && !names.length) return { error: 'Pass ids, workstreams, or both.', ...warnField };
 
     const all = tasksStore.forWorkspace(wsId);
     const byId = new Map(all.map((t) => [t.id, t]));
@@ -2491,6 +2522,7 @@ function createClaudeCodeStore() {
         detail: 'Nothing was deleted: a delete is applied whole or not at all, so a job is never left half on the board.',
         ...(missing.length ? { missing } : {}),
         ...(unknownStreams.length ? { unknown_workstreams: unknownStreams } : {}),
+        ...warnField,
       };
     }
 
@@ -2523,6 +2555,7 @@ function createClaudeCodeStore() {
         : {}),
       ...(missing.length ? { missing } : {}),
       ...(unknownStreams.length ? { unknown_workstreams: unknownStreams } : {}),
+      ...warnField,
     };
   }
 
