@@ -156,8 +156,10 @@ A Preferences section beside Deshittification: three collapsible parts headed Cl
 Antigravity. A part whose CLI isn't installed is shown collapsed with "not installed"; its
 values can still be set (they wait in the file). Each control shows the on-disk value, with
 "Agent's default" for absent. Each row has a tick (§2): unticked, its control is read-only.
-One section switch, "maiTerm sets the ticked settings". A line under the section says changes
-apply to new sessions and reach SSH hosts on their next bridge connect.
+One section switch, "maiTerm sets the ticked settings"; off, maiTerm sets none of them (the
+one-time retention seed of §4 is not a ticked setting and runs either way). A line under the
+section says a change reaches connected SSH hosts straight away (§2.1) and an agent already
+running picks it up when it restarts.
 
 ## 6. Questions settled while building
 

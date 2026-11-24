@@ -307,7 +307,7 @@
       <span>maiTerm sets the ticked settings</span>
     </label>
     {#if !status.enabled}
-      <p class="hint">Off: maiTerm changes no agent setting, here or on a host. Your ticks are kept.</p>
+      <p class="hint">Off: maiTerm sets none of the ticked settings, here or on a host. Your ticks are kept.</p>
     {/if}
     {#if status.managed_error}
       <p class="error">{status.managed_error}. maiTerm changes nothing until it reads.</p>
@@ -335,9 +335,9 @@
               <p class="hint">
                 A stronger model Claude consults before and after substantial work. It must be at
                 least as capable as the model it advises, or Claude skips it. Hive workers consult
-                it too, so its cost and time are multiplied by the number of workers. Some advisor
-                models bill to usage credits. Running sessions pick it up after <code>/clear</code>
-                or <code>/compact</code>.
+                it too while a Hive's Workers' advisor is "As in my Claude settings", so its cost
+                and time are multiplied by the number of workers. Some advisor models bill to
+                usage credits. An agent already running picks it up when it restarts.
               </p>
               {#if advisorStuck}
                 <p class="warn">
