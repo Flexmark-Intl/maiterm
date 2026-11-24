@@ -416,28 +416,46 @@ cfg=${{CLAUDE_CONFIG_DIR:-}}
 # directory only when it can read the path, so a path held in a shell variable
 # (M=".../memory"; cat >> "$M/x.md") shows up only in the text.
 # Deleting, moving, copying or linking is left to the human: Write and Edit can't
-# do it, so refusing would make it impossible, not redirect it. Only the command's
-# own words count for that: a heredoc body or a quoted string is prose, and a
-# note that says "install" is still a write.
+# do it, so refusing would make it impossible, not redirect it.
+# Both checks read the command without the bodies of heredocs that only feed text
+# (cat <<EOF, git commit -F - <<EOF): a note that says "install", or a commit
+# message that mentions the memory folder, is not a command. A heredoc fed to an
+# interpreter (python3 - <<EOF, bash <<EOF) is code, so it stays, and so do quoted
+# strings (sh -c 'rm ...' is a delete).
 if [ "$(field tool_name)" = Bash ]; then
   command -v grep >/dev/null 2>&1 || exit 0
   cmd=$(field tool_input.command)
-  words=$(printf '%s\n' "$cmd" | awk '
-    BEGIN {{ q = "\047"; heredoc = "<<-?[ \t]*[" q "\"]?[A-Za-z_][A-Za-z0-9_]*" }}
-    body != "" {{ t = $0; if (tabs) sub(/^\t+/, "", t); if (t == body) body = ""; next }}
+  code=$(printf '%s\n' "$cmd" | awk '
+    BEGIN {{
+      q = "\047"
+      heredoc = "(^|[ \t;|&(])<<-?[ \t]*[" q "\"]?[A-Za-z_][A-Za-z0-9_]*"
+      interp = "(^|[ \t;|&(/])(python[0-9.]*|node|deno|bun|perl|ruby|php|sh|bash|zsh|dash|ksh|osascript)([ \t]|$)"
+    }}
+    body != "" {{
+      t = $0; if (tabs) sub(/^\t+/, "", t)
+      if (t == body) {{ body = ""; print; next }}
+      if (keep) print
+      next
+    }}
     {{
-      line = $0
-      if (match(line, heredoc)) {{
-        body = substr(line, RSTART, RLENGTH); tabs = (body ~ /^<<-/)
-        sub(/^<<-?[ \t]*/, "", body); gsub(/[^A-Za-z0-9_]/, "", body)
+      print
+      if (match($0, heredoc)) {{
+        body = substr($0, RSTART, RLENGTH); sub(/^[^<]*<</, "", body)
+        tabs = (body ~ /^-/); gsub(/[^A-Za-z0-9_]/, "", body)
+        keep = ($0 ~ interp)
       }}
-      gsub(q "[^" q "]*" q, "", line); gsub(/"[^"]*"/, "", line); print line
-    }}' 2>/dev/null) || words=$cmd
-  if printf '%s\n' "$words" | grep -Eq '(^|[^[:alnum:]_.-])(rm|rmdir|unlink|mv|cp|ln|install|rsync)([[:space:]]|$)'; then
+    }}' 2>/dev/null) || code=$cmd
+  # Only where a command starts: at a line, after ; & | ( or a backquote (past any
+  # then, sudo, xargs... that runs it), or as what sh -c or find -exec runs, with
+  # any path in front. Not in a quoted note: echo '... then cp the rest' is still
+  # a write.
+  lead="(^|[;&|(\`])[[:space:]]*((then|do|else|time|nohup|sudo|env|exec|xargs|command|builtin)[[:space:]]+)*"
+  runs="(^|[[:space:]])(-c|-exec|-execdir|-ok)[[:space:]]+[\"']?"
+  if printf '%s\n' "$code" | grep -Eq "($lead|$runs)[[:space:]]*([^[:space:]\"';&|]*/)?(rm|rmdir|unlink|mv|cp|ln|install|rsync)([[:space:]]|\$)"; then
     exit 0
   fi
   refuse() {{
-    printf '%s\n' '{{"hookSpecificOutput":{{"hookEventName":"PermissionRequest","decision":{{"behavior":"deny","message":"Do not write memory files with Bash. Use the Write or Edit tool for files in the memory directory (Read to look at one): those are approved automatically, a Bash write there waits for a human."}}}}}}'
+    printf '%s\n' '{{"hookSpecificOutput":{{"hookEventName":"PermissionRequest","decision":{{"behavior":"deny","message":"This command names a file in Claude Code'"'"'s memory folder, and a Bash write there waits for a human. Change memory files with the Write or Edit tool (Read to look at one): those are approved automatically. If this command does not touch memory, run it without naming the memory folder."}}}}}}'
     exit 0
   }}
   # names_memory ROOT: the command names ROOT/projects/<key>/memory, however ROOT
@@ -447,7 +465,7 @@ if [ "$(field tool_name)" = Bash ]; then
     set -- "$1"
     case "$1" in "$HOME"/*) set -- "$1" "~${{1#"$HOME"}}" "\$HOME${{1#"$HOME"}}" "\${{HOME}}${{1#"$HOME"}}" ;; esac
     for s in "$@"; do
-      printf '%s\n' "$cmd" | grep -F -- "$s/projects/" \
+      printf '%s\n' "$code" | grep -F -- "$s/projects/" \
         | grep -Eq "/projects/[^/[:space:]]+/memory([/\"'[:space:]]|\$)" && return 0
     done
     return 1
@@ -1967,7 +1985,11 @@ mod tests {
             format!("M=\"{m}/MEMORY.md\"; sed -i '' 's/0.3.60/0.3.61/' \"$M\""),
             // A literal path whose note says "install" (2026-11-07).
             format!("cat >> \"{m}/status.md\" <<'EOF'\nplugin 0.2.0 speed, install\nEOF"),
+            // Quoted notes whose words name a command (2026-10-16, 2026-10-18).
             format!("echo '- [x](x.md) — then cp the rest' >> \"{m}/MEMORY.md\""),
+            format!("M=\"{m}\"; sed -i '' 's/phone install waits;/installed;/' \"$M/MEMORY.md\""),
+            // A path only inside the code an interpreter reads.
+            format!("set -e\npython3 - <<'EOF'\np='{m}/MEMORY.md'\nopen(p,'a').write('x')\nEOF"),
             "cat >> ~/.claude/projects/-repo/memory/x.md <<'EOF'\nhi\nEOF".into(),
             "cat >> \"$HOME/.claude/projects/-repo/memory/x.md\" <<'EOF'\nhi\nEOF".into(),
             "M=\"${HOME}/.claude/projects/-repo/memory\"; echo hi >> \"$M/x.md\"".into(),
@@ -1981,6 +2003,15 @@ mod tests {
             format!("M=\"{m}\"; rm \"$M/stale.md\""),
             format!("cd \"{m}\" && mv old.md new.md"),
             format!("cat >> \"{m}/x.md\" <<'EOF'\nhi\nEOF\nrm -rf /tmp/scratch"),
+            // ...including inside quotes, a shell's -c, or an interpreter's heredoc.
+            "bash -c 'rm ~/.claude/projects/-repo/memory/old.md'".into(),
+            format!("sh -c \"mv {m}/a.md {m}/b.md\""),
+            format!("find \"{m}\" -name '*.bak' -exec sh -c 'rm \"$1\"' _ {{}} \\;"),
+            format!("bash <<'EOF'\nrm \"{m}/old.md\"\nEOF"),
+            // A shift is not a heredoc: the rm on the next line still counts.
+            format!("python3 -c 'x = 1<<n'\nrm \"{m}/a.md\""),
+            // Text that only mentions the memory folder is not about it.
+            "git commit -F - <<'EOF'\nDocument that memory lives in ~/.claude/projects/-repo/memory/\nEOF".into(),
             // Not a memory directory.
             format!("cat > \"{}/projects/-repo/notes.md\" <<'EOF'\nhi\nEOF", account.to_string_lossy()),
             format!("cat > \"{}/projects/-repo/memoryx/a.md\"", account.to_string_lossy()),
