@@ -415,57 +415,30 @@ cfg=${{CLAUDE_CONFIG_DIR:-}}
 # and a memory directory named in the command itself. Claude Code suggests the
 # directory only when it can read the path, so a path held in a shell variable
 # (M=".../memory"; cat >> "$M/x.md") shows up only in the text.
-# Deleting, moving, copying or linking is left to the human: Write and Edit can't
-# do it, so refusing would make it impossible, not redirect it.
-# Both checks read the command without the bodies of heredocs that only feed text
-# (cat <<EOF, git commit -F - <<EOF): a note that says "install", or a commit
-# message that mentions the memory folder, is not a command. A heredoc fed to an
-# interpreter (python3 - <<EOF, bash <<EOF) is code, so it stays, and so do quoted
-# strings (sh -c 'rm ...' is a delete).
+# Every such prompt is refused, deletes and moves included, and nothing tries to
+# tell a write from a delete or a mention: shell text can't be sorted that way
+# reliably (two review rounds of attempts each failed both ways), and the costs
+# are lopsided — a wrong refusal costs the agent one turn, a miss stalls it until
+# a human looks. A delete or rename the agent really needs goes to its human to
+# run, by the refusal's own words. A command that only mentions a memory path (a
+# commit message) is refused too, and told to leave the path out.
 if [ "$(field tool_name)" = Bash ]; then
   command -v grep >/dev/null 2>&1 || exit 0
   cmd=$(field tool_input.command)
-  code=$(printf '%s\n' "$cmd" | awk '
-    BEGIN {{
-      q = "\047"
-      heredoc = "(^|[ \t;|&(])<<-?[ \t]*[" q "\"]?[A-Za-z_][A-Za-z0-9_]*"
-      interp = "(^|[ \t;|&(/])(python[0-9.]*|node|deno|bun|perl|ruby|php|sh|bash|zsh|dash|ksh|osascript)([ \t]|$)"
-    }}
-    body != "" {{
-      t = $0; if (tabs) sub(/^\t+/, "", t)
-      if (t == body) {{ body = ""; print; next }}
-      if (keep) print
-      next
-    }}
-    {{
-      print
-      if (match($0, heredoc)) {{
-        body = substr($0, RSTART, RLENGTH); sub(/^[^<]*<</, "", body)
-        tabs = (body ~ /^-/); gsub(/[^A-Za-z0-9_]/, "", body)
-        keep = ($0 ~ interp)
-      }}
-    }}' 2>/dev/null) || code=$cmd
-  # Only where a command starts: at a line, after ; & | ( or a backquote (past any
-  # then, sudo, xargs... that runs it), or as what sh -c or find -exec runs, with
-  # any path in front. Not in a quoted note: echo '... then cp the rest' is still
-  # a write.
-  lead="(^|[;&|(\`])[[:space:]]*((then|do|else|time|nohup|sudo|env|exec|xargs|command|builtin)[[:space:]]+)*"
-  runs="(^|[[:space:]])(-c|-exec|-execdir|-ok)[[:space:]]+[\"']?"
-  if printf '%s\n' "$code" | grep -Eq "($lead|$runs)[[:space:]]*([^[:space:]\"';&|]*/)?(rm|rmdir|unlink|mv|cp|ln|install|rsync)([[:space:]]|\$)"; then
-    exit 0
-  fi
   refuse() {{
-    printf '%s\n' '{{"hookSpecificOutput":{{"hookEventName":"PermissionRequest","decision":{{"behavior":"deny","message":"This command names a file in Claude Code'"'"'s memory folder, and a Bash write there waits for a human. Change memory files with the Write or Edit tool (Read to look at one): those are approved automatically. If this command does not touch memory, run it without naming the memory folder."}}}}}}'
+    printf '%s\n' '{{"hookSpecificOutput":{{"hookEventName":"PermissionRequest","decision":{{"behavior":"deny","message":"This command names Claude Code'"'"'s memory folder, and a Bash command there waits for a human. Change memory files with the Write or Edit tool (Read to look at one): those are approved automatically. To delete or rename a memory file, ask your human to run the command. If this command does not touch memory, run it without naming the memory folder."}}}}}}'
     exit 0
   }}
   # names_memory ROOT: the command names ROOT/projects/<key>/memory, however ROOT
-  # is spelled — as is, or from $HOME as ~, $HOME or ${{HOME}}.
+  # is spelled — as is, through $CLAUDE_CONFIG_DIR, or from $HOME as ~, $HOME or
+  # ${{HOME}}.
   names_memory() {{
     [ -n "$1" ] || return 1
     set -- "$1"
-    case "$1" in "$HOME"/*) set -- "$1" "~${{1#"$HOME"}}" "\$HOME${{1#"$HOME"}}" "\${{HOME}}${{1#"$HOME"}}" ;; esac
+    case "$1" in "$HOME"/*) set -- "$@" "~${{1#"$HOME"}}" "\$HOME${{1#"$HOME"}}" "\${{HOME}}${{1#"$HOME"}}" ;; esac
+    [ "$1" = "$cfg" ] && set -- "$@" "\$CLAUDE_CONFIG_DIR" "\${{CLAUDE_CONFIG_DIR}}"
     for s in "$@"; do
-      printf '%s\n' "$code" | grep -F -- "$s/projects/" \
+      printf '%s\n' "$cmd" | grep -F -- "$s/projects/" \
         | grep -Eq "/projects/[^/[:space:]]+/memory([/\"'[:space:]]|\$)" && return 0
     done
     return 1
@@ -1931,23 +1904,20 @@ mod tests {
             Some("deny")
         );
         assert_eq!(memory_hook_decision(&home, Some(&account), &bash_req(&[&other])), None);
-        // Removing, renaming or copying a memory is something Write/Edit can't do:
-        // the human is asked, as before, rather than the agent refused outright.
+        // Removing, renaming or copying is refused too: the refusal sends it to the
+        // human to run, where a prompt would have waited for one.
         for cmd in [
             "rm \"$M/stale.md\"",
             "cd \"$M\" && mv old.md new.md",
             "rmdir \"$M/sub\"",
             "cp a.md \"$M/b.md\"",
             "/bin/rm -f x.md",
+            "cat > \"$M/firm-rules.md\" <<'EOF'\nx\nEOF",
         ] {
             let mut req = bash_req(&[&memory]);
             req["tool_input"]["command"] = cmd.into();
-            assert_eq!(memory_hook_decision(&home, Some(&account), &req), None, "refused {cmd}");
+            assert_eq!(memory_hook_decision(&home, Some(&account), &req).as_deref(), Some("deny"), "let through {cmd}");
         }
-        // ...but a write that merely mentions such a word in a filename is still refused.
-        let mut req = bash_req(&[&memory]);
-        req["tool_input"]["command"] = "cat > \"$M/firm-rules.md\" <<'EOF'\nx\nEOF".into();
-        assert_eq!(memory_hook_decision(&home, Some(&account), &req).as_deref(), Some("deny"));
         assert_eq!(memory_hook_decision(&home, Some(&account), &bash_req(&[])), None);
         let mut plain = bash_req(&[]);
         plain.as_object_mut().unwrap().remove("permission_suggestions");
@@ -1998,20 +1968,27 @@ mod tests {
             assert_eq!(decide(cmd.clone()).as_deref(), Some("deny"), "let through: {cmd}");
         }
 
-        let unanswered = [
-            // Deleting and moving are still the human's.
+        // Deletes and moves, however written, and mere mentions: refused, never left
+        // to wait. The refusal tells the agent to have its human run a delete, and to
+        // drop the path from a command that doesn't touch memory.
+        let also_refused = [
             format!("M=\"{m}\"; rm \"$M/stale.md\""),
             format!("cd \"{m}\" && mv old.md new.md"),
             format!("cat >> \"{m}/x.md\" <<'EOF'\nhi\nEOF\nrm -rf /tmp/scratch"),
-            // ...including inside quotes, a shell's -c, or an interpreter's heredoc.
             "bash -c 'rm ~/.claude/projects/-repo/memory/old.md'".into(),
             format!("sh -c \"mv {m}/a.md {m}/b.md\""),
-            format!("find \"{m}\" -name '*.bak' -exec sh -c 'rm \"$1\"' _ {{}} \\;"),
-            format!("bash <<'EOF'\nrm \"{m}/old.md\"\nEOF"),
-            // A shift is not a heredoc: the rm on the next line still counts.
-            format!("python3 -c 'x = 1<<n'\nrm \"{m}/a.md\""),
-            // Text that only mentions the memory folder is not about it.
+            format!("find \"{m}\" -name '*.bak' -delete"),
+            format!("if mv \"{m}/a.md\" \"{m}/b.md\"; then echo ok; fi"),
+            format!("echo '- run `rm -rf dist` first' >> \"{m}/MEMORY.md\""),
+            format!("python3 - <<'EOF'\nln = 3\nopen('{m}/MEMORY.md','a').write('x')\nEOF"),
+            "M=\"$CLAUDE_CONFIG_DIR/projects/-repo/memory\"; echo hi >> \"$M/x.md\"".into(),
             "git commit -F - <<'EOF'\nDocument that memory lives in ~/.claude/projects/-repo/memory/\nEOF".into(),
+        ];
+        for cmd in also_refused {
+            assert_eq!(decide(cmd.clone()).as_deref(), Some("deny"), "let through: {cmd}");
+        }
+
+        let unanswered = [
             // Not a memory directory.
             format!("cat > \"{}/projects/-repo/notes.md\" <<'EOF'\nhi\nEOF", account.to_string_lossy()),
             format!("cat > \"{}/projects/-repo/memoryx/a.md\"", account.to_string_lossy()),
