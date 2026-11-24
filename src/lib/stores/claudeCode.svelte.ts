@@ -1967,7 +1967,7 @@ function createClaudeCodeStore() {
 
   interface TaskToolInput {
     title?: string;
-    detail?: string;
+    detail?: string | null;
     /** Optional per-task workstream name; overrides the call-level `workstream` (empty/null leaves loose). */
     workstream?: string | null;
     /** Declared as an enum in the schema, but nothing enforces it at runtime — typed as a
@@ -1983,7 +1983,7 @@ function createClaudeCodeStore() {
     id?: string;
     status?: string;
     title?: string;
-    detail?: string;
+    detail?: string | null;
     workstream?: string | null;
     blocked_by?: string[];
     /** Incremental dependency edits. `blocked_by` replaces the whole array, which is
@@ -2172,9 +2172,13 @@ function createClaudeCodeStore() {
     const blockers = new Map<number, TaskBlocker>();
     for (const [i, { t, rawIdx }] of indexedInputs.entries()) {
       const fieldErr =
+        validateOptionalStringArg(t.detail, 'detail', { allowNull: true }) ??
         validateOptionalStringArg(t.status, 'status') ??
         validateOptionalStringArg(t.workstream, 'workstream', { allowNull: true }) ??
-        validateStringArrayArg(t.blocked_by, 'blocked_by', '["<task-id>"]');
+        validateStringArrayArg(t.blocked_by, 'blocked_by', '["<task-id>"]') ??
+        (t.assign_to_me !== undefined && typeof t.assign_to_me !== 'boolean'
+          ? 'assign_to_me must be a boolean.'
+          : null);
       if (fieldErr) {
         return { error: `tasks[${rawIdx}] "${t.title!.trim()}": ${fieldErr} Nothing was created.`, ...warnField };
       }
@@ -2311,10 +2315,12 @@ function createClaudeCodeStore() {
           refused.push({ id: u.id!, reason: 'reserved', detail: guard });
           continue;
         }
-        // Validate optional text fields BEFORE touching anything so a non-string title/note/
-        // status/workstream is refused rather than silently skipped while reporting updated.
+        // Validate optional text fields BEFORE touching anything so a non-string title/detail/
+        // note/status/workstream is refused rather than silently skipped or poisoning Rust
+        // `set_workspace_tasks` deserialization (`Task.detail: Option<String>`).
         const textArgErr =
           validateOptionalStringArg(u.title, 'title') ??
+          validateOptionalStringArg(u.detail, 'detail', { allowNull: true }) ??
           validateOptionalStringArg(u.note, 'note') ??
           validateOptionalStringArg(u.status, 'status') ??
           validateOptionalStringArg(u.workstream, 'workstream', { allowNull: true });
