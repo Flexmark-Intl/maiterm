@@ -429,17 +429,21 @@ if [ "$(field tool_name)" = Bash ]; then
     printf '%s\n' '{{"hookSpecificOutput":{{"hookEventName":"PermissionRequest","decision":{{"behavior":"deny","message":"This command names Claude Code'"'"'s memory folder, and a Bash command there waits for a human. Change memory files with the Write or Edit tool (Read to look at one): those are approved automatically. To delete or rename a memory file, ask your human to run the command. If this command does not touch memory, run it without naming the memory folder."}}}}}}'
     exit 0
   }}
+  # The command with its quotes, backslashes and braces taken out, so a root reads
+  # the same however the shell is told it: "$HOME"/.claude, ${{HOME}}, a
+  # ${{CLAUDE_CONFIG_DIR:-...}} default, Application\ Support.
+  flat=$(printf '%s\n' "$cmd" | tr -d '"\\{{}}' | tr -d "'")
   # names_memory ROOT: the command names ROOT/projects/<key>/memory, however ROOT
-  # is spelled — as is, through $CLAUDE_CONFIG_DIR, or from $HOME as ~, $HOME or
-  # ${{HOME}}.
+  # is spelled — as is, through $CLAUDE_CONFIG_DIR, or from $HOME as ~ or $HOME —
+  # followed by anything but more of a name (a ; or ) after an unquoted path counts).
   names_memory() {{
     [ -n "$1" ] || return 1
     set -- "$1"
-    case "$1" in "$HOME"/*) set -- "$@" "~${{1#"$HOME"}}" "\$HOME${{1#"$HOME"}}" "\${{HOME}}${{1#"$HOME"}}" ;; esac
-    [ "$1" = "$cfg" ] && set -- "$@" "\$CLAUDE_CONFIG_DIR" "\${{CLAUDE_CONFIG_DIR}}"
+    case "$1" in "$HOME"/*) set -- "$@" "~${{1#"$HOME"}}" "\$HOME${{1#"$HOME"}}" ;; esac
+    [ "$1" = "$cfg" ] && set -- "$@" "\$CLAUDE_CONFIG_DIR"
     for s in "$@"; do
-      printf '%s\n' "$cmd" | grep -F -- "$s/projects/" \
-        | grep -Eq "/projects/[^/[:space:]]+/memory([/\"'[:space:]]|\$)" && return 0
+      printf '%s\n' "$flat" | grep -F -- "$s/projects/" \
+        | grep -Eq "/projects/[^/[:space:]]+/memory([^[:alnum:]_.-]|\$)" && return 0
     done
     return 1
   }}
@@ -1982,6 +1986,16 @@ mod tests {
             format!("echo '- run `rm -rf dist` first' >> \"{m}/MEMORY.md\""),
             format!("python3 - <<'EOF'\nln = 3\nopen('{m}/MEMORY.md','a').write('x')\nEOF"),
             "M=\"$CLAUDE_CONFIG_DIR/projects/-repo/memory\"; echo hi >> \"$M/x.md\"".into(),
+            // Unquoted, with shell punctuation straight after (review, 2026-11-24).
+            "M=$HOME/.claude/projects/-repo/memory; echo hi >> \"$M/x.md\"".into(),
+            "M=~/.claude/projects/-repo/memory; echo hi >> $M/x.md".into(),
+            "M=$CLAUDE_CONFIG_DIR/projects/-repo/memory; echo hi >> \"$M/x.md\"".into(),
+            "D=$(echo ~/.claude/projects/-repo/memory); echo hi >> $D/x.md".into(),
+            "cd ~/.claude/projects/-repo/memory&&echo hi >> x.md".into(),
+            // A root the shell is told in pieces.
+            "echo hi >> \"$HOME\"/.claude/projects/-repo/memory/x.md".into(),
+            "echo hi >> ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/-repo/memory/x.md".into(),
+            format!("echo hi >> {}/projects/-repo/memory/x.md", account.to_string_lossy().replace('/', "\\/")),
             "git commit -F - <<'EOF'\nDocument that memory lives in ~/.claude/projects/-repo/memory/\nEOF".into(),
         ];
         for cmd in also_refused {
