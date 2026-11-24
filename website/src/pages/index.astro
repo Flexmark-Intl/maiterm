@@ -161,7 +161,21 @@ const EVERYTHING = [
   },
   {
     title: 'Deshittify your agent',
-    body: 'One Preferences section switches off the parts of a coding agent that serve its vendor: telemetry, error uploads, feedback nags, Remote Control (off by default), other people’s comments on your claude.ai artifacts arriving as prompts (ignored by default), and the <code>Co-Authored-By</code> trailer in your history.',
+    body: 'One Preferences section switches off the parts of a coding agent that serve its vendor: telemetry, error uploads, feedback nags, Remote Control (off by default), other people’s comments on your claude.ai artifacts arriving as prompts (ignored by default), the fullscreen renderer that keeps a session out of your scrollback (classic UI kept by default), and the <code>Co-Authored-By</code> trailer in your history.',
+  },
+  {
+    // v3.18.0. Backed by features/agent-defaults.md, checked against src-tauri/src/agent_defaults.rs
+    // and components/agentDefaults/AgentDefaultsPane.svelte. Only TICKED settings are managed;
+    // hosts need python3 — don't promise "every machine" without the tick.
+    title: 'Every agent’s defaults, one place',
+    body: 'Set what every session starts with — Claude Code’s model, effort and advisor, Codex’s model and reasoning effort, Antigravity’s mode — written into each agent’s own settings file. Tick a setting and every SSH host you bridge to follows it, removals included; an unticked one is never touched.',
+  },
+  {
+    // v3.18.0. Backed by features/apple-mail.md, checked against src-tauri/src/mail/ and
+    // components/mail/MailPane.svelte. macOS only, off by default, ticked accounts only, never
+    // Hive workers. Read-only — never say an agent can send or reply.
+    title: 'Agents that can read your mail',
+    body: 'On a Mac, let agents search and read the mail you already have in Apple Mail — a message, a whole thread, an attachment — for the accounts you tick. Read-only: nothing is sent, moved or marked read, and it stays off until you turn it on.',
   },
   {
     title: 'A Rust terminal underneath',

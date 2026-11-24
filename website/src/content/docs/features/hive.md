@@ -72,7 +72,7 @@ A worker's permission prompts, questions and blockers go to the Queen first. She
 
 ### The Queen can change the Hive's settings
 
-The Queen can change any setting you can: workers at once, models and effort, setup and land checks, network hosts, local database sockets, tools, output folders, push after each land, workers on your phone, the run queue, the prompt timeout, the digest and the worker check. Two checkpoints decide what she applies herself and what comes to you as a card:
+The Queen can change any setting you can: workers at once, models and effort, the workers' advisor, setup and land checks, network hosts, local database sockets, tools, output folders, push after each land, workers on your phone, the run queue, the prompt timeout, the digest and the worker check. Two checkpoints decide what she applies herself and what comes to you as a card:
 
 - **What workers may use** — websites, local database sockets, tools (MCP servers, CLIs) and the hosts paid generators reach. **Queen** by default, so when a worker is stuck on one she grants it at once instead of the Hive waiting hours for you; you're told each time, and her reason is kept in her decision log.
 - **Changing other Hive settings** — everything else. **Ask me** by default, so each change is a card.
@@ -96,6 +96,8 @@ When you answer something yourself, the Queen can record it as a **precedent** a
 **The network.** A worker reaches only the hosts the Queen has granted the Hive, plus the package registries for installs. A refused host goes to her; she grants or removes hosts herself — or asks you, if you've set *What workers may use* to **Ask me** — with a reason that's kept in her decision log, and you can edit the list under **Workers and access…**.
 
 **A local database.** A worker's sandbox closes off this Mac's network services, so a builder whose tests need a database can't reach the one you run. Under **Workers and access…**, **Local databases workers may connect to** takes the socket of a Postgres, MySQL or Redis server on this Mac; builders, their jobs and their land checks may then connect to it. Reviewers never get one. A worker reaches every database that server holds, yours included, so give the Hive a database of its own. Only a socket named like a database's (`.s.PGSQL.<port>`, `mysql.sock`, `redis.sock`) is accepted. The Queen can add one under *What workers may use*, as she does hosts, and it applies from each worker's next launch.
+
+**An advisor.** Workers and reviewers consult an advisor, a stronger model they check with before substantive work. **Workers' advisor**, under **Workers and access…**, is **As in my Claude settings** by default — the advisor your own Claude tabs get, which you can set in [Agent Defaults](/features/agent-defaults/#the-advisor) — or **None**, or a Claude model. Each consultation costs, and a named advisor less capable than the workers' model is refused, since Claude would skip it. The Queen can change it under *Changing other Hive settings*; it reaches each worker at its next launch. The Queen herself uses your Claude settings, like any tab.
 
 **Reviewed.** A finished builder's work is checked by a fresh reviewer worker, on a copy pinned at the commits it reported. Three failed reviews go to the Queen to settle.
 
@@ -173,7 +175,7 @@ A finished Hive is **Done**, with the Queen's **Report**. Give a Done or paused 
 
 The Queen keeps running after Done. Write to her in the Hive's message box, or from your phone, and the Hive picks up again in the same session. Typing in her own terminal doesn't wake the Hive — her terminal says so while the Hive is Done — so use the message box.
 
-**Delete Hive…** lists what stops, which branches haven't landed, and what's kept. Clean copies are removed; anything holding work, the shared memory included, stays on disk, and no branch is ever deleted.
+**Delete Hive…** lists what stops, which branches haven't landed, and what's kept. Clean copies are removed; anything holding work, the shared memory included, stays on disk, and no branch is ever deleted. The workers' Claude chats are deleted with the Hive — workers never clean up their own transcripts, and deleting is the point after which none is resumed or read back. The sheet lists them and the toast counts them; the Queen's chats are kept.
 
 ## An agent can offer you a Hive
 

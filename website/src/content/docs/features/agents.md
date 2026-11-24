@@ -258,6 +258,10 @@ Listed while **Preferences → Files → Enable Files** is on. See [Files](/feat
 
 With **Preferences → Chrome extension** on, an agent gets eleven `browser…` tools for the Chrome tabs you linked to it: read their console errors and failing requests (with their responses), read the page, click, type, navigate and take screenshots, signed in as you, and wait for text to appear or go. A Claude Code agent is told which tabs you've linked, and what each is for, with your next message. Only you link a tab. See [Chrome Extension](/features/chrome-extension/#the-tools).
 
+### Mail (Mac)
+
+With **Preferences → Mail → Let agents read Apple Mail** on, an agent gets six read-only tools over the accounts you ticked: `listMailboxes`, `getRecentMail`, `searchMail`, `readMail`, `readMailThread` and `saveMailAttachment`. Nothing is sent, moved or marked read, and Hive workers never get them. See [Apple Mail](/features/apple-mail/).
+
 ### Supervision
 
 If [Overlord](/features/overlord/) is enabled and this window has an Overlord workspace, every supervised agent also gets `replyToOverlord`, and the supervisor agent gets a set of tools of its own — driving another tab, answering a prompt it's stuck at, proposing rule changes, and putting a finished session away. See [Overlord](/features/overlord/).
