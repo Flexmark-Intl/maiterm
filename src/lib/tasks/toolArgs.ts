@@ -58,7 +58,23 @@ export const BLOCKER_OPTION_KEYS = new Set(['label', 'detail', 'recommended']);
  *  but never suggested as a fuzzy match for a mistyped business key. */
 const NO_FUZZY_TOP_LEVEL = new Set(['tabId']);
 
-const LIST_TASKS_HINTS: Record<string, string> = {
+function normalizeKey(key: string): string {
+  return key.toLowerCase().replace(/[-_\s]/g, '');
+}
+
+/** Build a prototype-free lookup table keyed by normalized key (lowercase, separators stripped)
+ *  so `Object.prototype` names like `constructor`/`toString`/`__proto__` never match and
+ *  camelCase/kebab-case aliases (`blockOn`, `assign-to`) hit their curated hints instead of
+ *  falling through to Levenshtein. */
+function makeHintMap(entries: Record<string, string>): ReadonlyMap<string, string> {
+  const map = new Map<string, string>();
+  for (const [k, v] of Object.entries(entries)) {
+    map.set(normalizeKey(k), v);
+  }
+  return map;
+}
+
+const LIST_TASKS_HINTS = makeHintMap({
   workstream: 'listTasks returns all workstreams grouped; it does not filter by workstream',
   workstreams: 'listTasks returns all workstreams grouped; it does not filter by workstream',
   group: 'listTasks returns all workstreams grouped; it does not filter by workstream',
@@ -76,9 +92,9 @@ const LIST_TASKS_HINTS: Record<string, string> = {
   top: 'did you mean "limit"?',
   page_size: 'did you mean "limit"?',
   filter: 'did you mean "status" or "ready"?',
-};
+});
 
-const CREATE_TASKS_TOP_HINTS: Record<string, string> = {
+const CREATE_TASKS_TOP_HINTS = makeHintMap({
   task: 'did you mean "tasks"?',
   items: 'did you mean "tasks"?',
   list: 'did you mean "tasks"?',
@@ -95,9 +111,9 @@ const CREATE_TASKS_TOP_HINTS: Record<string, string> = {
   blocker: 'belongs inside each item of "tasks"',
   blocked_by: 'belongs inside each item of "tasks"',
   assign_to_me: 'belongs inside each item of "tasks"',
-};
+});
 
-const CREATE_TASK_ITEM_HINTS: Record<string, string> = {
+const CREATE_TASK_ITEM_HINTS = makeHintMap({
   notes: 'did you mean "detail"?',
   note: 'did you mean "detail"?',
   description: 'did you mean "detail"?',
@@ -131,9 +147,9 @@ const CREATE_TASK_ITEM_HINTS: Record<string, string> = {
   question: 'did you mean "blocker"?',
   decision: 'did you mean "blocker"?',
   action: 'did you mean "blocker"?',
-};
+});
 
-const UPDATE_TASKS_TOP_HINTS: Record<string, string> = {
+const UPDATE_TASKS_TOP_HINTS = makeHintMap({
   update: 'did you mean "updates"?',
   tasks: 'did you mean "updates"?',
   items: 'did you mean "updates"?',
@@ -151,11 +167,10 @@ const UPDATE_TASKS_TOP_HINTS: Record<string, string> = {
   unblock_from: 'belongs inside each item of "updates"',
   blocker: 'belongs inside each item of "updates"',
   assign_to: 'belongs inside each item of "updates"',
-};
+});
 
-const UPDATE_TASK_ITEM_HINTS: Record<string, string> = {
+const UPDATE_TASK_ITEM_HINTS = makeHintMap({
   task_id: 'did you mean "id"?',
-  taskid: 'did you mean "id"?',
   notes: 'did you mean "note" (append to progress log) or "detail" (replace body)?',
   comment: 'did you mean "note"?',
   log: 'did you mean "note"?',
@@ -189,21 +204,20 @@ const UPDATE_TASK_ITEM_HINTS: Record<string, string> = {
   question: 'did you mean "blocker"?',
   decision: 'did you mean "blocker"?',
   action: 'did you mean "blocker"?',
-};
+});
 
-const DELETE_TASKS_HINTS: Record<string, string> = {
+const DELETE_TASKS_HINTS = makeHintMap({
   id: 'did you mean "ids"?',
   task_id: 'did you mean "ids"?',
   task_ids: 'did you mean "ids"?',
-  taskids: 'did you mean "ids"?',
   tasks: 'did you mean "ids"?',
   workstream: 'did you mean "workstreams"?',
   workstream_names: 'did you mean "workstreams"?',
   groups: 'did you mean "workstreams"?',
   group: 'did you mean "workstreams"?',
-};
+});
 
-const BLOCKER_HINTS: Record<string, string> = {
+const BLOCKER_HINTS = makeHintMap({
   type: 'did you mean "kind"?',
   prompt: 'did you mean "question"?',
   title: 'did you mean "question"?',
@@ -232,9 +246,9 @@ const BLOCKER_HINTS: Record<string, string> = {
   peer: 'did you mean "run_in"?',
   tab: 'did you mean "run_in"?',
   tab_id: 'did you mean "run_in"?',
-};
+});
 
-const BLOCKER_OPTION_HINTS: Record<string, string> = {
+const BLOCKER_OPTION_HINTS = makeHintMap({
   title: 'did you mean "label"?',
   name: 'did you mean "label"?',
   text: 'did you mean "label"?',
@@ -249,7 +263,7 @@ const BLOCKER_OPTION_HINTS: Record<string, string> = {
   default: 'did you mean "recommended"?',
   preferred: 'did you mean "recommended"?',
   selected: 'did you mean "recommended"?',
-};
+});
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -274,18 +288,18 @@ function levenshtein(a: string, b: string): number {
 function suggestKey(
   key: string,
   allowed: ReadonlySet<string>,
-  hints: Readonly<Record<string, string>>,
+  hints: ReadonlyMap<string, string>,
   noFuzzy?: ReadonlySet<string>,
 ): string | null {
   const lower = key.toLowerCase();
-  const direct = hints[key] ?? hints[lower];
+  const norm = normalizeKey(key);
+  const direct = hints.get(norm);
   if (direct) return direct;
 
   // Case / separator mismatch (e.g. `blockedBy` -> `blocked_by`, `runIn` -> `run_in`).
-  const norm = lower.replace(/[-_\s]/g, '');
   for (const candidate of allowed) {
     if (noFuzzy?.has(candidate)) continue;
-    if (candidate.toLowerCase().replace(/[-_\s]/g, '') === norm) {
+    if (normalizeKey(candidate) === norm) {
       return `did you mean "${candidate}"?`;
     }
   }
@@ -313,7 +327,7 @@ function suggestKey(
 function collectUnknownKeys(
   obj: unknown,
   allowed: ReadonlySet<string>,
-  hints: Readonly<Record<string, string>>,
+  hints: ReadonlyMap<string, string>,
   warnings: string[],
   prefix?: string,
   noFuzzy?: ReadonlySet<string>,

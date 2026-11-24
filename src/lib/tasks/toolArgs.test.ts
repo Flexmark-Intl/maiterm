@@ -137,6 +137,18 @@ describe('checkCreateTasksArgs', () => {
       }),
     ).toEqual([]);
   });
+
+  it('never leaks Object.prototype properties as hints and normalizes camelCase/kebab-case aliases', () => {
+    expect(
+      checkCreateTasksArgs(JSON.parse('{"__proto__": 1, "tasks": [{"title": "x", "constructor": 1, "toString": 1, "blockOn": ["id-1"], "assign-to": "me"}]}')),
+    ).toEqual([
+      'ignored unknown key "__proto__"',
+      'tasks[0]: ignored unknown key "constructor"',
+      'tasks[0]: ignored unknown key "toString"',
+      'tasks[0]: ignored unknown key "blockOn" (did you mean "blocked_by"?)',
+      'tasks[0]: ignored unknown key "assign-to" (did you mean "assign_to_me"? (boolean; use updateTasks "assign_to" to assign to another tab))',
+    ]);
+  });
 });
 
 describe('checkUpdateTasksArgs', () => {
