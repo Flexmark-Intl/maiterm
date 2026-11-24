@@ -1,5 +1,54 @@
 # Changelog
 
+## v3.18.0
+
+Agent Defaults sets each agent's model, effort and advisor in one place and keeps your ssh hosts in step. Agents can read your Apple Mail, and watch scripts run on Windows.
+
+### Agent Defaults
+
+- **A new Preferences → Agent Defaults section** sets each agent's own defaults in its own settings file, so every session starts with them, with no `/model` or `/advisor` each time:
+  - **Claude:** the advisor, the model, effort per model, and how long transcripts are kept.
+  - **Codex:** the model, reasoning effort and approvals reviewer.
+  - **Antigravity:** agent mode, thinking display and queued messages.
+- **Only the settings you tick are managed.** maiTerm never changes an unticked setting, here or on a host. A ticked setting is copied to every ssh host your tabs bridge to, including when you clear it. A change reaches hosts this window is already connected to at once (hosts need `python3`).
+- **Choosing an advisor also turns on the switch it needs** when telemetry is off, because without it Claude silently ignores the advisor. The section warns you when something in your settings would still keep it off.
+- **Claude keeps transcripts for 500 days instead of 30 on this computer.** maiTerm sets this once, and only where nothing sets a retention already. It isn't copied to ssh hosts unless you tick it. Change it in the same section.
+
+### Apple Mail for agents (Mac)
+
+- **Agents can read your Mail**: list mailboxes, page recent mail, search, read a message or a whole thread, and save an attachment where the agent can open it, ssh hosts included. It's read-only and never opens Mail.app, so nothing is marked read.
+- **Off until you turn it on** under Preferences → Mail, and agents see only the accounts you tick there. Hive workers never get it.
+
+### Hive
+
+- **Workers and reviewers consult an advisor.** By default it's the one your own Claude tabs use; Hive settings → Workers and access can pick another model or none, and the Queen can change it under the Settings checkpoint. A model you name that's weaker than the workers' own is refused, since Claude would skip it anyway.
+- **Deleting a Hive deletes its workers' Claude chats.** Workers never clean up their own transcripts, so these used to stay on disk. The delete sheet lists them and the toast counts them. The Queen's chats are kept.
+
+### Claude Code
+
+- **Keep the classic terminal UI**, under Preferences → Deshittification, on by default. New Claude Code installs can switch themselves to the fullscreen renderer, where nothing reaches the terminal's scrollback: in maiTerm you couldn't scroll back, search, or keep a session across a restart. If you picked fullscreen yourself it's left alone, and `/tui fullscreen` still opts back in. On an ssh host, maiTerm sets it only where Claude's `tui` setting is unset.
+- **Agents stop waiting on you to write their memory.** A shell command that names Claude's memory folder and would have asked your permission is refused at once instead, with a note to use Write or Edit (or to ask you to run a delete). One such prompt stalled a checkpoint before compaction for 25 minutes.
+- **Your Claude and Codex settings files are safe from maiTerm's own writers.** One trailing comma in `~/.claude/settings.json` used to make maiTerm replace every setting in it with its hooks. A file maiTerm can't read is now left alone, every writer edits under one lock, and a dotfiles symlink stays a symlink.
+- **A `claude -p` an agent runs no longer takes over its tab.** After a restart, two tabs came back as an agent's throwaway probe instead of their own chats.
+
+### Tasks
+
+- **A malformed task call can no longer corrupt a saved task list.** The task tools check every argument's type before anything is saved, and refuse a bad one with what was wrong instead of dropping it quietly. An agent can give each task its own workstream in one `createTasks` call, and a misspelled field is named back with the right spelling.
+
+### Windows
+
+- **Follow-up watch scripts run on Windows**, under Git Bash, with nothing they start outliving the run.
+
+### Terminal
+
+- **Copy works in full-screen apps.** In Claude's fullscreen mode, vim or less, Copy and Cmd/Ctrl+C copy the highlighted text; the menu item used to be greyed out and the keys sent ^C.
+- **A reloaded window keeps its agents.** After the page reloads (a WebKit crash, say), agents idle at their prompt no longer read as offline, and the mesh no longer opens its readiness dialog over agents that were all still running.
+
+### maiLink
+
+- **The desktop is ready for one phone paired with several computers**, and for attaching `.log`, `.txt`, `.csv` and `.md` files from the phone. The maiLink app that uses them hasn't been released yet.
+- **A reloaded tab's phone thread follows its current chat**, instead of falling back to the conversation from before the reload when the agent goes idle.
+
 ## v3.17.1
 
 - **Pushing stays yours.** The Queen can no longer switch on push after land, even when you've handed her the Settings checkpoint. Turning it on always comes to you as a card. Switching it off still follows the Settings checkpoint.
