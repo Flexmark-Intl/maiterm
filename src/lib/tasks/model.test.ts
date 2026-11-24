@@ -840,5 +840,33 @@ describe('parseBlocker malformed runtime payloads', () => {
       'agent',
     );
     expect(badOptionLabel.ok).toBe(false);
+
+    const badCommand = parseBlocker(
+      { kind: 'action', question: 'Run migration?', command: ['npm', 'run', 'migrate'] as unknown as string },
+      'agent',
+    );
+    expect(badCommand.ok).toBe(false);
+    if (!badCommand.ok) expect(badCommand.detail).toContain('blocker.command must be a string');
+
+    const badContext = parseBlocker(
+      { kind: 'decision', question: 'Pick one?', context: ['a', 'b'] as unknown as string },
+      'agent',
+    );
+    expect(badContext.ok).toBe(false);
+    if (!badContext.ok) expect(badContext.detail).toContain('blocker.context must be a string');
+
+    const badOptionDetail = parseBlocker(
+      { kind: 'decision', question: 'Pick one?', options: [{ label: 'A', detail: ['fast'] as unknown as string }] },
+      'agent',
+    );
+    expect(badOptionDetail.ok).toBe(false);
+    if (!badOptionDetail.ok) expect(badOptionDetail.detail).toContain('blocker.options[].detail must be a string');
+
+    const badRunIn = parseBlocker(
+      { kind: 'action', question: 'Run?', command: 'make', run_in: 123 as unknown as string },
+      'agent',
+    );
+    expect(badRunIn.ok).toBe(false);
+    if (!badRunIn.ok) expect(badRunIn.detail).toContain('blocker.run_in must be a peer name');
   });
 });

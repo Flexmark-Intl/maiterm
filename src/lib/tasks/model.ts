@@ -371,6 +371,12 @@ export function parseBlocker(raw: BlockerInput, by: TaskNote['by'], now = new Da
   }
   const question = typeof raw?.question === 'string' ? raw.question.trim() : '';
   if (!question) return { ok: false, detail: 'blocker.question is required: one line saying what you need.' };
+  if (raw.context !== undefined && raw.context !== null && typeof raw.context !== 'string') {
+    return { ok: false, detail: 'blocker.context must be a string.' };
+  }
+  if (raw.command !== undefined && raw.command !== null && typeof raw.command !== 'string') {
+    return { ok: false, detail: 'blocker.command must be a string.' };
+  }
   const context = typeof raw.context === 'string' ? raw.context.trim() || null : null;
   const command = typeof raw.command === 'string' ? raw.command.trim() || null : null;
   if ([question, context ?? '', command ?? ''].some((s) => s.length > BLOCKER_TEXT_MAX)) {
@@ -399,11 +405,17 @@ export function parseBlocker(raw: BlockerInput, by: TaskNote['by'], now = new Da
   if (raw.options !== undefined && !Array.isArray(raw.options)) {
     return { ok: false, detail: 'blocker.options must be an array of { label, detail?, recommended? }.' };
   }
-  const options: BlockerOption[] = (raw.options ?? []).map((o) => ({
-    label: typeof o?.label === 'string' ? o.label.trim() : '',
-    ...(typeof o?.detail === 'string' && o.detail.trim() ? { detail: o.detail.trim() } : {}),
-    ...(o?.recommended ? { recommended: true } : {}),
-  }));
+  const options: BlockerOption[] = [];
+  for (const o of raw.options ?? []) {
+    if (o && typeof o === 'object' && o.detail !== undefined && o.detail !== null && typeof o.detail !== 'string') {
+      return { ok: false, detail: 'blocker.options[].detail must be a string.' };
+    }
+    options.push({
+      label: typeof o?.label === 'string' ? o.label.trim() : '',
+      ...(typeof o?.detail === 'string' && o.detail.trim() ? { detail: o.detail.trim() } : {}),
+      ...(o?.recommended ? { recommended: true } : {}),
+    });
+  }
   if (options.length && kind !== 'decision') {
     return { ok: false, detail: 'Only a decision blocker takes options.' };
   }

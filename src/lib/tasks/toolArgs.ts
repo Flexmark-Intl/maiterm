@@ -28,6 +28,24 @@ export function validateStringArrayArg(
   return null;
 }
 
+/** Validate an optional MCP argument that must be a string (or `null` when `allowNull`).
+ *  Returns an error message when present with a wrong type, or `null` when valid or absent.
+ *
+ *  Refusing wrong types prevents silently dropping a field (e.g. `note: [...]` or `title: 123`)
+ *  while returning success to the caller. */
+export function validateOptionalStringArg(
+  value: unknown,
+  field: string,
+  opts?: { allowNull?: boolean },
+): string | null {
+  if (value === undefined) return null;
+  if (value === null && opts?.allowNull) return null;
+  if (typeof value !== 'string') {
+    return `${field} must be a string${opts?.allowNull ? ' (or null)' : ''}.`;
+  }
+  return null;
+}
+
 /** Resolve the effective workstream name for one `createTasks` item.
  *
  *  Per-task `workstream` wins over the call-level `workstream`:

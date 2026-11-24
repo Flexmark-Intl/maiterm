@@ -20,7 +20,7 @@ import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
 import { normalizeTabBatch } from '$lib/stores/tabBatch';
 import { tasksStore } from '$lib/stores/tasks.svelte';
 import { agentTaskDeleteRefusal, agentTaskWriteRefusal, appendNote, blockerNote, blocking, coerceStatus, effectiveStatus, findWorkstream, hasUnmetDeps, isDelegation, isInFlight, isReservedTaskTitle, isRetired, normalizeTitle, parseBlocker, resolveBlockers, resolveEdges, TASK_NOTE_CAP, type BlockerInput } from '$lib/tasks/model';
-import { checkCreateTasksArgs, checkDeleteTasksArgs, checkListTasksArgs, checkUpdateTasksArgs, resolveCreateTaskWorkstream, validateStringArrayArg } from '$lib/tasks/toolArgs';
+import { checkCreateTasksArgs, checkDeleteTasksArgs, checkListTasksArgs, checkUpdateTasksArgs, resolveCreateTaskWorkstream, validateOptionalStringArg, validateStringArrayArg } from '$lib/tasks/toolArgs';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { navHistoryStore } from '$lib/stores/navHistory.svelte';
@@ -2163,13 +2163,20 @@ function createClaudeCodeStore() {
     if (reserved) {
       return { error: `"${reserved.t.title!.trim()}" is a title maiTerm keeps for its own questions to your human. Nothing was created.`, ...warnField };
     }
-    // Validated before anything is written, so a bad blocker or blocked_by on the third item
-    // doesn't leave the first two created and the agent unsure which of its list landed.
+    const callWsErr = validateOptionalStringArg(args.workstream, 'workstream', { allowNull: true });
+    if (callWsErr) {
+      return { error: `${callWsErr} Nothing was created.`, ...warnField };
+    }
+    // Validated before anything is written, so a bad field on the third item doesn't leave
+    // the first two created and the agent unsure which of its list landed.
     const blockers = new Map<number, TaskBlocker>();
     for (const [i, { t, rawIdx }] of indexedInputs.entries()) {
-      const blockedByErr = validateStringArrayArg(t.blocked_by, 'blocked_by', '["<task-id>"]');
-      if (blockedByErr) {
-        return { error: `tasks[${rawIdx}] "${t.title!.trim()}": ${blockedByErr} Nothing was created.`, ...warnField };
+      const fieldErr =
+        validateOptionalStringArg(t.status, 'status') ??
+        validateOptionalStringArg(t.workstream, 'workstream', { allowNull: true }) ??
+        validateStringArrayArg(t.blocked_by, 'blocked_by', '["<task-id>"]');
+      if (fieldErr) {
+        return { error: `tasks[${rawIdx}] "${t.title!.trim()}": ${fieldErr} Nothing was created.`, ...warnField };
       }
       if (!t.blocker) continue;
       const parsed = agentBlocker(t.blocker, loc.tab.id);
@@ -2302,6 +2309,21 @@ function createClaudeCodeStore() {
         });
         if (guard) {
           refused.push({ id: u.id!, reason: 'reserved', detail: guard });
+          continue;
+        }
+        // Validate optional text fields BEFORE touching anything so a non-string title/note/
+        // status/workstream is refused rather than silently skipped while reporting updated.
+        const textArgErr =
+          validateOptionalStringArg(u.title, 'title') ??
+          validateOptionalStringArg(u.note, 'note') ??
+          validateOptionalStringArg(u.status, 'status') ??
+          validateOptionalStringArg(u.workstream, 'workstream', { allowNull: true });
+        if (textArgErr) {
+          refused.push({
+            id: u.id!,
+            reason: 'invalid_argument',
+            detail: `${textArgErr} Nothing in this update was applied.`,
+          });
           continue;
         }
         // Resolve the assignee BEFORE touching anything, so a refused hand-off doesn't half

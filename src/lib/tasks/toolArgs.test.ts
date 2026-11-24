@@ -5,8 +5,27 @@ import {
   checkListTasksArgs,
   checkUpdateTasksArgs,
   resolveCreateTaskWorkstream,
+  validateOptionalStringArg,
   validateStringArrayArg,
 } from './toolArgs';
+
+describe('validateOptionalStringArg', () => {
+  it('accepts undefined, strings, and null when allowNull is true', () => {
+    expect(validateOptionalStringArg(undefined, 'note')).toBeNull();
+    expect(validateOptionalStringArg('ok', 'note')).toBeNull();
+    expect(validateOptionalStringArg('', 'workstream', { allowNull: true })).toBeNull();
+    expect(validateOptionalStringArg(null, 'workstream', { allowNull: true })).toBeNull();
+  });
+
+  it('rejects non-strings (and null unless allowNull)', () => {
+    expect(validateOptionalStringArg(123, 'title')).toBe('title must be a string.');
+    expect(validateOptionalStringArg(['a', 'b'], 'note')).toBe('note must be a string.');
+    expect(validateOptionalStringArg(null, 'status')).toBe('status must be a string.');
+    expect(validateOptionalStringArg(42, 'workstream', { allowNull: true })).toBe(
+      'workstream must be a string (or null).',
+    );
+  });
+});
 
 describe('validateStringArrayArg', () => {
   it('accepts undefined and string arrays (including empty)', () => {
