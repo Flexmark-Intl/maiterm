@@ -24,7 +24,10 @@ const CHECKPOINT_SEQUENCE: OverlordRule['sequence'] = [
     // One prep turn, not two: a separate "Prepare for compaction." after this asked for
     // the same work again and spent a whole turn on "already done".
     // One line: this is typed into the agent's input box.
-    text: "Prepare for compaction: commit finished work (never half-finished work) and update any docs, memory and code comments that need it. Clean up your own tasks on the maiTerm board (listTasks, scope 'tab'): mark finished ones done, drop ones that are outdated or superseded, and fix any stale status or title. On the task you are in the middle of, add a note saying where you are and what comes next, so you can pick it up after compaction. Leave other tabs' tasks and anything waiting on your human alone.",
+    // The memory sentence: a shell write into Claude's memory folder raises a permission prompt
+    // that waits for the human, which stalled a checkpoint for 25 minutes (2026-11-24). The
+    // Deshittify memory hook refuses one at once; this saves the round trip.
+    text: "Prepare for compaction: commit finished work (never half-finished work) and update any docs, memory and code comments that need it. Change memory files only with your Write or Edit tool, never a shell command: a shell write there waits for your human. Clean up your own tasks on the maiTerm board (listTasks, scope 'tab'): mark finished ones done, drop ones that are outdated or superseded, and fix any stale status or title. On the task you are in the middle of, add a note saying where you are and what comes next, so you can pick it up after compaction. Leave other tabs' tasks and anything waiting on your human alone.",
     await: { until: 'turn_end' },
     timeout_seconds: 900,
     on_timeout: 'abort',
@@ -353,8 +356,72 @@ const PREVIOUS_DEFAULT_OVERLORD_RULES: Record<string, OverlordRuleTemplate[]> = 
         },
       ],
     },
+    // Until 2026-11-24: the prep step didn't say to change memory with Write/Edit.
+    {
+      name: 'Checkpoint before compaction',
+      description:
+        'When an idle agent reaches 35% context and 130k tokens, have it commit finished work, update docs/memory, clean up its tasks and note where it is, then compact.',
+      cooldown: 1800,
+      when: { event: 'context_pct', at_or_above: 35, min_tokens: 130_000 },
+      guards: {
+        agent_state: ['idle'],
+        min_quiet_ms: 3000,
+        require_live_repl: true,
+        max_per_hour: 1,
+        only_if_no_outstanding: true,
+      },
+      sequence: [
+        {
+          kind: 'process',
+          text: "Prepare for compaction: commit finished work (never half-finished work) and update any docs, memory and code comments that need it. Clean up your own tasks on the maiTerm board (listTasks, scope 'tab'): mark finished ones done, drop ones that are outdated or superseded, and fix any stale status or title. On the task you are in the middle of, add a note saying where you are and what comes next, so you can pick it up after compaction. Leave other tabs' tasks and anything waiting on your human alone.",
+          await: { until: 'turn_end' },
+          timeout_seconds: 900,
+          on_timeout: 'abort',
+        },
+        {
+          kind: 'slash',
+          text: '/compact',
+          runtimes: ['claude', 'codex', 'gemini'],
+          await: { until: 'context_below', pct: 30 },
+          timeout_seconds: 300,
+          on_timeout: 'notify_human',
+        },
+      ],
+    },
   ],
   checkpoint_busy_agent: [
+    // Until 2026-11-24: the prep step didn't say to change memory with Write/Edit.
+    {
+      name: 'Checkpoint a busy agent',
+      description:
+        'When a working agent reaches 55% context and 130k tokens, interrupt it to run the same checkpoint, instead of hitting the auto-compact wall mid-thought.',
+      cooldown: 1800,
+      when: { event: 'context_pct', at_or_above: 55, min_tokens: 130_000 },
+      guards: {
+        agent_state: ['idle', 'active'],
+        min_quiet_ms: 3000,
+        require_live_repl: true,
+        max_per_hour: 1,
+        only_if_no_outstanding: true,
+      },
+      sequence: [
+        {
+          kind: 'process',
+          text: "Prepare for compaction: commit finished work (never half-finished work) and update any docs, memory and code comments that need it. Clean up your own tasks on the maiTerm board (listTasks, scope 'tab'): mark finished ones done, drop ones that are outdated or superseded, and fix any stale status or title. On the task you are in the middle of, add a note saying where you are and what comes next, so you can pick it up after compaction. Leave other tabs' tasks and anything waiting on your human alone.",
+          await: { until: 'turn_end' },
+          timeout_seconds: 900,
+          on_timeout: 'abort',
+        },
+        {
+          kind: 'slash',
+          text: '/compact',
+          runtimes: ['claude', 'codex', 'gemini'],
+          await: { until: 'context_below', pct: 30 },
+          timeout_seconds: 300,
+          on_timeout: 'notify_human',
+        },
+      ],
+    },
     // Until 2026-11-20: /compact skipped Gemini before Antigravity (`agy`) gained transcript context telemetry.
     {
       name: 'Checkpoint a busy agent',

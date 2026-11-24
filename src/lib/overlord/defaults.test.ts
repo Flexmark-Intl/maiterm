@@ -110,6 +110,12 @@ describe('seedDefaultOverlordRules — a flagged rule that is still ours', () =>
   const OLD_WHEN = { event: 'context_pct', at_or_above: 55 } as OverlordRule['when'];
   const IDLE_OR_BUSY = { ...tmpl.guards, agent_state: ['idle', 'active'] } as OverlordRule['guards'];
   const CLAUDE_ONLY_COMPACT = { ...tmpl.sequence[1], runtimes: ['claude'] } as OverlordRule['sequence'][number];
+  // The prep step as it shipped until 2026-11-24, before it said how to change memory. Written
+  // out, not taken from the live template: an old version must stay what really shipped.
+  const PREP_UNTIL_NOV_24 = {
+    ...tmpl.sequence[0],
+    text: "Prepare for compaction: commit finished work (never half-finished work) and update any docs, memory and code comments that need it. Clean up your own tasks on the maiTerm board (listTasks, scope 'tab'): mark finished ones done, drop ones that are outdated or superseded, and fix any stale status or title. On the task you are in the middle of, add a note saying where you are and what comes next, so you can pick it up after compaction. Leave other tabs' tasks and anything waiting on your human alone.",
+  } as OverlordRule['sequence'][number];
 
   it('migrates a flagged copy of a previous version, keeping scope and enabled', () => {
     const r = shipped({ description: OLD_DESCRIPTION, when: OLD_WHEN, sequence: OLD_SEQUENCE, guards: IDLE_ONLY, user_modified: true, enabled: false, workspaces: ['ws-1'] });
@@ -142,7 +148,7 @@ describe('seedDefaultOverlordRules — a flagged rule that is still ours', () =>
       description: 'At ~55% context, have the agent commit finished work, update docs/memory, clean up its tasks and note where it is, then compact — instead of hitting the auto-compact wall mid-thought.',
       when: OLD_WHEN,
       guards: IDLE_OR_BUSY,
-      sequence: [tmpl.sequence[0], CLAUDE_ONLY_COMPACT],
+      sequence: [PREP_UNTIL_NOV_24, CLAUDE_ONLY_COMPACT],
       user_modified: true,
     });
     const rows = seedDefaultOverlordRules([old], [])!;
@@ -199,10 +205,24 @@ describe('seedDefaultOverlordRules — a flagged rule that is still ours', () =>
     }
   });
 
+  it('moves a flagged copy of the prep step that never said how to change memory onto the current one', () => {
+    for (const id of [ID, 'checkpoint_busy_agent']) {
+      const current = DEFAULT_OVERLORD_RULES[id];
+      const seq = structuredClone(current.sequence);
+      seq[0].text = PREP_UNTIL_NOV_24.text;
+      const old = rule({ ...structuredClone(current), default_id: id, workspaces: ['ws-1'], sequence: seq, user_modified: true });
+      const row = seedDefaultOverlordRules([old], [])!.find((x) => x.default_id === id)!;
+      expect(row.sequence[0].text).toContain('only with your Write or Edit tool');
+      expect(row.workspaces).toEqual(['ws-1']);
+      expect(row.user_modified).toBe(false);
+    }
+  });
+
   it('migrates workspace-scoped checkpoint rules from the previous claude+codex template onto gemini too', () => {
     for (const id of [ID, 'checkpoint_busy_agent']) {
       const current = DEFAULT_OVERLORD_RULES[id];
       const preGeminiSeq = structuredClone(current.sequence);
+      preGeminiSeq[0].text = PREP_UNTIL_NOV_24.text;
       preGeminiSeq[1].runtimes = ['claude', 'codex'];
       const scoped = rule({
         ...structuredClone(current),
