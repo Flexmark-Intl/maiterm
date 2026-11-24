@@ -409,23 +409,57 @@ cfg=${{CLAUDE_CONFIG_DIR:-}}
 # A Bash write into a memory directory (cat > memory/x.md) raises the same prompt.
 # A shell command can't be judged safe from its text, so it is never approved; it
 # is REFUSED at once, telling the agent to use Write or Edit, which are approved
-# below. Without this it waits for a human, for hours if nobody is looking. The
-# directory Claude Code asks to add is how the prompt says what it is about.
+# below. Without this it waits for a human, for hours if nobody is looking — a
+# checkpoint before compaction stalled on one until its cache was at risk.
+# Two signs say a prompt is about memory: the directory Claude Code asks to add,
+# and a memory directory named in the command itself. Claude Code suggests the
+# directory only when it can read the path, so a path held in a shell variable
+# (M=".../memory"; cat >> "$M/x.md") shows up only in the text.
 # Deleting, moving, copying or linking is left to the human: Write and Edit can't
-# do it, so refusing would make it impossible, not redirect it.
+# do it, so refusing would make it impossible, not redirect it. Only the command's
+# own words count for that: a heredoc body or a quoted string is prose, and a
+# note that says "install" is still a write.
 if [ "$(field tool_name)" = Bash ]; then
   command -v grep >/dev/null 2>&1 || exit 0
-  if field tool_input.command | grep -Eq '(^|[^[:alnum:]_.-])(rm|rmdir|unlink|mv|cp|ln|install|rsync)([[:space:]]|$)'; then
+  cmd=$(field tool_input.command)
+  words=$(printf '%s\n' "$cmd" | awk '
+    BEGIN {{ q = "\047"; heredoc = "<<-?[ \t]*[" q "\"]?[A-Za-z_][A-Za-z0-9_]*" }}
+    body != "" {{ t = $0; if (tabs) sub(/^\t+/, "", t); if (t == body) body = ""; next }}
+    {{
+      line = $0
+      if (match(line, heredoc)) {{
+        body = substr(line, RSTART, RLENGTH); tabs = (body ~ /^<<-/)
+        sub(/^<<-?[ \t]*/, "", body); gsub(/[^A-Za-z0-9_]/, "", body)
+      }}
+      gsub(q "[^" q "]*" q, "", line); gsub(/"[^"]*"/, "", line); print line
+    }}' 2>/dev/null) || words=$cmd
+  if printf '%s\n' "$words" | grep -Eq '(^|[^[:alnum:]_.-])(rm|rmdir|unlink|mv|cp|ln|install|rsync)([[:space:]]|$)'; then
     exit 0
   fi
+  refuse() {{
+    printf '%s\n' '{{"hookSpecificOutput":{{"hookEventName":"PermissionRequest","decision":{{"behavior":"deny","message":"Do not write memory files with Bash. Use the Write or Edit tool for files in the memory directory (Read to look at one): those are approved automatically, a Bash write there waits for a human."}}}}}}'
+    exit 0
+  }}
+  # names_memory ROOT: the command names ROOT/projects/<key>/memory, however ROOT
+  # is spelled — as is, or from $HOME as ~, $HOME or ${{HOME}}.
+  names_memory() {{
+    [ -n "$1" ] || return 1
+    set -- "$1"
+    case "$1" in "$HOME"/*) set -- "$1" "~${{1#"$HOME"}}" "\$HOME${{1#"$HOME"}}" "\${{HOME}}${{1#"$HOME"}}" ;; esac
+    for s in "$@"; do
+      printf '%s\n' "$cmd" | grep -F -- "$s/projects/" \
+        | grep -Eq "/projects/[^/[:space:]]+/memory([/\"'[:space:]]|\$)" && return 0
+    done
+    return 1
+  }}
+  for r in "$cfg" "$HOME/.claude" "$(realroot "$cfg")" "$(realroot "$HOME/.claude")"; do
+    names_memory "$r" && refuse
+  done
   for i in 0 1 2 3; do
     for j in 0 1 2 3; do
       d=$(field "permission_suggestions.$i.directories.$j")
       [ -n "$d" ] || break
-      if in_memory_dir "${{d%/}}/x.md" "$cfg" "$HOME/.claude"; then
-        printf '%s\n' '{{"hookSpecificOutput":{{"hookEventName":"PermissionRequest","decision":{{"behavior":"deny","message":"Do not write memory files with Bash. Use the Write or Edit tool for files in the memory directory: those are approved automatically, a Bash write there waits for a human."}}}}}}'
-        exit 0
-      fi
+      in_memory_dir "${{d%/}}/x.md" "$cfg" "$HOME/.claude" && refuse
     done
   done
   exit 0
@@ -1900,6 +1934,62 @@ mod tests {
         let mut plain = bash_req(&[]);
         plain.as_object_mut().unwrap().remove("permission_suggestions");
         assert_eq!(memory_hook_decision(&home, Some(&account), &plain), None);
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// Bash memory writes the hook used to miss, from real transcripts. Claude Code
+    /// suggests no directory when the path sits in a shell variable, so the command's
+    /// own text has to say it is about memory; and prose in a heredoc ("install") is
+    /// not a delete.
+    #[test]
+    fn memory_hook_refuses_bash_memory_writes_it_can_only_read_from_the_command() {
+        let home = scratch("memhook-bash-text");
+        let account = home.join("accounts/a1");
+        let memory = account.join("projects/-repo/memory");
+        fs::create_dir_all(&memory).unwrap();
+        fs::create_dir_all(home.join(".claude/projects/-repo/memory")).unwrap();
+        let m = memory.to_string_lossy().into_owned();
+        let bash = |command: String| {
+            let mut req = bash_req(&[]);
+            req.as_object_mut().unwrap().remove("permission_suggestions");
+            req["tool_input"]["command"] = command.into();
+            req
+        };
+        let decide = |command: String| memory_hook_decision(&home, Some(&account), &bash(command));
+
+        // maiEvents' checkpoint, 2026-11-24: a variable, a heredoc, then python.
+        let refused = [
+            format!(
+                "M=\"{m}\"; cat >> \"$M/build-status.md\" <<'EOF'\n\nslice 2 DEPLOYED; nothing to install, rm or cp here.\nEOF\npython3 - <<'EOF'\np=\"{m}/MEMORY.md\"\ns=open(p).read()\nopen(p,'w').write(s)\nEOF\ngrep -c member \"$M/MEMORY.md\""
+            ),
+            // maiStarter's, two minutes later.
+            format!("M=\"{m}/MEMORY.md\"; sed -i '' 's/0.3.60/0.3.61/' \"$M\""),
+            // A literal path whose note says "install" (2026-11-07).
+            format!("cat >> \"{m}/status.md\" <<'EOF'\nplugin 0.2.0 speed, install\nEOF"),
+            format!("echo '- [x](x.md) — then cp the rest' >> \"{m}/MEMORY.md\""),
+            "cat >> ~/.claude/projects/-repo/memory/x.md <<'EOF'\nhi\nEOF".into(),
+            "cat >> \"$HOME/.claude/projects/-repo/memory/x.md\" <<'EOF'\nhi\nEOF".into(),
+            "M=\"${HOME}/.claude/projects/-repo/memory\"; echo hi >> \"$M/x.md\"".into(),
+        ];
+        for cmd in refused {
+            assert_eq!(decide(cmd.clone()).as_deref(), Some("deny"), "let through: {cmd}");
+        }
+
+        let unanswered = [
+            // Deleting and moving are still the human's.
+            format!("M=\"{m}\"; rm \"$M/stale.md\""),
+            format!("cd \"{m}\" && mv old.md new.md"),
+            format!("cat >> \"{m}/x.md\" <<'EOF'\nhi\nEOF\nrm -rf /tmp/scratch"),
+            // Not a memory directory.
+            format!("cat > \"{}/projects/-repo/notes.md\" <<'EOF'\nhi\nEOF", account.to_string_lossy()),
+            format!("cat > \"{}/projects/-repo/memoryx/a.md\"", account.to_string_lossy()),
+            "cat > /work/projects/app/memory/a.md <<'EOF'\nhi\nEOF".into(),
+            "cat > x <<'EOF'\nrm stuff\nEOF".into(),
+        ];
+        for cmd in unanswered {
+            assert_eq!(decide(cmd.clone()), None, "answered: {cmd}");
+        }
 
         let _ = fs::remove_dir_all(&home);
     }
