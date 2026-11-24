@@ -819,3 +819,26 @@ describe("an action card's Run sends only a one-line `!` command to a Claude age
     expect(runPlace(null, true)).toBeNull();
   });
 });
+
+describe('parseBlocker malformed runtime payloads', () => {
+  it('refuses non-array options and non-string text fields instead of throwing', () => {
+    const badOpts = parseBlocker(
+      { kind: 'decision', question: 'Pick one?', options: 'yes' as unknown as [] },
+      'agent',
+    );
+    expect(badOpts.ok).toBe(false);
+    if (!badOpts.ok) expect(badOpts.detail).toContain('blocker.options must be an array');
+
+    const badQuestion = parseBlocker(
+      { kind: 'decision', question: 42 as unknown as string },
+      'agent',
+    );
+    expect(badQuestion.ok).toBe(false);
+
+    const badOptionLabel = parseBlocker(
+      { kind: 'decision', question: 'Pick one?', options: [{ label: 123 as unknown as string }] },
+      'agent',
+    );
+    expect(badOptionLabel.ok).toBe(false);
+  });
+});

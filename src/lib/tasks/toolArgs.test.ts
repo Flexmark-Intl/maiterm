@@ -5,7 +5,25 @@ import {
   checkListTasksArgs,
   checkUpdateTasksArgs,
   resolveCreateTaskWorkstream,
+  validateStringArrayArg,
 } from './toolArgs';
+
+describe('validateStringArrayArg', () => {
+  it('accepts undefined and string arrays (including empty)', () => {
+    expect(validateStringArrayArg(undefined, 'status')).toBeNull();
+    expect(validateStringArrayArg([], 'status')).toBeNull();
+    expect(validateStringArrayArg(['active', 'blocked'], 'status')).toBeNull();
+  });
+
+  it('rejects bare strings, null, non-arrays, and arrays containing non-strings', () => {
+    expect(validateStringArrayArg('active', 'status', '["active"]')).toBe(
+      'status must be an array of strings, e.g. ["active"].',
+    );
+    expect(validateStringArrayArg(null, 'ids')).toBe('ids must be an array of strings.');
+    expect(validateStringArrayArg(123, 'workstreams')).toBe('workstreams must be an array of strings.');
+    expect(validateStringArrayArg(['ok', 42], 'blocked_by')).toBe('blocked_by must be an array of strings.');
+  });
+});
 
 describe('resolveCreateTaskWorkstream', () => {
   it('inherits the call-level workstream when the task omits it', () => {

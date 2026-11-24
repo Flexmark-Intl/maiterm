@@ -9,6 +9,25 @@
  *  Allowed key sets MUST stay in lockstep with `src-tauri/src/claude_code/protocol.rs`.
  */
 
+/** Validate an optional MCP argument that must be an array of strings (e.g. `status`, `ids`,
+ *  `workstreams`, `blocked_by`, `block_on`, `unblock_from`). Returns an error message when
+ *  present and not an array of strings, or `null` when valid or absent.
+ *
+ *  MCP JSON-RPC does not enforce inputSchema types at runtime, so a caller passing a single
+ *  string like `status: "active"` or `blocked_by: "id-1"` otherwise crashed with `.map`/`.filter`
+ *  TypeErrors or spread the string into single-character task ids. */
+export function validateStringArrayArg(
+  value: unknown,
+  field: string,
+  example?: string,
+): string | null {
+  if (value === undefined) return null;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+    return `${field} must be an array of strings${example ? `, e.g. ${example}` : ''}.`;
+  }
+  return null;
+}
+
 /** Resolve the effective workstream name for one `createTasks` item.
  *
  *  Per-task `workstream` wins over the call-level `workstream`:

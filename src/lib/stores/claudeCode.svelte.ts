@@ -20,7 +20,7 @@ import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
 import { normalizeTabBatch } from '$lib/stores/tabBatch';
 import { tasksStore } from '$lib/stores/tasks.svelte';
 import { agentTaskDeleteRefusal, agentTaskWriteRefusal, appendNote, blockerNote, blocking, coerceStatus, effectiveStatus, findWorkstream, hasUnmetDeps, isDelegation, isInFlight, isReservedTaskTitle, isRetired, normalizeTitle, parseBlocker, resolveBlockers, resolveEdges, TASK_NOTE_CAP, type BlockerInput } from '$lib/tasks/model';
-import { checkCreateTasksArgs, checkDeleteTasksArgs, checkListTasksArgs, checkUpdateTasksArgs, resolveCreateTaskWorkstream } from '$lib/tasks/toolArgs';
+import { checkCreateTasksArgs, checkDeleteTasksArgs, checkListTasksArgs, checkUpdateTasksArgs, resolveCreateTaskWorkstream, validateStringArrayArg } from '$lib/tasks/toolArgs';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { navHistoryStore } from '$lib/stores/navHistory.svelte';
@@ -1861,7 +1861,7 @@ function createClaudeCodeStore() {
   function agentBlocker(raw: BlockerInput, callerTabId: string): { ok: true; blocker: TaskBlocker } | { ok: false; detail: string } {
     const parsed = parseBlocker(raw, 'agent');
     if (!parsed.ok) return parsed;
-    const name = raw.run_in?.trim();
+    const name = typeof raw.run_in === 'string' ? raw.run_in.trim() : '';
     if (!name) return parsed;
     const target = resolveRunIn(callerTabId, name);
     if (!target.ok) return target;
@@ -2068,6 +2068,12 @@ function createClaudeCodeStore() {
   }) {
     const loc = resolveActiveTab(args.tabId);
     if ('error' in loc) return loc;
+    const warnings = checkListTasksArgs(args);
+    const warnField = warnings.length ? { warnings } : {};
+    const statusErr = validateStringArrayArg(args.status, 'status', '["active", "blocked"]');
+    if (statusErr) return { error: statusErr, ...warnField };
+    const statusFilter = args.status ?? [];
+
     const all = tasksStore.forWorkspace(loc.workspace.id);
     const parked = workspacesStore.parkedTaskIds;
     const tabScope = args.scope === 'tab';
@@ -2077,8 +2083,8 @@ function createClaudeCodeStore() {
     // Lane is matched on the EFFECTIVE status, the one the board and this tool both show —
     // filtering on the stored value would omit a task the same call reports as `blocked`.
     const laneOf = (t: Task) => effectiveStatus(t, all, parked);
-    if (args.status?.length) {
-      const want = new Set(args.status.map((s) => coerceStatus(s)));
+    if (statusFilter.length) {
+      const want = new Set(statusFilter.map((s) => coerceStatus(s)));
       scoped = scoped.filter((t) => want.has(laneOf(t)));
     }
     // "What can I pick up right now", which is the question `listTasks` was always being
@@ -2101,7 +2107,8 @@ function createClaudeCodeStore() {
       tasksStore.workstream(loc.workspace.id, id)?.name;
 
     const matched = scoped.length;
-    const limit = Math.min(Math.max(1, args.limit ?? 100), 500);
+    const rawLimit = typeof args.limit === 'number' && Number.isFinite(args.limit) ? Math.floor(args.limit) : 100;
+    const limit = Math.min(Math.max(1, rawLimit), 500);
     if (matched > limit) {
       scoped = [...scoped].sort((a, b) => LANE_RANK[laneOf(a)] - LANE_RANK[laneOf(b)]).slice(0, limit);
     }
@@ -2114,7 +2121,6 @@ function createClaudeCodeStore() {
       if (!groups.has(key)) groups.set(key, { workstream: nameOf(t.workstream_id) ?? null, tasks: [] });
       groups.get(key)!.tasks.push(taskForAgent(t, all, loc.tab.id, nameOf(t.workstream_id), noteTail));
     }
-    const warnings = checkListTasksArgs(args);
     return {
       workspace: loc.workspace.name,
       scope: tabScope ? 'tab' : 'workspace',
@@ -2133,11 +2139,11 @@ function createClaudeCodeStore() {
       // Every job in this project, including ones whose tasks are all outside the filter or
       // on another tab — so an agent naming a workstream on createTasks can reuse a spelling
       // that exists rather than minting a near-duplicate it cannot see.
-      ...(tabScope || args.status?.length || args.ready
+      ...(tabScope || statusFilter.length || args.ready
         ? { all_workstreams: tasksStore.workstreams(loc.workspace.id).map((w) => w.name) }
         : {}),
       ...(matched !== total ? { filtered_from: total } : {}),
-      ...(warnings.length ? { warnings } : {}),
+      ...warnField,
     };
   }
 
@@ -2157,10 +2163,14 @@ function createClaudeCodeStore() {
     if (reserved) {
       return { error: `"${reserved.t.title!.trim()}" is a title maiTerm keeps for its own questions to your human. Nothing was created.`, ...warnField };
     }
-    // Validated before anything is written, so a bad blocker on the third item doesn't leave
-    // the first two created and the agent unsure which of its list landed.
+    // Validated before anything is written, so a bad blocker or blocked_by on the third item
+    // doesn't leave the first two created and the agent unsure which of its list landed.
     const blockers = new Map<number, TaskBlocker>();
     for (const [i, { t, rawIdx }] of indexedInputs.entries()) {
+      const blockedByErr = validateStringArrayArg(t.blocked_by, 'blocked_by', '["<task-id>"]');
+      if (blockedByErr) {
+        return { error: `tasks[${rawIdx}] "${t.title!.trim()}": ${blockedByErr} Nothing was created.`, ...warnField };
+      }
       if (!t.blocker) continue;
       const parsed = agentBlocker(t.blocker, loc.tab.id);
       if (parsed.ok && parsed.blocker.run_in && t.assign_to_me === false) {
@@ -2188,7 +2198,7 @@ function createClaudeCodeStore() {
         // `input.status ?? dup.status`). Coercing here reclaimed a Blocked row as todo, and
         // the settle rule then deleted the question it was carrying. New rows still default
         // to todo in `makeTask`.
-        status: t.status ? coerceStatus(t.status) : undefined,
+        status: typeof t.status === 'string' && t.status ? coerceStatus(t.status) : undefined,
         // Assigned to the caller unless it explicitly leaves the task unassigned.
         tab_id: t.assign_to_me === false ? null : loc.tab.id,
         blocked_by: t.blocked_by ?? [],
@@ -2287,8 +2297,8 @@ function createClaudeCodeStore() {
         }
         // maiTerm's reserved rows and a standing Budget: question are the human's (§10.3).
         const guard = agentTaskWriteRefusal(list[idx], {
-          title: u.title,
-          changesBlocker: u.blocker !== undefined || !!u.status,
+          title: typeof u.title === 'string' ? u.title : undefined,
+          changesBlocker: u.blocker !== undefined || (typeof u.status === 'string' && !!u.status),
         });
         if (guard) {
           refused.push({ id: u.id!, reason: 'reserved', detail: guard });
@@ -2319,7 +2329,7 @@ function createClaudeCodeStore() {
             refused.push({ id: u.id!, reason: 'bad_blocker', detail: `${parsed.detail} Nothing in this update was applied.` });
             continue;
           }
-          if (u.status && coerceStatus(u.status) !== 'blocked') {
+          if (typeof u.status === 'string' && u.status && coerceStatus(u.status) !== 'blocked') {
             refused.push({
               id: u.id!,
               reason: 'bad_blocker',
@@ -2340,35 +2350,22 @@ function createClaudeCodeStore() {
           });
           continue;
         }
-        const patch: Partial<Task> = { updated_at: new Date().toISOString() };
-        if (assignTo !== undefined) patch.tab_id = assignTo;
-        if (u.status) patch.status = coerceStatus(u.status);
-        if (blocker !== undefined) patch.blocker = blocker;
-        if (blocker) {
-          patch.status = 'blocked';
-          patch.notes = appendNote(list[idx], blockerNote(blocker), 'agent');
-          // An imported row is driven by the runtime's private todo file, which re-derives its
-          // status every tick, sweeps it to done when it leaves that file, and closes it out
-          // with the session. Any of those moves it out of Blocked and deletes the question.
-          // Asking the human something about a task is taking it over, so the row becomes the
-          // agent's, and every importer path (all gated on origin) leaves it alone.
-          if (list[idx].origin === 'imported') patch.origin = 'agent';
+        // Validate dependency edges BEFORE calling ensureWorkstream or mutating anything:
+        // a refused update must not leave a newly ensured workstream stranded in memory.
+        const edgeArgErr =
+          validateStringArrayArg(u.blocked_by, 'blocked_by', '[]') ??
+          validateStringArrayArg(u.block_on, 'block_on', '["<task-id>"]') ??
+          validateStringArrayArg(u.unblock_from, 'unblock_from', '["<task-id>"]');
+        if (edgeArgErr) {
+          refused.push({
+            id: u.id!,
+            reason: 'invalid_edges',
+            detail: `${edgeArgErr} Nothing in this update was applied.`,
+          });
+          continue;
         }
-        if (u.title?.trim()) {
-          patch.title = u.title.trim();
-          patch.normalized_title = normalizeTitle(u.title);
-        }
-        if (u.detail !== undefined) patch.detail = u.detail;
-        // Appended, never replacing `detail`. That separation is the whole point: `detail`
-        // is the spec, and recording why a task is blocked by rewriting the spec destroys
-        // the spec. Trimmed here and again by Rust before disk.
-        if (u.note?.trim()) patch.notes = appendNote({ ...list[idx], notes: patch.notes ?? list[idx].notes }, u.note, 'agent');
-        if (u.workstream !== undefined) {
-          patch.workstream_id = typeof u.workstream === 'string' && u.workstream.trim()
-            ? (tasksStore.ensureWorkstream(loc.workspace.id, u.workstream)?.id ?? null)
-            : null;
-        }
-        if (u.blocked_by || u.block_on || u.unblock_from) {
+        let nextBlockedBy: string[] | undefined;
+        if (u.blocked_by !== undefined || u.block_on !== undefined || u.unblock_from !== undefined) {
           // `blocked_by` is the base (whole-array replace, kept for the caller that knows
           // the full set), then the incremental edits apply on top. Which ids get validated
           // and why is `resolveEdges`, where it is unit-testable.
@@ -2388,8 +2385,39 @@ function createClaudeCodeStore() {
             });
             continue;
           }
-          patch.blocked_by = edges.edges;
+          nextBlockedBy = edges.edges;
         }
+        const patch: Partial<Task> = { updated_at: new Date().toISOString() };
+        if (assignTo !== undefined) patch.tab_id = assignTo;
+        if (typeof u.status === 'string' && u.status) patch.status = coerceStatus(u.status);
+        if (blocker !== undefined) patch.blocker = blocker;
+        if (blocker) {
+          patch.status = 'blocked';
+          patch.notes = appendNote(list[idx], blockerNote(blocker), 'agent');
+          // An imported row is driven by the runtime's private todo file, which re-derives its
+          // status every tick, sweeps it to done when it leaves that file, and closes it out
+          // with the session. Any of those moves it out of Blocked and deletes the question.
+          // Asking the human something about a task is taking it over, so the row becomes the
+          // agent's, and every importer path (all gated on origin) leaves it alone.
+          if (list[idx].origin === 'imported') patch.origin = 'agent';
+        }
+        if (typeof u.title === 'string' && u.title.trim()) {
+          patch.title = u.title.trim();
+          patch.normalized_title = normalizeTitle(u.title);
+        }
+        if (u.detail !== undefined) patch.detail = u.detail;
+        // Appended, never replacing `detail`. That separation is the whole point: `detail`
+        // is the spec, and recording why a task is blocked by rewriting the spec destroys
+        // the spec. Trimmed here and again by Rust before disk.
+        if (typeof u.note === 'string' && u.note.trim()) {
+          patch.notes = appendNote({ ...list[idx], notes: patch.notes ?? list[idx].notes }, u.note, 'agent');
+        }
+        if (u.workstream !== undefined) {
+          patch.workstream_id = typeof u.workstream === 'string' && u.workstream.trim()
+            ? (tasksStore.ensureWorkstream(loc.workspace.id, u.workstream)?.id ?? null)
+            : null;
+        }
+        if (nextBlockedBy !== undefined) patch.blocked_by = nextBlockedBy;
         list[idx] = { ...list[idx], ...patch };
         updated.push(u.id!);
         changed = true;
@@ -2449,8 +2477,12 @@ function createClaudeCodeStore() {
     const wsId = loc.workspace.id;
     const warnings = checkDeleteTasksArgs(args);
     const warnField = warnings.length ? { warnings } : {};
-    const ids = (args.ids ?? []).filter((id) => typeof id === 'string' && id);
-    const names = (args.workstreams ?? []).filter((n) => typeof n === 'string' && n.trim());
+    const idsErr = validateStringArrayArg(args.ids, 'ids', '["<task-id>"]');
+    if (idsErr) return { error: idsErr, ...warnField };
+    const wsErr = validateStringArrayArg(args.workstreams, 'workstreams', '["Auth refactor"]');
+    if (wsErr) return { error: wsErr, ...warnField };
+    const ids = (args.ids ?? []).filter((id) => id);
+    const names = (args.workstreams ?? []).filter((n) => n.trim());
     if (!ids.length && !names.length) return { error: 'Pass ids, workstreams, or both.', ...warnField };
 
     const all = tasksStore.forWorkspace(wsId);

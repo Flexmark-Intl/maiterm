@@ -369,10 +369,10 @@ export function parseBlocker(raw: BlockerInput, by: TaskNote['by'], now = new Da
   if (!BLOCKER_KINDS.includes(kind)) {
     return { ok: false, detail: `blocker.kind must be one of ${BLOCKER_KINDS.join(', ')}.` };
   }
-  const question = raw.question?.trim() ?? '';
+  const question = typeof raw?.question === 'string' ? raw.question.trim() : '';
   if (!question) return { ok: false, detail: 'blocker.question is required: one line saying what you need.' };
-  const context = raw.context?.trim() || null;
-  const command = raw.command?.trim() || null;
+  const context = typeof raw.context === 'string' ? raw.context.trim() || null : null;
+  const command = typeof raw.command === 'string' ? raw.command.trim() || null : null;
   if ([question, context ?? '', command ?? ''].some((s) => s.length > BLOCKER_TEXT_MAX)) {
     return { ok: false, detail: `Keep blocker text under ${BLOCKER_TEXT_MAX} characters; put the long version in the task's detail.` };
   }
@@ -396,9 +396,12 @@ export function parseBlocker(raw: BlockerInput, by: TaskNote['by'], now = new Da
         (kind === 'decision' ? ', and the choices themselves in options.' : '.'),
     };
   }
+  if (raw.options !== undefined && !Array.isArray(raw.options)) {
+    return { ok: false, detail: 'blocker.options must be an array of { label, detail?, recommended? }.' };
+  }
   const options: BlockerOption[] = (raw.options ?? []).map((o) => ({
-    label: o?.label?.trim() ?? '',
-    ...(o?.detail?.trim() ? { detail: o.detail.trim() } : {}),
+    label: typeof o?.label === 'string' ? o.label.trim() : '',
+    ...(typeof o?.detail === 'string' && o.detail.trim() ? { detail: o.detail.trim() } : {}),
     ...(o?.recommended ? { recommended: true } : {}),
   }));
   if (options.length && kind !== 'decision') {
@@ -411,7 +414,10 @@ export function parseBlocker(raw: BlockerInput, by: TaskNote['by'], now = new Da
   if (command && kind !== 'action') {
     return { ok: false, detail: 'Only an action blocker takes a command.' };
   }
-  if (raw.run_in?.trim() && !(kind === 'action' && command)) {
+  if (raw.run_in !== undefined && raw.run_in !== null && typeof raw.run_in !== 'string') {
+    return { ok: false, detail: 'blocker.run_in must be a peer name or handle string.' };
+  }
+  if (typeof raw.run_in === 'string' && raw.run_in.trim() && !(kind === 'action' && command)) {
     return { ok: false, detail: 'blocker.run_in names where an action\'s command runs, so it needs kind "action" and a command.' };
   }
   const pick = raw.pick ?? null;
