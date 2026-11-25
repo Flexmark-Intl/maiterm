@@ -1026,8 +1026,10 @@ pub struct Workspace {
 /// `width` and `height` are always logical inner size (DIPs).
 /// `x` and `y` are global logical outer origin on macOS/Linux (`physical_position == false`),
 /// and unified physical virtual-desktop pixels on Windows (`physical_position == true`).
-/// Legacy Windows entries omit `physical_position` (defaulting to `false`) and fall back to
-/// `x * window_scale` on restore until overwritten on the next save.
+/// `scale_factor` records the saving monitor's DPI on Windows so mixed-DPI restores know the
+/// exact physical footprint before moving across monitors.
+/// Legacy Windows entries omit both optional fields and fall back to `x * window_scale` on
+/// restore until overwritten on the next save.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowGeometry {
     pub x: f64,
@@ -1036,6 +1038,8 @@ pub struct WindowGeometry {
     pub height: f64,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub physical_position: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_factor: Option<f64>,
 }
 
 impl WindowGeometry {
@@ -1047,7 +1051,7 @@ impl WindowGeometry {
     /// sentinel at `-32000`), while legacy entries divided by DPI (100%–300% -> `-32000` to
     /// `-10667` on BOTH axes). Normal multi-monitor setups legitimately use negative
     /// coordinates (e.g. a secondary display at `x = -2560, y = 0`), so a negative coordinate
-    /// alone is valid; tiny sizes and sentinel-range coordinates are not.
+    /// alone is valid; tiny/extreme sizes and sentinel-range coordinates are not.
     pub fn is_valid(&self) -> bool {
         if !self.x.is_finite()
             || !self.y.is_finite()
@@ -1056,9 +1060,18 @@ impl WindowGeometry {
         {
             return false;
         }
+        if let Some(s) = self.scale_factor {
+            if !s.is_finite() || s <= 0.0 || s > 10.0 {
+                return false;
+            }
+        }
         // App windows enforce min_inner_size(800, 600); anything below 200x150 is a
-        // minimized/collapsed rect (0x0 or Win32 iconic 160x28).
-        if self.width < 200.0 || self.height < 150.0 {
+        // minimized/collapsed rect (0x0 or Win32 iconic 160x28), and > 30_000 is corrupt.
+        if self.width < 200.0
+            || self.height < 150.0
+            || self.width > 30_000.0
+            || self.height > 30_000.0
+        {
             return false;
         }
         // Win32 minimized sentinel (-32000, -32000): raw when physical_position is true,
@@ -1178,7 +1191,7 @@ impl WindowData {
     /// Migrate legacy flat fields into the geometry map (called on first save).
     pub fn migrate_legacy_geometry(&mut self, monitor_count: usize) {
         if let (Some(x), Some(y), Some(w), Some(h)) = (self.window_x, self.window_y, self.window_width, self.window_height) {
-            let geom = WindowGeometry { x, y, width: w, height: h, physical_position: false };
+            let geom = WindowGeometry { x, y, width: w, height: h, physical_position: false, scale_factor: None };
             if geom.is_valid() {
                 self.window_geometry.entry(monitor_count.to_string()).or_insert(geom);
             }

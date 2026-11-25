@@ -496,7 +496,10 @@ fn geometry_visible_logical(
     geom: &crate::state::WindowGeometry,
     monitors: &[(i32, i32, u32, u32, f64)],
 ) -> bool {
-    if !geom.is_valid() {
+    // Windows entries store unified physical virtual-desktop origins (pixel sums across
+    // mixed-DPI monitors) which cannot be converted into macOS/Linux logical space.
+    // Skip positioning (logical width/height remain usable when creating the window).
+    if geom.physical_position || !geom.is_valid() {
         return false;
     }
     let x = geom.x.round() as i32;
@@ -518,14 +521,21 @@ fn geometry_visible_logical(
     rect_visible_on_monitors(x, y, w, h, &rects)
 }
 
+/// Logical minimum inner dimensions for main/workspace app windows (matches `tauri.conf.json`).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const APP_WINDOW_MIN_WIDTH: f64 = 800.0;
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const APP_WINDOW_MIN_HEIGHT: f64 = 600.0;
+
 /// Build a `WindowGeometry` from raw physical `outer_position` and `inner_size` plus the
 /// window's current DPI `scale`.
 ///
 /// - On Windows (`physical_origin == true`), `x`/`y` are stored as unified physical
-///   virtual-desktop pixels (`physical_position: true`) because `GetWindowRect` and
-///   `SetWindowPos` do not scale with per-monitor DPI.
+///   virtual-desktop pixels (`physical_position: true`, `scale_factor: Some(scale)`) because
+///   `GetWindowRect` and `SetWindowPos` do not scale with per-monitor DPI.
 /// - On macOS/Linux (`physical_origin == false`), `x`/`y` are divided by `scale` into
-///   global logical coordinates, matching tao's `outer_position`/`set_outer_position`.
+///   global logical coordinates (`physical_position: false`, `scale_factor: None`), matching
+///   tao's `outer_position`/`set_outer_position`.
 /// - `width`/`height` are always stored as logical inner size (DIPs).
 fn build_window_geometry(
     pos_x: i32,
@@ -546,6 +556,7 @@ fn build_window_geometry(
         width: width as f64 / scale,
         height: height as f64 / scale,
         physical_position: physical_origin,
+        scale_factor: physical_origin.then_some(scale),
     }
 }
 
@@ -600,17 +611,20 @@ fn geometry_visible_physical(
     if geom.physical_position {
         let phys_x = geom.x.round() as i32;
         let phys_y = geom.y.round() as i32;
+        // Always evaluate visibility using each connected monitor's current `m_scale` (not a
+        // potentially stale `geom.scale_factor`) so a window that would shrink off-screen once
+        // `set_size(Logical)` runs at the connected monitor's DPI is rejected.
         monitors.iter().any(|&(mx, my, mw, mh, m_scale)| {
             let s = if m_scale.is_finite() && m_scale > 0.0 { m_scale } else { 1.0 };
-            let phys_w = (geom.width * s).round().max(0.0) as u32;
-            let phys_h = (geom.height * s).round().max(0.0) as u32;
+            let phys_w = (geom.width * s).round().clamp(0.0, u32::MAX as f64) as u32;
+            let phys_h = (geom.height * s).round().clamp(0.0, u32::MAX as f64) as u32;
             rect_visible_on_monitors(phys_x, phys_y, phys_w, phys_h, &[(mx, my, mw, mh)])
         })
     } else {
         let phys_x = (geom.x * window_scale).round() as i32;
         let phys_y = (geom.y * window_scale).round() as i32;
-        let phys_w = (geom.width * window_scale).round().max(0.0) as u32;
-        let phys_h = (geom.height * window_scale).round().max(0.0) as u32;
+        let phys_w = (geom.width * window_scale).round().clamp(0.0, u32::MAX as f64) as u32;
+        let phys_h = (geom.height * window_scale).round().clamp(0.0, u32::MAX as f64) as u32;
         let rects: Vec<(i32, i32, u32, u32)> = monitors
             .iter()
             .map(|&(mx, my, mw, mh, _)| (mx, my, mw, mh))
@@ -645,10 +659,59 @@ pub fn geometry_visible_on_monitors(
     }
 }
 
+/// Compute the saved physical inner dimensions `(width, height)` for a Windows restore before
+/// moving the window to `(phys_x, phys_y)`.
+///
+/// Pre-sizing to this physical footprint (with `min_size` temporarily lifted) ensures that
+/// moving directly to `(phys_x, phys_y)` lands with the exact saved footprint on the target
+/// monitor — triggering `WM_DPICHANGED` cleanly for left, above, sandwiched, and straddling
+/// mixed-DPI monitors without heuristic staging hops.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_target_physical_size(
+    geom: &crate::state::WindowGeometry,
+    phys_x: i32,
+    phys_y: i32,
+    window_scale: f64,
+    monitors: &[(i32, i32, u32, u32, f64)],
+) -> (u32, u32) {
+    let s = if geom.physical_position {
+        geom.scale_factor
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .or_else(|| {
+                // Sample an interior point past Windows' invisible DWM frame (~7–8 logical px,
+                // up to ~32 physical px at 400% DPI) so snapped/maximized origins like
+                // `(mx - 7, 0)` or `(mx - 8, -8)` still resolve to their own monitor.
+                let px = (phys_x as i64).saturating_add(64);
+                let py = (phys_y as i64).saturating_add(64);
+                monitors
+                    .iter()
+                    .filter(|&&(_, _, _, _, m_scale)| m_scale.is_finite() && m_scale > 0.0)
+                    .min_by_key(|&&(mx, my, mw, mh, _)| {
+                        let mx1 = mx as i64;
+                        let my1 = my as i64;
+                        let mx2 = mx1.saturating_add(mw as i64).saturating_sub(1);
+                        let my2 = my1.saturating_add(mh as i64).saturating_sub(1);
+                        let dx = if px < mx1 { mx1 - px } else if px > mx2 { px - mx2 } else { 0 };
+                        let dy = if py < my1 { my1 - py } else if py > my2 { py - my2 } else { 0 };
+                        dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy))
+                    })
+                    .map(|&(_, _, _, _, m_scale)| m_scale)
+            })
+            .unwrap_or(window_scale)
+    } else {
+        window_scale
+    };
+    let s = if s.is_finite() && s > 0.0 { s } else { 1.0 };
+    (
+        (geom.width * s).round().clamp(1.0, u32::MAX as f64) as u32,
+        (geom.height * s).round().clamp(1.0, u32::MAX as f64) as u32,
+    )
+}
+
 /// Apply a saved `WindowGeometry` position to a newly built `WebviewWindow` if it lands
-/// visibly on a connected monitor. On Windows, if moving onto the target monitor changes
-/// the window's DPI scale factor, re-applies the logical inner size and target physical
-/// position at the target monitor's DPI. Returns `true` if applied.
+/// visibly on a connected monitor. On Windows, pre-sizes to the saved physical footprint
+/// before moving so `WM_DPICHANGED` fires cleanly across mixed-DPI monitors, then re-applies
+/// the logical inner size and exact physical origin at the settled DPI. Returns `true` if applied.
 pub fn apply_restored_position(
     win: &tauri::WebviewWindow,
     geom: &crate::state::WindowGeometry,
@@ -664,16 +727,38 @@ pub fn apply_restored_position(
         return false;
     }
     let (phys_x, phys_y) = target_physical_position(geom, scale);
-    if let Err(e) = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(phys_x, phys_y))) {
-        log::warn!("Failed to set position for '{}': {}", label, e);
-        return false;
-    }
     #[cfg(target_os = "windows")]
     {
-        let new_scale = win.scale_factor().ok().filter(|s| s.is_finite() && *s > 0.0).unwrap_or(scale);
-        if (new_scale - scale).abs() > f64::EPSILON {
+        let monitor_rects: Vec<(i32, i32, u32, u32, f64)> = monitors
+            .iter()
+            .map(|m| {
+                let p = m.position();
+                let s = m.size();
+                (p.x, p.y, s.width, s.height, m.scale_factor())
+            })
+            .collect();
+        let (target_w, target_h) = windows_target_physical_size(geom, phys_x, phys_y, scale, &monitor_rects);
+        let _ = win.set_min_size(None::<tauri::Size>);
+        let _ = win.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(target_w, target_h)));
+        let pos_result = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(phys_x, phys_y)));
+        if pos_result.is_ok() {
             let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(geom.width, geom.height)));
             let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(phys_x, phys_y)));
+        }
+        let _ = win.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize::new(
+            APP_WINDOW_MIN_WIDTH,
+            APP_WINDOW_MIN_HEIGHT,
+        ))));
+        if let Err(e) = pos_result {
+            log::warn!("Failed to set position for '{}': {}", label, e);
+            return false;
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Err(e) = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(phys_x, phys_y))) {
+            log::warn!("Failed to set position for '{}': {}", label, e);
+            return false;
         }
     }
     true
@@ -783,15 +868,31 @@ pub fn restore_window_geometry(window: tauri::Window, state: State<'_, Arc<AppSt
         let (phys_x, phys_y) = target_physical_position(&geom, scale);
         #[cfg(target_os = "windows")]
         {
-            // Move first so Win32 updates the window's DPI to the target monitor before
-            // applying logical inner size; if DPI changed, re-apply origin so WM_DPICHANGED's
-            // suggested rect cannot drift the window off its saved position.
+            if window.is_maximized().unwrap_or(false) {
+                let _ = window.unmaximize();
+            }
+            let monitor_rects: Vec<(i32, i32, u32, u32, f64)> = monitors
+                .iter()
+                .map(|m| {
+                    let p = m.position();
+                    let s = m.size();
+                    (p.x, p.y, s.width, s.height, m.scale_factor())
+                })
+                .collect();
+            let (target_w, target_h) = windows_target_physical_size(&geom, phys_x, phys_y, scale, &monitor_rects);
+            // Temporarily lift min_inner_size so WM_GETMINMAXINFO does not clamp to the source
+            // monitor's DPI-scaled minimum before moving onto a lower-DPI monitor. Pre-size to
+            // the saved physical footprint before moving so MonitorFromWindow selects the target
+            // monitor on the first move, then re-apply logical size + exact origin and restore min.
+            let _ = window.set_min_size(None::<tauri::Size>);
+            let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(target_w, target_h)));
             let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(phys_x, phys_y)));
             let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(geom.width, geom.height)));
-            let new_scale = window.scale_factor().ok().filter(|s| s.is_finite() && *s > 0.0).unwrap_or(scale);
-            if (new_scale - scale).abs() > f64::EPSILON {
-                let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(phys_x, phys_y)));
-            }
+            let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(phys_x, phys_y)));
+            let _ = window.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize::new(
+                APP_WINDOW_MIN_WIDTH,
+                APP_WINDOW_MIN_HEIGHT,
+            ))));
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -1458,8 +1559,8 @@ mod clone_ids_tests {
     #[test]
     fn window_geometry_rejects_windows_minimized_sentinels_and_collapsed_sizes() {
         use crate::state::WindowGeometry;
-        let g = |x, y, width, height| WindowGeometry { x, y, width, height, physical_position: false };
-        let gp = |x, y, width, height| WindowGeometry { x, y, width, height, physical_position: true };
+        let g = |x, y, width, height| WindowGeometry { x, y, width, height, physical_position: false, scale_factor: None };
+        let gp = |x, y, width, height| WindowGeometry { x, y, width, height, physical_position: true, scale_factor: Some(1.0) };
 
         // Normal primary and negative multi-monitor placements.
         assert!(g(100.0, 100.0, 1200.0, 800.0).is_valid());
@@ -1476,11 +1577,14 @@ mod clone_ids_tests {
         assert!(!g(-21333.33, -21333.33, 1200.0, 800.0).is_valid());
         assert!(!g(-16000.0, -16000.0, 1200.0, 800.0).is_valid());
 
-        // Collapsed / iconic / non-finite rects.
+        // Collapsed / iconic / extreme / non-finite rects and invalid scale factors.
         assert!(!g(100.0, 100.0, 0.0, 0.0).is_valid());
         assert!(!g(100.0, 100.0, 160.0, 28.0).is_valid());
+        assert!(!g(100.0, 100.0, 1e20, 800.0).is_valid());
         assert!(!g(f64::NAN, 100.0, 1200.0, 800.0).is_valid());
         assert!(!g(100.0, f64::INFINITY, 1200.0, 800.0).is_valid());
+        assert!(!WindowGeometry { x: 100.0, y: 100.0, width: 1200.0, height: 800.0, physical_position: true, scale_factor: Some(0.0) }.is_valid());
+        assert!(!WindowGeometry { x: 100.0, y: 100.0, width: 1200.0, height: 800.0, physical_position: true, scale_factor: Some(f64::NAN) }.is_valid());
     }
 
     #[test]
@@ -1513,7 +1617,7 @@ mod clone_ids_tests {
     #[test]
     fn mixed_dpi_logical_visibility_handles_retina_and_standard_monitors() {
         use crate::state::WindowGeometry;
-        let g = |x, y, width, height| WindowGeometry { x, y, width, height, physical_position: false };
+        let g = |x, y, width, height| WindowGeometry { x, y, width, height, physical_position: false, scale_factor: None };
 
         // macOS/Linux: 2x Retina primary (logical 0..1512, tao reports 0..3024) +
         // 1x external right (logical 1512..4072, tao reports 1512..4072).
@@ -1533,10 +1637,23 @@ mod clone_ids_tests {
         let external_left = [(-1920, 0, 1920, 1080, 1.0), (0, 0, 3024, 1964, 2.0)];
         assert!(!super::geometry_visible_logical(&g(1800.0, 100.0, 1200.0, 800.0), &external_left));
         assert!(super::geometry_visible_logical(&g(-1800.0, 100.0, 1200.0, 800.0), &external_left));
+
+        // Cross-platform Windows backup (`physical_position: true`) must never be placed as
+        // macOS/Linux logical coordinates, even when the monitors list is empty.
+        let win_backup = WindowGeometry {
+            x: 1400.0,
+            y: 400.0,
+            width: 1200.0,
+            height: 800.0,
+            physical_position: true,
+            scale_factor: Some(2.0),
+        };
+        assert!(!super::geometry_visible_logical(&win_backup, &retina_left));
+        assert!(!super::geometry_visible_logical(&win_backup, &[]));
     }
 
     #[test]
-    fn windows_mixed_dpi_save_and_restore_preserves_exact_physical_origin() {
+    fn windows_mixed_dpi_save_and_restore_preserves_exact_physical_origin_and_footprint() {
         use crate::state::WindowGeometry;
 
         // Case 1: Primary 4K@200% [0..3840) + secondary 1080p@100% [3840..5760).
@@ -1544,11 +1661,13 @@ mod clone_ids_tests {
         let monitors_4k_primary = [(0, 0, 3840, 2160, 2.0), (3840, 0, 1920, 1080, 1.0)];
         let saved = super::build_window_geometry(4000, 100, 1200, 800, 1.0, true);
         assert!(saved.physical_position);
+        assert_eq!(saved.scale_factor, Some(1.0));
         assert_eq!((saved.x, saved.y, saved.width, saved.height), (4000.0, 100.0, 1200.0, 800.0));
-        // Restoring from Primary 4K@200% (window_scale = 2.0) must keep (4000, 100), not 8000!
+        // Restoring from Primary 4K@200% (window_scale = 2.0) keeps (4000, 100) and 1200x800 physical!
         assert!(super::geometry_visible_physical(&saved, 2.0, &monitors_4k_primary));
         assert_eq!(super::resolve_physical_position(&saved, 2.0, true), (4000, 100));
-        // Unplugging secondary monitor must reject the stale (4000, 100) rect.
+        assert_eq!(super::windows_target_physical_size(&saved, 4000, 100, 2.0, &monitors_4k_primary), (1200, 800));
+        // Unplugging secondary monitor rejects the stale (4000, 100) rect.
         assert!(!super::geometry_visible_physical(&saved, 2.0, &monitors_4k_primary[..1]));
 
         // Case 2: Primary 1080p@100% [0..1920) + secondary 4K@200% [1920..5760).
@@ -1556,37 +1675,78 @@ mod clone_ids_tests {
         let monitors_1080p_primary = [(0, 0, 1920, 1080, 1.0), (1920, 0, 3840, 2160, 2.0)];
         let saved_4k = super::build_window_geometry(2000, 100, 2400, 1600, 2.0, true);
         assert!(saved_4k.physical_position);
+        assert_eq!(saved_4k.scale_factor, Some(2.0));
         assert_eq!((saved_4k.x, saved_4k.y, saved_4k.width, saved_4k.height), (2000.0, 100.0, 1200.0, 800.0));
-        // Restoring from Primary 1080p@100% (window_scale = 1.0) must land at (2000, 100), not 1000!
+        // Restoring from Primary 1080p@100% (window_scale = 1.0) lands at (2000, 100) with 2400x1600 physical!
         assert!(super::geometry_visible_physical(&saved_4k, 1.0, &monitors_1080p_primary));
         assert_eq!(super::resolve_physical_position(&saved_4k, 1.0, true), (2000, 100));
+        assert_eq!(super::windows_target_physical_size(&saved_4k, 2000, 100, 1.0, &monitors_1080p_primary), (2400, 1600));
 
-        // Case 3: Legacy pre-fix JSON (no `physical_position` field) deserializes with
-        // `physical_position == false` and preserves single-DPI restore via window_scale.
+        // Case 3: Lower-DPI window near/straddling higher-DPI neighbor keeps its exact 1x footprint
+        // (never misclassified as 2x) while a 2x-saved straddling window keeps its 2x footprint.
+        let near_edge_1x = super::build_window_geometry(720, 750, 1200, 800, 1.0, true);
+        assert_eq!(super::windows_target_physical_size(&near_edge_1x, 720, 750, 1.0, &monitors_1080p_primary), (1200, 800));
+        let straddle_1x = super::build_window_geometry(1200, 100, 1200, 800, 1.0, true);
+        assert_eq!(super::windows_target_physical_size(&straddle_1x, 1200, 100, 2.0, &monitors_1080p_primary), (1200, 800));
+        let straddle_2x = super::build_window_geometry(1500, 100, 2400, 1600, 2.0, true);
+        assert_eq!(super::windows_target_physical_size(&straddle_2x, 1500, 100, 1.0, &monitors_1080p_primary), (2400, 1600));
+
+        // Case 4: Secondary 1080p@100% on LEFT [-1920..0) or sandwiched between 4K@300% monitors:
+        // pre-sizing uses the saved 1x physical size (1200x800) so moving to (-1400, 100) lands
+        // 100% inside [-1920..0) with zero overlap on neighboring 4K monitors.
+        let sandwiched = [(-5760, 0, 3840, 2160, 3.0), (-1920, 0, 1920, 1080, 1.0), (0, 0, 3840, 2160, 3.0)];
+        let saved_mid = super::build_window_geometry(-1400, 100, 1200, 800, 1.0, true);
+        assert_eq!(super::windows_target_physical_size(&saved_mid, -1400, 100, 3.0, &sandwiched), (1200, 800));
+        // Fallback when `physical_position: true` lacks `scale_factor` picks the monitor containing
+        // the interior of the window — including DWM-bordered snapped/maximized origins like (-1927, 0).
+        let no_scale = WindowGeometry { x: -1400.0, y: 100.0, width: 1200.0, height: 800.0, physical_position: true, scale_factor: None };
+        assert_eq!(super::windows_target_physical_size(&no_scale, -1400, 100, 3.0, &sandwiched), (1200, 800));
+        let dwm_snapped = WindowGeometry { x: -1927.0, y: 0.0, width: 1200.0, height: 800.0, physical_position: true, scale_factor: None };
+        assert_eq!(super::windows_target_physical_size(&dwm_snapped, -1927, 0, 3.0, &sandwiched), (1200, 800));
+        let dwm_maximized = WindowGeometry { x: -24.0, y: -24.0, width: 1200.0, height: 800.0, physical_position: true, scale_factor: None };
+        assert_eq!(super::windows_target_physical_size(&dwm_maximized, -24, -24, 1.0, &sandwiched), (3600, 2400));
+
+        // Stale higher-DPI `scale_factor` must not fool `geometry_visible_physical` into accepting
+        // a rect that shrinks completely off-screen at the connected monitor's lower current DPI.
+        let stale_2x_left = WindowGeometry {
+            x: -1500.0,
+            y: 100.0,
+            width: 1200.0,
+            height: 800.0,
+            physical_position: true,
+            scale_factor: Some(2.0),
+        };
+        assert!(!super::geometry_visible_physical(&stale_2x_left, 1.0, &[(0, 0, 1920, 1080, 1.0)]));
+
+        // Case 5: Legacy pre-fix JSON (no `physical_position` / `scale_factor`) deserializes cleanly
+        // and preserves single-DPI restore via window_scale.
         let legacy: WindowGeometry = serde_json::from_str(
             r#"{"x":100.0,"y":50.0,"width":1200.0,"height":800.0}"#
         ).expect("legacy WindowGeometry deserializes");
         assert!(!legacy.physical_position);
+        assert_eq!(legacy.scale_factor, None);
         assert_eq!(super::resolve_physical_position(&legacy, 1.5, true), (150, 75));
         assert!(super::geometry_visible_physical(&legacy, 1.5, &[(0, 0, 2880, 1620, 1.5)]));
-        // Serializing logical geometry omits `physical_position` (no JSON bloat on macOS/Linux).
+        // Serializing logical geometry omits both Windows-only fields (no JSON bloat on macOS/Linux).
         let logical_json = serde_json::to_string(&legacy).unwrap();
         assert!(!logical_json.contains("physical_position"));
-        // Serializing Windows physical geometry preserves `physical_position: true`.
+        assert!(!logical_json.contains("scale_factor"));
+        // Serializing Windows physical geometry preserves both fields.
         let physical_json = serde_json::to_string(&saved).unwrap();
         assert!(physical_json.contains("\"physical_position\":true"));
+        assert!(physical_json.contains("\"scale_factor\":1.0"));
     }
 
     #[test]
     fn window_data_geometry_readers_filter_out_invalid_entries() {
         use crate::state::{WindowData, WindowGeometry};
         let mut win = WindowData::new("main".into());
-        win.window_geometry.insert("1".into(), WindowGeometry { x: -32000.0, y: -32000.0, width: 0.0, height: 0.0, physical_position: true });
+        win.window_geometry.insert("1".into(), WindowGeometry { x: -32000.0, y: -32000.0, width: 0.0, height: 0.0, physical_position: true, scale_factor: Some(1.0) });
         win.last_geometry_monitors = Some(1);
         assert!(win.geometry_for(1).is_none());
         assert!(win.last_geometry().is_none());
 
-        win.window_geometry.insert("2".into(), WindowGeometry { x: 100.0, y: 100.0, width: 1200.0, height: 800.0, physical_position: false });
+        win.window_geometry.insert("2".into(), WindowGeometry { x: 100.0, y: 100.0, width: 1200.0, height: 800.0, physical_position: false, scale_factor: None });
         assert!(win.geometry_for(2).is_some());
         // Sole valid entry serves as fallback when last_geometry_monitors points to an invalid one.
         assert_eq!(win.last_geometry().map(|g| (g.width, g.height)), Some((1200.0, 800.0)));

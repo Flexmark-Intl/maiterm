@@ -1244,11 +1244,11 @@ mod migration_tests {
         let mut data = window_with_legacy("ws-1", serde_json::json!([]));
         let win = &mut data.windows[0];
         // Corrupted Windows minimized entries (100% physical and legacy 150% scaled).
-        win.window_geometry.insert("1".into(), WindowGeometry { x: -32000.0, y: -32000.0, width: 0.0, height: 0.0, physical_position: true });
-        win.window_geometry.insert("2".into(), WindowGeometry { x: -21333.33, y: -21333.33, width: 1200.0, height: 800.0, physical_position: false });
+        win.window_geometry.insert("1".into(), WindowGeometry { x: -32000.0, y: -32000.0, width: 0.0, height: 0.0, physical_position: true, scale_factor: Some(1.0) });
+        win.window_geometry.insert("2".into(), WindowGeometry { x: -21333.33, y: -21333.33, width: 1200.0, height: 800.0, physical_position: false, scale_factor: None });
         // Valid secondary-monitor negative x coordinate and Windows physical multi-monitor coordinate.
-        win.window_geometry.insert("3".into(), WindowGeometry { x: -1920.0, y: 40.0, width: 1400.0, height: 900.0, physical_position: false });
-        win.window_geometry.insert("4".into(), WindowGeometry { x: 4000.0, y: 100.0, width: 1200.0, height: 800.0, physical_position: true });
+        win.window_geometry.insert("3".into(), WindowGeometry { x: -1920.0, y: 40.0, width: 1400.0, height: 900.0, physical_position: false, scale_factor: None });
+        win.window_geometry.insert("4".into(), WindowGeometry { x: 4000.0, y: 100.0, width: 1200.0, height: 800.0, physical_position: true, scale_factor: Some(1.0) });
         win.last_geometry_monitors = Some(1);
 
         migrate_app_data(&mut data);
