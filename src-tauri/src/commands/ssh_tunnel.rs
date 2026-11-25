@@ -1400,15 +1400,21 @@ pub fn build_codex_setup_script(remote_port: u16, auth: String, tab_id: String, 
 /// python3 merge for `~/.gemini/config/mcp_config.json` on a remote host: sets `mcpServers.maiterm`
 /// (pointing at `$HOME/.gemini/config/plugins/maiterm/mcp-stdio.sh`) and add-only merges any
 /// enabled proxied MCP servers (`$__agy_proxy` JSON `{ "set": { name: { path, marker } } }`)
-/// without overwriting native user entries or malformed JSON. NO single quotes (wrapped in `''`).
+/// without overwriting native user entries, symlinks, or malformed JSON. NO single quotes (wrapped in `''`).
 const AGY_MCP_CONFIG_MERGE_PY: &str = concat!(
-    "import json,os,sys\n",
+    "import json,os,sys,tempfile\n",
     "p=os.path.expanduser(\"~/.gemini/config/mcp_config.json\")\n",
     "wrapper=os.path.expanduser(\"~/.gemini/config/plugins/maiterm/mcp-stdio.sh\")\n",
-    "os.makedirs(os.path.dirname(p),exist_ok=True)\n",
+    "if os.path.islink(p):\n",
+    " if not os.path.exists(p):\n",
+    "  sys.stderr.write(\"maiterm: refusing to rewrite dangling symlink ~/.gemini/config/mcp_config.json\\n\")\n",
+    "  sys.exit(0)\n",
+    " p=os.path.realpath(p)\n",
     "cur={}\n",
+    "orig_mode=None\n",
     "if os.path.exists(p):\n",
     " try:\n",
+    "  orig_mode=os.stat(p).st_mode&0o7777\n",
     "  raw=open(p).read()\n",
     "  cur=json.loads(raw) if raw.strip() else {}\n",
     " except Exception:\n",
@@ -1451,22 +1457,40 @@ const AGY_MCP_CONFIG_MERGE_PY: &str = concat!(
     "    servers[name]=entry\n",
     "    changed=True\n",
     "if changed:\n",
-    " tmp=p+\".maiterm-tmp-\"+str(os.getpid())\n",
-    " open(tmp,\"w\").write(json.dumps(cur,indent=2)+\"\\n\")\n",
-    " os.replace(tmp,p)\n",
+    " parent=os.path.dirname(p)\n",
+    " os.makedirs(parent,exist_ok=True)\n",
+    " fd,tmp=tempfile.mkstemp(prefix=\".maiterm-tmp-\",dir=parent)\n",
+    " try:\n",
+    "  with os.fdopen(fd,\"w\") as f:\n",
+    "   f.write(json.dumps(cur,indent=2)+\"\\n\")\n",
+    "  if orig_mode is not None:\n",
+    "   os.chmod(tmp,orig_mode)\n",
+    "  os.replace(tmp,p)\n",
+    " except Exception:\n",
+    "  try:\n",
+    "   os.unlink(tmp)\n",
+    "  except OSError:\n",
+    "   pass\n",
+    "  sys.exit(0)\n",
 );
 
 /// python3 merge for `~/.gemini/antigravity-cli/settings.json` on a remote host: ensures
-/// `"mcp(maiterm/*)"` is in `permissions.allow`, preserving all other settings and refusing
-/// malformed JSON. NO single quotes (shell wraps in `''`).
+/// `"mcp(maiterm/*)"` is in `permissions.allow`, preserving symlinks, file permissions, and
+/// all other settings while refusing dangling symlinks or malformed JSON. NO single quotes (shell wraps in `''`).
 const AGY_SETTINGS_ALLOW_MERGE_PY: &str = concat!(
-    "import json,os,sys\n",
+    "import json,os,sys,tempfile\n",
     "p=os.path.expanduser(\"~/.gemini/antigravity-cli/settings.json\")\n",
     "rule=\"mcp(maiterm/*)\"\n",
-    "os.makedirs(os.path.dirname(p),exist_ok=True)\n",
+    "if os.path.islink(p):\n",
+    " if not os.path.exists(p):\n",
+    "  sys.stderr.write(\"maiterm: refusing to rewrite dangling symlink ~/.gemini/antigravity-cli/settings.json\\n\")\n",
+    "  sys.exit(0)\n",
+    " p=os.path.realpath(p)\n",
     "cur={}\n",
+    "orig_mode=None\n",
     "if os.path.exists(p):\n",
     " try:\n",
+    "  orig_mode=os.stat(p).st_mode&0o7777\n",
     "  raw=open(p).read()\n",
     "  cur=json.loads(raw) if raw.strip() else {}\n",
     " except Exception:\n",
@@ -1486,11 +1510,23 @@ const AGY_SETTINGS_ALLOW_MERGE_PY: &str = concat!(
     " perms[\"allow\"]=allow\n",
     "if not isinstance(allow,list):\n",
     " sys.exit(0)\n",
-    "if rule not in allow:\n",
+    "if not any(isinstance(x,str) and x==rule for x in allow):\n",
     " allow.append(rule)\n",
-    " tmp=p+\".maiterm-tmp-\"+str(os.getpid())\n",
-    " open(tmp,\"w\").write(json.dumps(cur,indent=2)+\"\\n\")\n",
-    " os.replace(tmp,p)\n",
+    " parent=os.path.dirname(p)\n",
+    " os.makedirs(parent,exist_ok=True)\n",
+    " fd,tmp=tempfile.mkstemp(prefix=\".maiterm-tmp-\",dir=parent)\n",
+    " try:\n",
+    "  with os.fdopen(fd,\"w\") as f:\n",
+    "   f.write(json.dumps(cur,indent=2)+\"\\n\")\n",
+    "  if orig_mode is not None:\n",
+    "   os.chmod(tmp,orig_mode)\n",
+    "  os.replace(tmp,p)\n",
+    " except Exception:\n",
+    "  try:\n",
+    "   os.unlink(tmp)\n",
+    "  except OSError:\n",
+    "   pass\n",
+    "  sys.exit(0)\n",
 );
 
 /// Non-interactive sshd PATH fallback dirs so default `agy` installs (`~/.local/bin/agy`,
@@ -2447,7 +2483,8 @@ mod tests {
         assert!(on.starts_with("(\n") && on.ends_with("\n)"), "runs in a subshell so interactive PATH is untouched");
         assert!(on.contains("if command -v agy >/dev/null 2>&1; then"));
         assert!(on.contains("PATH=\"$PATH:$HOME/.local/bin:"), "appends fallback bins after existing PATH");
-        assert!(on.contains("os.getpid()"), "remote temp file uses PID");
+        assert!(on.contains("tempfile.mkstemp"), "remote temp file uses mkstemp");
+        assert!(on.contains("os.path.realpath"), "remote merge resolves symlinks");
         assert!(on.contains("MAITERM_AGY_SHIM_EOF"));
         assert!(on.contains("MAITERM_AGY_HOOKS_EOF"));
         assert!(on.contains("MAITERM_AGY_BRIDGE_EOF"));
@@ -2475,6 +2512,71 @@ mod tests {
         ] {
             let (ok_py, e) = pipe_ok("python3", &["-c", check], src);
             assert!(ok_py, "{name} does not compile:\n{e}");
+        }
+
+        // Verify both merge scripts preserve symlinks + file modes and refuse dangling symlinks.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{symlink, PermissionsExt};
+            let home = std::env::temp_dir().join(format!("maiterm-ssh-agy-sym-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&home);
+            let dotfiles = home.join("dotfiles");
+            std::fs::create_dir_all(&dotfiles).unwrap();
+            std::fs::create_dir_all(home.join(".gemini/config")).unwrap();
+            std::fs::create_dir_all(home.join(".gemini/antigravity-cli")).unwrap();
+
+            let real_mcp = dotfiles.join("mcp_config.json");
+            let real_settings = dotfiles.join("settings.json");
+            std::fs::write(&real_mcp, r#"{"mcpServers":{"other":{"command":"x"}}}"#).unwrap();
+            std::fs::write(&real_settings, r#"{"agentMode":"auto"}"#).unwrap();
+            std::fs::set_permissions(&real_mcp, std::fs::Permissions::from_mode(0o644)).unwrap();
+            std::fs::set_permissions(&real_settings, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+            let mcp_link = home.join(".gemini/config/mcp_config.json");
+            let settings_link = home.join(".gemini/antigravity-cli/settings.json");
+            symlink(&real_mcp, &mcp_link).unwrap();
+            symlink(&real_settings, &settings_link).unwrap();
+
+            for src in [AGY_MCP_CONFIG_MERGE_PY, AGY_SETTINGS_ALLOW_MERGE_PY] {
+                let out = Command::new("python3")
+                    .args(["-c", src])
+                    .env("HOME", &home)
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "python merge failed: {}", String::from_utf8_lossy(&out.stderr));
+            }
+            assert!(std::fs::symlink_metadata(&mcp_link).unwrap().file_type().is_symlink(), "mcp_config symlink clobbered");
+            assert!(std::fs::symlink_metadata(&settings_link).unwrap().file_type().is_symlink(), "settings symlink clobbered");
+            assert_eq!(std::fs::metadata(&real_mcp).unwrap().permissions().mode() & 0o777, 0o644);
+            assert_eq!(std::fs::metadata(&real_settings).unwrap().permissions().mode() & 0o777, 0o644);
+            let mcp_v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&real_mcp).unwrap()).unwrap();
+            assert!(mcp_v["mcpServers"]["maiterm"].is_object());
+            assert!(mcp_v["mcpServers"]["other"].is_object());
+            let set_v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&real_settings).unwrap()).unwrap();
+            assert_eq!(set_v["agentMode"], "auto");
+            assert_eq!(set_v["permissions"]["allow"], serde_json::json!(["mcp(maiterm/*)"]));
+
+            // Dangling symlinks must be refused without replacing or creating targets.
+            std::fs::remove_file(&mcp_link).unwrap();
+            std::fs::remove_file(&settings_link).unwrap();
+            let missing_mcp = dotfiles.join("missing_mcp.json");
+            let missing_set = dotfiles.join("missing_set.json");
+            symlink(&missing_mcp, &mcp_link).unwrap();
+            symlink(&missing_set, &settings_link).unwrap();
+            for src in [AGY_MCP_CONFIG_MERGE_PY, AGY_SETTINGS_ALLOW_MERGE_PY] {
+                let out = Command::new("python3")
+                    .args(["-c", src])
+                    .env("HOME", &home)
+                    .output()
+                    .unwrap();
+                assert!(out.status.success());
+            }
+            assert!(std::fs::symlink_metadata(&mcp_link).unwrap().file_type().is_symlink());
+            assert!(std::fs::symlink_metadata(&settings_link).unwrap().file_type().is_symlink());
+            assert!(!missing_mcp.exists());
+            assert!(!missing_set.exists());
+
+            let _ = std::fs::remove_dir_all(&home);
         }
     }
 
