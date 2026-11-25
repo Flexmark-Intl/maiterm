@@ -221,6 +221,38 @@ pub(crate) fn remote_command_index(cmd: &str) -> usize {
     parse_ssh(cmd).remote_at
 }
 
+/// Where the remote command starts among pre-split ssh option/dest words (no program).
+/// Identical getopt walk to `parse_ssh` and the frontend's `remoteCommandIndex`.
+pub(crate) fn remote_command_index_words(words: &[&str]) -> usize {
+    let mut dest = false;
+    let mut i = 0;
+    while i < words.len() {
+        let w = words[i];
+        if w == "--" {
+            return if dest { i + 1 } else { (i + 2).min(words.len()) };
+        }
+        let Some(flags) = w.strip_prefix('-').filter(|f| !f.is_empty()) else {
+            if dest {
+                return i;
+            }
+            dest = true;
+            i += 1;
+            continue;
+        };
+        for (j, ch) in flags.char_indices() {
+            if !SSH_ARG_FLAGS.contains(ch) {
+                continue;
+            }
+            if flags[j + ch.len_utf8()..].is_empty() {
+                i += 1;
+            }
+            break;
+        }
+        i += 1;
+    }
+    words.len()
+}
+
 /// `cmd` is shell words (`util::ssh_words`): `-i '/Users/me/My Keys/id'` is one option.
 fn parse_ssh(cmd: &str) -> SshParse {
     let words = crate::util::ssh_words::split(cmd);

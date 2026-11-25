@@ -1409,8 +1409,19 @@ export async function setTabAutoResumeContext(
   remoteCwd: string | null,
   command: string | null,
   pinned?: boolean,
+  preserveEnabled?: boolean,
 ): Promise<void> {
-  return invoke('set_tab_auto_resume_context', { workspaceId, paneId, tabId, cwd, sshCommand, remoteCwd, command, pinned: pinned ?? null });
+  return invoke('set_tab_auto_resume_context', {
+    workspaceId,
+    paneId,
+    tabId,
+    cwd,
+    sshCommand,
+    remoteCwd,
+    command,
+    pinned: pinned ?? null,
+    preserveEnabled: preserveEnabled ?? null,
+  });
 }
 
 export async function setTabAutoResumeEnabled(

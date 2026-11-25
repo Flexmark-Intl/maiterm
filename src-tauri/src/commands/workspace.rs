@@ -1958,6 +1958,30 @@ pub fn set_tab_last_cwd(
     Ok(())
 }
 
+fn apply_tab_auto_resume_context(
+    tab: &mut Tab,
+    cwd: Option<String>,
+    ssh_command: Option<String>,
+    remote_cwd: Option<String>,
+    command: Option<String>,
+    pinned: Option<bool>,
+    preserve_enabled: bool,
+) {
+    tab.auto_resume_cwd = cwd;
+    tab.auto_resume_ssh_command = ssh_command;
+    tab.auto_resume_remote_cwd = remote_cwd;
+    if command.is_some() {
+        tab.auto_resume_remembered_command = command.clone();
+    }
+    tab.auto_resume_command = command;
+    if !preserve_enabled {
+        tab.auto_resume_enabled = true;
+    }
+    if let Some(p) = pinned {
+        tab.auto_resume_pinned = p;
+    }
+}
+
 #[tauri::command]
 pub fn set_tab_auto_resume_context(
     window: tauri::Window,
@@ -1970,6 +1994,7 @@ pub fn set_tab_auto_resume_context(
     remote_cwd: Option<String>,
     command: Option<String>,
     pinned: Option<bool>,
+    preserve_enabled: Option<bool>,
 ) -> Result<(), String> {
     let label = window.label().to_string();
     let mut app_data = state.app_data.write();
@@ -1977,17 +2002,15 @@ pub fn set_tab_auto_resume_context(
     if let Some(workspace) = win.workspaces.iter_mut().find(|w| w.id == workspace_id) {
         if let Some(pane) = workspace.panes.iter_mut().find(|p| p.id == pane_id) {
             if let Some(tab) = pane.tabs.iter_mut().find(|t| t.id == tab_id) {
-                tab.auto_resume_cwd = cwd;
-                tab.auto_resume_ssh_command = ssh_command;
-                tab.auto_resume_remote_cwd = remote_cwd;
-                if command.is_some() {
-                    tab.auto_resume_remembered_command = command.clone();
-                }
-                tab.auto_resume_command = command;
-                tab.auto_resume_enabled = true;
-                if let Some(p) = pinned {
-                    tab.auto_resume_pinned = p;
-                }
+                apply_tab_auto_resume_context(
+                    tab,
+                    cwd,
+                    ssh_command,
+                    remote_cwd,
+                    command,
+                    pinned,
+                    preserve_enabled.unwrap_or(false),
+                );
             }
         }
     }
@@ -4296,5 +4319,39 @@ mod service_copy_binding_tests {
         assert!(bind_service_copy(&mut ws, &pane, &tabs[1], Some("svc".into()), Some("vm:alpine".into())).is_err());
         assert!(bind_service_copy(&mut ws, &pane, "nope", Some("svc".into()), None).is_err());
         assert_eq!(bound(&ws), before);
+    }
+
+    #[test]
+    fn apply_tab_auto_resume_context_respects_preserve_enabled() {
+        let mut tab = Tab::new("t".to_string());
+        tab.auto_resume_enabled = false;
+
+        // Legacy migration / backfill path: preserves auto_resume_enabled == false.
+        super::apply_tab_auto_resume_context(
+            &mut tab,
+            Some("/proj".into()),
+            Some("-x -C ews@nova".into()),
+            Some("/srv/app".into()),
+            Some("claude --continue".into()),
+            None,
+            true,
+        );
+        assert!(!tab.auto_resume_enabled, "preserve_enabled must not re-arm a disabled tab");
+        assert_eq!(tab.auto_resume_ssh_command.as_deref(), Some("-x -C ews@nova"));
+        assert_eq!(tab.auto_resume_command.as_deref(), Some("claude --continue"));
+        assert_eq!(tab.auto_resume_remembered_command.as_deref(), Some("claude --continue"));
+
+        // Explicit enable path (default preserve_enabled = false) still turns auto-resume on.
+        super::apply_tab_auto_resume_context(
+            &mut tab,
+            Some("/proj".into()),
+            Some("-x -C ews@nova".into()),
+            Some("/srv/app".into()),
+            Some("claude --continue".into()),
+            Some(true),
+            false,
+        );
+        assert!(tab.auto_resume_enabled);
+        assert!(tab.auto_resume_pinned);
     }
 }

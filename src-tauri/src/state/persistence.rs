@@ -448,6 +448,44 @@ pub fn migrate_app_data(data: &mut AppData) {
         }
     }
 
+    // Shrink grown ssh commands in the saved state itself (active, suspended, never-opened,
+    // and archived tabs) without touching `auto_resume_enabled`. Earlier builds could grow
+    // stored commands behind a shell alias (`alias ssh='ssh -x -C'` / `alias ssh='ssh -t'`);
+    // cleaning them on load/import ensures Rust readers (`filetree/place.rs`, etc.) and every
+    // window see the canonical command immediately, even for tabs that are never opened.
+    let mut shrunk_ssh = 0usize;
+    let shrink_opt = |slot: &mut Option<String>, count: &mut usize| {
+        if let Some(cmd) = slot.as_mut() {
+            let shrunk = crate::util::ssh_target::shrink_grown_ssh_command(cmd);
+            if shrunk != *cmd {
+                *cmd = shrunk;
+                *count += 1;
+            }
+        }
+    };
+    for win in data.windows.iter_mut() {
+        for ws in win.workspaces.iter_mut() {
+            for tab in ws
+                .panes
+                .iter_mut()
+                .flat_map(|p| p.tabs.iter_mut())
+                .chain(ws.archived_tabs.iter_mut())
+            {
+                shrink_opt(&mut tab.auto_resume_ssh_command, &mut shrunk_ssh);
+                shrink_opt(&mut tab.restore_ssh_command, &mut shrunk_ssh);
+                if let Some(ed) = tab.editor_file.as_mut() {
+                    shrink_opt(&mut ed.remote_ssh_command, &mut shrunk_ssh);
+                }
+            }
+        }
+    }
+    if shrunk_ssh > 0 {
+        log::info!(
+            "Migration: shrunk {} grown ssh command(s) in saved state",
+            shrunk_ssh
+        );
+    }
+
     // The integration mode's Landing checkpoint, forced to Ask me until 2026-11-18, is the
     // queen's like any Hive's (docs/hive.md §8.3): once per Hive, a forced `ask` is handed back.
     for win in data.windows.iter_mut() {
@@ -1259,6 +1297,65 @@ mod migration_tests {
         assert!(win.window_geometry.contains_key("3"), "valid negative multi-monitor geometry kept");
         assert!(win.window_geometry.contains_key("4"), "valid Windows physical multi-monitor geometry kept");
         assert_eq!(win.last_geometry_monitors, None, "dangling last_geometry_monitors cleared");
+    }
+
+    #[test]
+    fn migration_shrinks_grown_ssh_commands_everywhere_without_rearming_auto_resume() {
+        use crate::state::workspace::{EditorFileInfo, Tab};
+        let grown = "-x -C -t -o ControlMaster=no -x -C -t -o ControlMaster=no -x -C ews@nova";
+
+        let mut ws = Workspace::new("Remote".to_string());
+        ws.suspended = true;
+        ws.panes[0].tabs.clear();
+
+        // Suspended/never-opened tab with auto-resume explicitly disabled.
+        let mut disabled = Tab::new("disabled".to_string());
+        disabled.auto_resume_ssh_command = Some(grown.to_string());
+        disabled.restore_ssh_command = Some("-t -o ControlMaster=no -t -o ControlMaster=no ews@nova".to_string());
+        disabled.auto_resume_enabled = false;
+        ws.panes[0].tabs.push(disabled);
+
+        // Editor tab with a grown remote_ssh_command.
+        let mut editor = Tab::new("ed".to_string());
+        editor.editor_file = Some(EditorFileInfo {
+            file_path: "/tmp/a.rs".to_string(),
+            is_remote: true,
+            remote_ssh_command: Some(grown.to_string()),
+            remote_path: Some("/srv/a.rs".to_string()),
+            language: None,
+        });
+        ws.panes[0].tabs.push(editor);
+
+        // Archived tab with auto-resume disabled and grown commands.
+        let mut archived = Tab::new("archived".to_string());
+        archived.auto_resume_ssh_command = Some(grown.to_string());
+        archived.restore_ssh_command = Some(grown.to_string());
+        archived.auto_resume_enabled = false;
+        ws.archived_tabs.push(archived);
+
+        let mut win = WindowData::new("main".to_string());
+        win.workspaces.push(ws);
+        let mut data = AppData::default();
+        data.windows.push(win);
+
+        migrate_app_data(&mut data);
+
+        let ws = &data.windows[0].workspaces[0];
+        let t0 = &ws.panes[0].tabs[0];
+        assert_eq!(t0.auto_resume_ssh_command.as_deref(), Some("-x -C ews@nova"));
+        assert_eq!(t0.restore_ssh_command.as_deref(), Some("ews@nova"));
+        assert!(!t0.auto_resume_enabled, "migration must never re-arm a disabled tab");
+
+        let t1 = &ws.panes[0].tabs[1];
+        assert_eq!(
+            t1.editor_file.as_ref().and_then(|e| e.remote_ssh_command.as_deref()),
+            Some("-x -C ews@nova")
+        );
+
+        let arch = &ws.archived_tabs[0];
+        assert_eq!(arch.auto_resume_ssh_command.as_deref(), Some("-x -C ews@nova"));
+        assert_eq!(arch.restore_ssh_command.as_deref(), Some("-x -C ews@nova"));
+        assert!(!arch.auto_resume_enabled, "archived tab auto_resume_enabled stays false");
     }
 }
 

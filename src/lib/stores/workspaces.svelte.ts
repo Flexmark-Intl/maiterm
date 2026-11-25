@@ -448,21 +448,19 @@ function createWorkspacesStore() {
               }
             }
 
-            // Shrink an ssh command an earlier build let grow behind a shell alias
-            // (`withoutAliasedCopies`, tauri/commands.ts). Here rather than where it is read:
-            // the auto-resume command is read raw in a dozen places and wins over the restore
-            // context. In the MIRROR only, on every load: `setTabAutoResumeContext` also turns
-            // auto-resume on, so writing the shrunk command back would re-arm a tab the human
-            // disabled. The saved copy shrinks when something next saves the tab's context
-            // (the autosave tick for a live ssh tab, the human for auto-resume).
+            // Rust's `migrate_app_data` already shrinks grown ssh commands in the saved state on
+            // load/import (covering active, suspended, never-opened, and archived tabs without
+            // touching `auto_resume_enabled`). Keep the mirror pass as defense-in-depth.
             if (tab.auto_resume_ssh_command) tab.auto_resume_ssh_command = commands.cleanSshCommand(tab.auto_resume_ssh_command);
             if (tab.restore_ssh_command) tab.restore_ssh_command = commands.cleanSshCommand(tab.restore_ssh_command);
 
             if (migrated) {
+              // Pass `preserveEnabled: true` so legacy migrations never re-arm a tab the human disabled.
               await commands.setTabAutoResumeContext(
                 ws.id, pane.id, tab.id,
                 tab.auto_resume_cwd, tab.auto_resume_ssh_command,
                 tab.auto_resume_remote_cwd, tab.auto_resume_command,
+                undefined, true,
               );
             }
           }
@@ -1740,11 +1738,12 @@ function createWorkspacesStore() {
       )) {
         tab.auto_resume_command = CLAUDE_RESUME_COMMAND;
         tab.auto_resume_remembered_command = CLAUDE_RESUME_COMMAND;
+        // Preserve `auto_resume_enabled`: rewriting an old template must not re-arm a disabled tab.
         await commands.setTabAutoResumeContext(
           workspaceId, pane.id, tab.id,
           tab.auto_resume_cwd, tab.auto_resume_ssh_command,
           tab.auto_resume_remote_cwd, tab.auto_resume_command,
-          tab.auto_resume_pinned,
+          tab.auto_resume_pinned, true,
         );
       }
 
@@ -2144,15 +2143,15 @@ function createWorkspacesStore() {
       }
     },
 
-    async setTabAutoResumeContext(workspaceId: string, paneId: string, tabId: string, cwd: string | null, sshCommand: string | null, remoteCwd: string | null, command: string | null = null, pinned?: boolean) {
-      await commands.setTabAutoResumeContext(workspaceId, paneId, tabId, cwd, sshCommand, remoteCwd, command, pinned);
+    async setTabAutoResumeContext(workspaceId: string, paneId: string, tabId: string, cwd: string | null, sshCommand: string | null, remoteCwd: string | null, command: string | null = null, pinned?: boolean, preserveEnabled?: boolean) {
+      await commands.setTabAutoResumeContext(workspaceId, paneId, tabId, cwd, sshCommand, remoteCwd, command, pinned, preserveEnabled);
       const { tab } = findTab(workspaceId, paneId, tabId);
       if (tab) {
         tab.auto_resume_cwd = cwd;
         tab.auto_resume_ssh_command = sshCommand;
         tab.auto_resume_remote_cwd = remoteCwd;
         tab.auto_resume_command = command;
-        tab.auto_resume_enabled = true;
+        if (!preserveEnabled) tab.auto_resume_enabled = true;
         if (command != null) tab.auto_resume_remembered_command = command;
         if (pinned != null) tab.auto_resume_pinned = pinned;
       }

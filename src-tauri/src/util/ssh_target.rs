@@ -254,6 +254,90 @@ pub(crate) fn without_program(cmd: &str) -> String {
     super::ssh_words::join(out)
 }
 
+/// Shrink a stored ssh command that an earlier build let grow behind a shell alias
+/// (`alias ssh='ssh -x -C'`, `alias ssh='ssh -t'`), preserving every kept word's original
+/// quoting and leaving non-grown commands completely untouched.
+///
+/// Rust twin of `withoutAliasedCopies` in `src/lib/tauri/commands.ts`: for each
+/// `-o ControlMaster=no` among the options (before the remote command, and after at least one
+/// preceding word — the alias's options or maiTerm's `-t`), drops `-t -o ControlMaster=no` (or
+/// `-o ControlMaster=no`), and when the words before it repeat right after it, drops the
+/// duplicate leading copy too. Repeats until none remain.
+///
+/// Handles both bare stored args (`-x -C -t -o ControlMaster=no -x -C host`) and commands that
+/// kept a non-plain ssh program in front (`/usr/bin/ssh …`, `autossh -M 0 …`).
+pub fn shrink_grown_ssh_command(cmd: &str) -> String {
+    if !cmd.contains("ControlMaster=no") {
+        return cmd.to_string();
+    }
+    let all = super::ssh_words::split_spans(cmd);
+    if all.is_empty() {
+        return cmd.to_string();
+    }
+
+    // Preserve a kept non-plain ssh program (full-path ssh or autossh + its `-M`/`-f` flags).
+    let first = all[0].value.as_str();
+    let base = first.rsplit('/').next().unwrap_or(first);
+    let mut prefix_len = 0usize;
+    if (base == "ssh" && first != "ssh") || base == "autossh" {
+        prefix_len = 1;
+        if base == "autossh" {
+            while prefix_len < all.len() {
+                let w = all[prefix_len].value.as_str();
+                if w == "-M" {
+                    prefix_len = (prefix_len + 2).min(all.len());
+                } else if w == "-f" || w.starts_with("-M") {
+                    prefix_len += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    let prefix = &all[..prefix_len];
+    let mut words: Vec<super::ssh_words::WordSpan> = all[prefix_len..].to_vec();
+    if !words.first().is_some_and(|w| w.value.starts_with('-')) {
+        return cmd.to_string();
+    }
+
+    let orig_len = words.len();
+    loop {
+        let values: Vec<&str> = words.iter().map(|w| w.value.as_str()).collect();
+        let end = crate::watch::remote_command_index_words(&values);
+        let mut at: Option<usize> = None;
+        for k in 1..end.saturating_sub(1) {
+            if values[k] == "-o" && values[k + 1] == "ControlMaster=no" {
+                at = Some(k);
+                break;
+            }
+        }
+        let Some(at) = at else {
+            break;
+        };
+        let lead = if values[at - 1] == "-t" { at - 1 } else { at };
+        let aliased = at + 2 + lead <= values.len()
+            && values[..lead] == values[at + 2..at + 2 + lead];
+        if aliased {
+            words = words.split_off(at + 2);
+        } else {
+            let tail = words.split_off(at + 2);
+            words.truncate(lead);
+            words.extend(tail);
+        }
+    }
+
+    if words.len() == orig_len {
+        return cmd.to_string();
+    }
+    prefix
+        .iter()
+        .chain(words.iter())
+        .map(|w| &cmd[w.start..w.end])
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,5 +413,66 @@ mod tests {
         assert_eq!((t.dest.as_str(), t.opts.as_slice()), ("ews@nova", ["-o".to_string(), "IdentityFile=/Users/me/My Keys/id".to_string()].as_slice()));
         assert_eq!(without_program("'/opt/my ssh/ssh' -p 2 h"), "-p 2 h");
         assert_eq!(t.key(), "-o 'IdentityFile=/Users/me/My Keys/id' ews@nova");
+    }
+
+    #[test]
+    fn shrinks_grown_stored_ssh_commands_and_leaves_everything_else_alone() {
+        // Repeated alias copies (`alias ssh='ssh -x -C'`).
+        let grown = "-x -C -t -o ControlMaster=no -x -C -t -o ControlMaster=no -x -C -t -o ControlMaster=no -x -C me@host";
+        assert_eq!(shrink_grown_ssh_command(grown), "-x -C me@host");
+
+        // Alias adding only `-t`.
+        assert_eq!(
+            shrink_grown_ssh_command("-t -o ControlMaster=no -t -o ControlMaster=no me@host"),
+            "me@host"
+        );
+
+        // Tunnel-style spelling (no `-t`) and extra options preserved.
+        assert_eq!(
+            shrink_grown_ssh_command("-x -C -o ControlMaster=no -x -C -p 2222 me@host"),
+            "-x -C -p 2222 me@host"
+        );
+
+        // Non-repeated options before `-t -o ControlMaster=no` stay.
+        assert_eq!(
+            shrink_grown_ssh_command("-p 2222 -t -o ControlMaster=no -x me@host"),
+            "-p 2222 -x me@host"
+        );
+
+        // Preserves user quoting on kept words.
+        assert_eq!(
+            shrink_grown_ssh_command(r#"-x -C -t -o ControlMaster=no -x -C -i "/Users/me/My Keys/id" me@host"#),
+            r#"-x -C -i "/Users/me/My Keys/id" me@host"#
+        );
+
+        // Kept non-plain ssh programs (`autossh`, full-path `ssh`).
+        assert_eq!(
+            shrink_grown_ssh_command("/usr/bin/ssh -x -C -t -o ControlMaster=no -x -C me@host"),
+            "/usr/bin/ssh -x -C me@host"
+        );
+        assert_eq!(
+            shrink_grown_ssh_command("autossh -M 0 -t -o ControlMaster=no -t -o ControlMaster=no me@host"),
+            "autossh -M 0 me@host"
+        );
+
+        // Never touches remote commands, non-`ControlMaster=no`, or quoted option values.
+        assert_eq!(
+            shrink_grown_ssh_command("me@host ssh -t -o ControlMaster=no inner"),
+            "me@host ssh -t -o ControlMaster=no inner"
+        );
+        assert_eq!(
+            shrink_grown_ssh_command("-x -o ControlMaster=auto -x me@host"),
+            "-x -o ControlMaster=auto -x me@host"
+        );
+        assert_eq!(
+            shrink_grown_ssh_command("-i '/a -t b' -o 'SetEnv=X=-o ControlMaster=no' h"),
+            "-i '/a -t b' -o 'SetEnv=X=-o ControlMaster=no' h"
+        );
+
+        // Degenerate truncated input does not panic.
+        assert_eq!(
+            shrink_grown_ssh_command("-x -C -t -o ControlMaster=no"),
+            "-x -C"
+        );
     }
 }

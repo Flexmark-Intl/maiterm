@@ -24,14 +24,48 @@
 
 use std::borrow::Cow;
 
+/// One word and its byte span in the source string (`&s[start..end]` is the raw spelling).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WordSpan {
+    pub value: String,
+    pub start: usize,
+    pub end: usize,
+}
+
 /// The words of a stored or typed ssh command. Never fails: a string with an unbalanced quote
 /// is read on whitespace, as everything was before quoting (`parse` says which happened).
 pub fn split(s: &str) -> Vec<String> {
     parse(s).unwrap_or_else(|| s.split_whitespace().map(str::to_string).collect())
 }
 
+/// Like `split`, keeping each word's byte span in `s` so kept words can preserve their quoting.
+pub fn split_spans(s: &str) -> Vec<WordSpan> {
+    parse_spans(s).unwrap_or_else(|| {
+        let mut out = Vec::new();
+        let mut start: Option<usize> = None;
+        for (idx, ch) in s.char_indices() {
+            if ch.is_whitespace() {
+                if let Some(st) = start.take() {
+                    out.push(WordSpan { value: s[st..idx].to_string(), start: st, end: idx });
+                }
+            } else if start.is_none() {
+                start = Some(idx);
+            }
+        }
+        if let Some(st) = start {
+            out.push(WordSpan { value: s[st..].to_string(), start: st, end: s.len() });
+        }
+        out
+    })
+}
+
 /// The shell-words reading of `s`, or None when a quote is left open.
 pub fn parse(s: &str) -> Option<Vec<String>> {
+    parse_spans(s).map(|spans| spans.into_iter().map(|w| w.value).collect())
+}
+
+/// The shell-words reading of `s` with byte spans, or None when a quote is left open.
+pub fn parse_spans(s: &str) -> Option<Vec<WordSpan>> {
     #[derive(PartialEq)]
     enum St {
         Between,
@@ -41,34 +75,55 @@ pub fn parse(s: &str) -> Option<Vec<String>> {
     }
     let mut words = Vec::new();
     let mut word = String::new();
+    let mut start: Option<usize> = None;
     let mut st = St::Between;
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
+    let mut chars = s.char_indices().peekable();
+    while let Some((idx, c)) = chars.next() {
         match st {
             St::Between | St::Word => match c {
                 ' ' | '\t' | '\n' | '\r' => {
                     if st == St::Word {
-                        words.push(std::mem::take(&mut word));
+                        words.push(WordSpan {
+                            value: std::mem::take(&mut word),
+                            start: start.take().unwrap_or(idx),
+                            end: idx,
+                        });
                         st = St::Between;
                     }
                 }
-                '\'' => st = St::Single,
-                '"' => st = St::Double,
+                '\'' => {
+                    if start.is_none() {
+                        start = Some(idx);
+                    }
+                    st = St::Single;
+                }
+                '"' => {
+                    if start.is_none() {
+                        start = Some(idx);
+                    }
+                    st = St::Double;
+                }
                 '\\' => {
+                    if start.is_none() {
+                        start = Some(idx);
+                    }
                     st = St::Word;
                     match chars.peek().copied() {
-                        Some(n @ (' ' | '\t' | '\'' | '"')) => {
+                        Some((_, n @ (' ' | '\t' | '\'' | '"'))) => {
                             word.push(n);
                             chars.next();
                         }
                         // A line continuation.
-                        Some('\n') => {
+                        Some((_, '\n')) => {
                             chars.next();
                         }
                         _ => word.push('\\'),
                     }
                 }
                 c => {
+                    if start.is_none() {
+                        start = Some(idx);
+                    }
                     word.push(c);
                     st = St::Word;
                 }
@@ -80,11 +135,11 @@ pub fn parse(s: &str) -> Option<Vec<String>> {
             St::Double => match c {
                 '"' => st = St::Word,
                 '\\' => match chars.peek().copied() {
-                    Some(n @ ('$' | '`' | '"' | '\\')) => {
+                    Some((_, n @ ('$' | '`' | '"' | '\\'))) => {
                         word.push(n);
                         chars.next();
                     }
-                    Some('\n') => {
+                    Some((_, '\n')) => {
                         chars.next();
                     }
                     _ => word.push('\\'),
@@ -96,7 +151,11 @@ pub fn parse(s: &str) -> Option<Vec<String>> {
     match st {
         St::Single | St::Double => None,
         St::Word => {
-            words.push(word);
+            words.push(WordSpan {
+                value: word,
+                start: start.unwrap_or(s.len()),
+                end: s.len(),
+            });
             Some(words)
         }
         St::Between => Some(words),
