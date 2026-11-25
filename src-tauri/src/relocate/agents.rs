@@ -143,12 +143,26 @@ fn edit_jsonl(bytes: &[u8], needle: &str, edit: &mut impl FnMut(&mut Value) -> b
     changed.then_some(out)
 }
 
-/// The prefilter is the old folder's last NAME, matched ignoring ASCII case: the whole path is
-/// not what the raw line holds on Windows (JSON escapes `C:\x` as `C:\\x`, and either separator
-/// may be the one recorded), nor on a volume that folds case. `edit` decides with `rebase`.
+/// True when a folder name can safely be prefiltered via a raw-byte ASCII-case-insensitive scan
+/// of JSONL lines. Characters that JSON serializers escape (`"`, `\`, control bytes, and Go
+/// `encoding/json`'s HTML-escaped `&`, `<`, `>`) or non-ASCII bytes (which may be `\uXXXX`-escaped
+/// or differ in Unicode case on case-insensitive volumes) bypass the prefilter so every UTF-8 line
+/// is parsed and decided by `rebase`.
+fn json_safe_ascii_needle(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| (0x20..0x7f).contains(&b) && !matches!(b, b'"' | b'\\' | b'&' | b'<' | b'>'))
+}
+
+/// The prefilter is the old folder's last NAME, matched ignoring ASCII case when safe: the whole
+/// path is not what the raw line holds on Windows (JSON escapes `C:\x` as `C:\\x`, and either
+/// separator may be the one recorded), nor on a volume that folds case. Names containing
+/// escapable or non-ASCII bytes bypass the prefilter. `edit` decides with `rebase`.
 fn update_jsonl(p: &Path, old: &Path, mut edit: impl FnMut(&mut Value) -> bool) -> std::io::Result<bool> {
-    let needle = old.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    update_file(p, |b| edit_jsonl(b, &needle, &mut edit))
+    let needle = old
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|s| json_safe_ascii_needle(s))
+        .unwrap_or("");
+    update_file(p, |b| edit_jsonl(b, needle, &mut edit))
 }
 
 fn keys_under(map: &Value, old: &Path, new: &Path) -> usize {
@@ -780,10 +794,10 @@ fn agy_summary_ids(db_path: &Path, old: &Path, new: &Path) -> rusqlite::Result<V
         Err(e) if is_missing_table_err(&e) => return Ok(vec![]),
         Err(e) => return Err(e),
     };
-    let rows = st.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+    let rows = st.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))?;
     let mut ids = vec![];
     for row in rows {
-        let (id, raw) = row?;
+        let (id, Some(raw)) = row? else { continue };
         if rebase_workspace_uris_json(&raw, old, new).is_some() {
             ids.push(id);
         }
@@ -842,10 +856,10 @@ fn update_agy_summary_db(db_path: &Path, old: &Path, new: &Path) -> rusqlite::Re
             Err(e) if is_missing_table_err(&e) => return Ok(vec![]),
             Err(e) => return Err(e),
         };
-        let rows = st.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        let rows = st.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))?;
         let mut out = vec![];
         for row in rows {
-            let (id, raw) = row?;
+            let (id, Some(raw)) = row? else { continue };
             if let Some(updated) = rebase_workspace_uris_json(&raw, old, new) {
                 out.push((id, updated));
             }
@@ -1190,6 +1204,61 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn update_jsonl_handles_json_escaped_and_non_ascii_folder_names() {
+        let s = scratch();
+        // 1. Go encoding/json HTML-escapes `&`, `<`, `>` as \u0026 / \u003c / \u003e.
+        let rd = s.base.join("rd-history.jsonl");
+        fs::write(
+            &rd,
+            "{\"display\":\"go\",\"workspace\":\"/u/R\\u0026D/app\"}\n{\"display\":\"keep\",\"workspace\":\"/u/other\"}\n",
+        )
+        .unwrap();
+        let changed = update_jsonl(&rd, Path::new("/u/R&D"), |v| {
+            let Some(orig) = v.get("workspace").and_then(Value::as_str) else { return false };
+            let Some(rb) = rebase(orig, Path::new("/u/R&D"), Path::new("/u/Research")).filter(|n| n != orig) else { return false };
+            v["workspace"] = Value::String(rb);
+            true
+        })
+        .unwrap();
+        assert!(changed);
+        let text = fs::read_to_string(&rd).unwrap();
+        assert!(text.contains("\"workspace\":\"/u/Research/app\""), "{text}");
+        assert!(text.contains("{\"display\":\"keep\",\"workspace\":\"/u/other\"}\n"), "{text}");
+
+        // 2. Folder name containing a quote (`\"` in JSON).
+        let q = s.base.join("quote-history.jsonl");
+        fs::write(&q, "{\"project\":\"/u/say \\\"hi\\\"\"}\n").unwrap();
+        let changed = update_jsonl(&q, Path::new("/u/say \"hi\""), |v| {
+            let Some(orig) = v.get("project").and_then(Value::as_str) else { return false };
+            let Some(rb) = rebase(orig, Path::new("/u/say \"hi\""), Path::new("/u/hello")).filter(|n| n != orig) else { return false };
+            v["project"] = Value::String(rb);
+            true
+        })
+        .unwrap();
+        assert!(changed);
+        assert!(fs::read_to_string(&q).unwrap().contains("\"project\":\"/u/hello\""));
+
+        // 3. Non-ASCII folder name escaped as \u00e9 (e.g. Python ensure_ascii=True) and
+        //    non-ASCII case-folding on case-insensitive volumes (`Café` vs `café`).
+        let uni = s.base.join("unicode-history.jsonl");
+        let old_dir = s.base.join("Café");
+        fs::create_dir_all(&old_dir).unwrap();
+        let new_dir = s.base.join("Bistro");
+        let escaped_old = old_dir.to_string_lossy().replace('é', "\\u00e9");
+        fs::write(&uni, format!("{{\"workspace\":\"{escaped_old}\"}}\n")).unwrap();
+        let changed = update_jsonl(&uni, &old_dir, |v| {
+            let Some(orig) = v.get("workspace").and_then(Value::as_str) else { return false };
+            let Some(rb) = rebase(orig, &old_dir, &new_dir).filter(|n| n != orig) else { return false };
+            v["workspace"] = Value::String(rb);
+            true
+        })
+        .unwrap();
+        assert!(changed);
+        assert!(fs::read_to_string(&uni).unwrap().contains(&new_dir.to_string_lossy().to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn codex_trust_threads_and_rollouts_follow_the_folder() {
         let s = scratch();
         let (old, new) = (Path::new("/u/a"), Path::new("/u/b"));
@@ -1515,12 +1584,32 @@ mod tests {
         assert!(r.warnings.is_empty(), "{:?}", r.warnings);
         assert_eq!(read_json(&agy.join("settings.json")).unwrap()["trustedWorkspaces"], json!(["/u/c"]));
 
+        // Nullable workspace_uris with a NULL row must not abort updating valid rows.
+        let _ = fs::remove_file(agy.join("conversation_summaries.db"));
+        let null_db = rusqlite::Connection::open(agy.join("conversation_summaries.db")).unwrap();
+        null_db
+            .execute_batch(
+                "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, workspace_uris TEXT);
+                 INSERT INTO conversation_summaries VALUES ('c-null', NULL), ('c-ok', '[\"file:///u/c\"]');",
+            )
+            .unwrap();
+        drop(null_db);
+        assert_eq!(plan_in(&s.h, Path::new("/u/c"), Path::new("/u/d")).agy_sessions, 1);
+        let r = apply_in(&s.h, Path::new("/u/c"), Path::new("/u/d"), &[]);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        let check_db = rusqlite::Connection::open(agy.join("conversation_summaries.db")).unwrap();
+        let updated: String = check_db
+            .query_row("SELECT workspace_uris FROM conversation_summaries WHERE conversation_id='c-ok'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(updated, r#"["file:///u/d"]"#);
+        drop(check_db);
+
         // Corrupt DB warns without blocking settings.json update.
         fs::write(agy.join("conversation_summaries.db"), b"not a sqlite database").unwrap();
-        let r = apply_in(&s.h, Path::new("/u/c"), Path::new("/u/d"), &[]);
+        let r = apply_in(&s.h, Path::new("/u/d"), Path::new("/u/e"), &[]);
         assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
         assert!(r.warnings[0].contains("conversation_summaries.db"));
-        assert_eq!(read_json(&agy.join("settings.json")).unwrap()["trustedWorkspaces"], json!(["/u/d"]));
+        assert_eq!(read_json(&agy.join("settings.json")).unwrap()["trustedWorkspaces"], json!(["/u/e"]));
     }
 
     #[cfg(windows)]
