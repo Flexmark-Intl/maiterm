@@ -458,9 +458,9 @@ fn is_valid_physical_rect(pos_x: i32, pos_y: i32, width: u32, height: u32) -> bo
     true
 }
 
-/// Pure overlap check between a physical window rect and a slice of physical monitor rects
-/// `(x, y, width, height)`. Returns true when the monitors list is empty (unreadable) or
-/// when at least 50x30 physical pixels of the window intersect some connected monitor.
+/// Pure overlap check between a window rect and a slice of monitor rects `(x, y, width, height)`
+/// in the same coordinate space (logical on macOS/Linux, physical on Windows). Returns true when
+/// the monitors list is empty (unreadable) or when at least 50x30 units intersect some monitor.
 fn rect_visible_on_monitors(
     x: i32,
     y: i32,
@@ -486,13 +486,45 @@ fn rect_visible_on_monitors(
     })
 }
 
-/// Whether `geom` (in logical pixels, scaled by `scale`) lands visibly on at least one
-/// currently connected monitor. Prevents restoring a window off-screen (e.g. a stale
-/// minimized coordinate or a monitor arrangement that changed sides).
-pub fn geometry_visible_on_monitors(
+/// Visibility check in global logical coordinates (macOS / Linux).
+/// In tao on macOS and Linux, each `Monitor`'s `position()` and `size()` are multiplied by that
+/// monitor's own `scale_factor()`, whereas `WindowGeometry` stores global logical coordinates
+/// (divided by the window's scale factor). Normalizing each monitor by its own scale factor
+/// restores a single shared logical desktop space across mixed-DPI displays.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+fn geometry_visible_logical(
+    geom: &crate::state::WindowGeometry,
+    monitors: &[(i32, i32, u32, u32, f64)],
+) -> bool {
+    if !geom.is_valid() {
+        return false;
+    }
+    let x = geom.x.round() as i32;
+    let y = geom.y.round() as i32;
+    let w = geom.width.round().max(0.0) as u32;
+    let h = geom.height.round().max(0.0) as u32;
+    let rects: Vec<(i32, i32, u32, u32)> = monitors
+        .iter()
+        .map(|&(px, py, pw, ph, m_scale)| {
+            let s = if m_scale.is_finite() && m_scale > 0.0 { m_scale } else { 1.0 };
+            (
+                (px as f64 / s).round() as i32,
+                (py as f64 / s).round() as i32,
+                (pw as f64 / s).round().max(0.0) as u32,
+                (ph as f64 / s).round().max(0.0) as u32,
+            )
+        })
+        .collect();
+    rect_visible_on_monitors(x, y, w, h, &rects)
+}
+
+/// Visibility check in unified physical virtual-desktop coordinates (Windows), where Win32
+/// `rcMonitor` and `SetWindowPos` share one physical pixel space.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn geometry_visible_physical(
     geom: &crate::state::WindowGeometry,
     scale: f64,
-    monitors: &[tauri::Monitor],
+    monitors: &[(i32, i32, u32, u32)],
 ) -> bool {
     if !geom.is_valid() || !scale.is_finite() || scale <= 0.0 {
         return false;
@@ -501,15 +533,41 @@ pub fn geometry_visible_on_monitors(
     let phys_y = (geom.y * scale).round() as i32;
     let phys_w = (geom.width * scale).round().max(0.0) as u32;
     let phys_h = (geom.height * scale).round().max(0.0) as u32;
-    let rects: Vec<(i32, i32, u32, u32)> = monitors
-        .iter()
-        .map(|m| {
-            let p = m.position();
-            let s = m.size();
-            (p.x, p.y, s.width, s.height)
-        })
-        .collect();
-    rect_visible_on_monitors(phys_x, phys_y, phys_w, phys_h, &rects)
+    rect_visible_on_monitors(phys_x, phys_y, phys_w, phys_h, monitors)
+}
+
+/// Whether `geom` lands visibly on at least one currently connected monitor. Prevents restoring
+/// a window off-screen (e.g. a stale minimized coordinate or a monitor arrangement that changed).
+pub fn geometry_visible_on_monitors(
+    geom: &crate::state::WindowGeometry,
+    scale: f64,
+    monitors: &[tauri::Monitor],
+) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let rects: Vec<(i32, i32, u32, u32)> = monitors
+            .iter()
+            .map(|m| {
+                let p = m.position();
+                let s = m.size();
+                (p.x, p.y, s.width, s.height)
+            })
+            .collect();
+        geometry_visible_physical(geom, scale, &rects)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = scale;
+        let rects: Vec<(i32, i32, u32, u32, f64)> = monitors
+            .iter()
+            .map(|m| {
+                let p = m.position();
+                let s = m.size();
+                (p.x, p.y, s.width, s.height, m.scale_factor())
+            })
+            .collect();
+        geometry_visible_logical(geom, &rects)
+    }
 }
 
 #[tauri::command]
@@ -1329,6 +1387,37 @@ mod clone_ids_tests {
         assert!(!super::rect_visible_on_monitors(i32::MAX, i32::MAX, 1200, 800, &monitors));
         // Unreadable/empty monitor list does not spuriously reject.
         assert!(super::rect_visible_on_monitors(100, 100, 1200, 800, &[]));
+    }
+
+    #[test]
+    fn mixed_dpi_logical_visibility_handles_retina_and_standard_monitors() {
+        use crate::state::WindowGeometry;
+        let g = |x, y, width, height| WindowGeometry { x, y, width, height };
+
+        // macOS/Linux: 2x Retina primary (logical 0..1512, tao reports 0..3024) +
+        // 1x external right (logical 1512..4072, tao reports 1512..4072).
+        let retina_left = [(0, 0, 3024, 1964, 2.0), (1512, 0, 2560, 1440, 1.0)];
+        assert!(super::geometry_visible_logical(&g(2200.0, 100.0, 1200.0, 800.0), &retina_left));
+        assert!(super::geometry_visible_logical(&g(100.0, 100.0, 1200.0, 800.0), &retina_left));
+        assert!(!super::geometry_visible_logical(&g(4500.0, 100.0, 1200.0, 800.0), &retina_left));
+
+        // Reverse order: 1x primary (logical 0..1920) + 2x Retina right (logical 1920..3432,
+        // tao reports 3840..6864). Must not reject windows in the logical [1920, 3432) range.
+        let retina_right = [(0, 0, 1920, 1080, 1.0), (3840, 0, 3024, 1964, 2.0)];
+        assert!(super::geometry_visible_logical(&g(2000.0, 100.0, 1200.0, 800.0), &retina_right));
+
+        // 1x external on the left (logical -1920..0) + 2x Retina primary (logical 0..1512,
+        // tao reports 0..3024). A stale rect at logical x=1800 is off-screen past 1512 and
+        // must be rejected even though 1800 < 3024 in raw tao pixels.
+        let external_left = [(-1920, 0, 1920, 1080, 1.0), (0, 0, 3024, 1964, 2.0)];
+        assert!(!super::geometry_visible_logical(&g(1800.0, 100.0, 1200.0, 800.0), &external_left));
+        assert!(super::geometry_visible_logical(&g(-1800.0, 100.0, 1200.0, 800.0), &external_left));
+
+        // Windows unified physical check also rejects invalid/off-screen rects and accepts on-screen.
+        let win_monitors = [(0, 0, 1920, 1080), (-1920, 0, 1920, 1080)];
+        assert!(super::geometry_visible_physical(&g(100.0, 100.0, 1200.0, 800.0), 1.0, &win_monitors));
+        assert!(!super::geometry_visible_physical(&g(-32000.0, -32000.0, 1200.0, 800.0), 1.0, &win_monitors));
+        assert!(!super::geometry_visible_physical(&g(5000.0, 100.0, 1200.0, 800.0), 1.0, &win_monitors));
     }
 
     #[test]

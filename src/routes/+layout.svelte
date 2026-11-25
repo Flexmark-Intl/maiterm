@@ -258,11 +258,14 @@
     listen('quit-requested', async () => {
       logInfo('quit-requested — saving scrollback before exit');
       // Save window geometry before exit (don't wait for debounce). Skipped while the
-      // displays are asleep — the geometry then isn't the one the user arranged.
+      // displays are asleep or a deferred restore from a minimized state is still pending —
+      // the geometry then isn't the one the user arranged for this monitor count.
       clearTimeout(geometryTimer);
-      if (currentMonitorCount !== null && !displaysAsleep) {
-        await commands.saveWindowGeometry(currentMonitorCount).catch(() => {});
-      }
+      await runGeometryOp(async () => {
+        if (currentMonitorCount !== null && !displaysAsleep && deferredRestoreCount === null) {
+          await commands.saveWindowGeometry(currentMonitorCount).catch(() => {});
+        }
+      });
       await terminalsStore.saveAllScrollback();
       try {
         await invoke('sync_state');
@@ -310,14 +313,51 @@
     // it. Saving that rect under the count we happened to read would file a layout the
     // user never arranged.
     let placedFor: number | null = null;
+    // Monitor count whose restore was skipped because the window was minimized (e.g. dock/undock
+    // or display wake while minimized). Applied on un-minimize instead of overwriting the saved
+    // layout with the un-restored rect.
+    let deferredRestoreCount: number | null = null;
+    // Incremented whenever a restore runs so any debounced save queued behind it in
+    // `geometryQueue` drops out instead of saving a stale pre-restore rect.
+    let restoreSeq = 0;
+    // Serializes all window-geometry operations (startup, monitor poll, debounced save, quit)
+    // so two IPC sequences can never interleave or race over saved layouts.
+    let geometryQueue: Promise<void> = Promise.resolve();
+    let monitorPollInFlight = false;
     let geometryTimer: ReturnType<typeof setTimeout> | undefined;
     let monitorPollTimer: ReturnType<typeof setInterval> | undefined;
+
+    function runGeometryOp(fn: () => Promise<void>): Promise<void> {
+      const next = geometryQueue.then(fn, fn);
+      geometryQueue = next;
+      return next;
+    }
 
     // An IPC failure is an absence, not a count — hold, same as 0.
     const readMonitorCount = () => commands.getMonitorCount().catch(() => 0);
 
+    // Must be called inside `runGeometryOp`.
+    async function restoreOrDefer(count: number) {
+      if (await appWindow.isMinimized().catch(() => false)) {
+        deferredRestoreCount = count;
+        return;
+      }
+      deferredRestoreCount = null;
+      restoreSeq++;
+      clearTimeout(geometryTimer);
+      const restored = await commands.restoreWindowGeometry(count).catch(() => false);
+      restoreSeq++;
+      clearTimeout(geometryTimer);
+      if (restored) {
+        placedFor = count;
+      } else if (await appWindow.isMinimized().catch(() => false)) {
+        deferredRestoreCount = count;
+      }
+    }
+
     // Initialize monitor count (0 → leave it unknown until the displays are back)
-    readMonitorCount().then(async count => {
+    runGeometryOp(async () => {
+      const count = await readMonitorCount();
       if (count > 0) {
         currentMonitorCount = count;
         // Place the window from our own per-monitor-count map on EVERY start, not just
@@ -331,88 +371,105 @@
         // `false` means this monitor count has no saved layout yet (a first run, a new
         // display setup) — the window is wherever the OS put it, which is nothing we
         // placed, so leave `placedFor` unset until the user arranges it.
-        if (await commands.restoreWindowGeometry(count).catch(() => false)) placedFor = count;
+        await restoreOrDefer(count);
       } else {
         displaysAsleep = true;
         logInfo('Started with no monitors (displays asleep or locked) — window geometry deferred until they return');
       }
-
+    }).then(() => {
       // Poll for monitor changes (handles dock/undock)
-      monitorPollTimer = setInterval(async () => {
-        const count = await readMonitorCount();
-        if (count === 0) {
-          if (!displaysAsleep) {
-            displaysAsleep = true;
-            logInfo('Monitor count is 0 (displays asleep or locked) — holding window geometry');
+      monitorPollTimer = setInterval(() => {
+        if (monitorPollInFlight) return;
+        monitorPollInFlight = true;
+        runGeometryOp(async () => {
+          const count = await readMonitorCount();
+          if (count === 0) {
+            if (!displaysAsleep) {
+              displaysAsleep = true;
+              logInfo('Monitor count is 0 (displays asleep or locked) — holding window geometry');
+            }
+            return;
           }
-          return;
-        }
-        const wasAsleep = displaysAsleep;
-        displaysAsleep = false;
-        // Bridge tunnels reaped while the displays were dark were this machine stalling,
-        // not the peers dying — bring their rebuilds forward instead of waiting out backoff.
-        if (wasAsleep) {
-          retryDownBridgesNow('displays back');
-          // A webview behind dark displays is throttled: Rust may hold drops it never heard of.
-          sshDisconnectStore.retryNow('displays back');
-        }
-        if (currentMonitorCount === null) {
+          const wasAsleep = displaysAsleep;
+          displaysAsleep = false;
+          // Bridge tunnels reaped while the displays were dark were this machine stalling,
+          // not the peers dying — bring their rebuilds forward instead of waiting out backoff.
+          if (wasAsleep) {
+            retryDownBridgesNow('displays back');
+            // A webview behind dark displays is throttled: Rust may hold drops it never heard of.
+            sshDisconnectStore.retryNow('displays back');
+          }
+          if (currentMonitorCount === null) {
+            currentMonitorCount = count;
+            // First displays this window has ever seen: it launched into the dark, so
+            // nothing has placed it yet. Do it now, before the debounced save can write the
+            // position macOS chose back under this (real) monitor count.
+            logInfo(`Displays back (${count}) after starting in the dark — restoring saved geometry`);
+            await restoreOrDefer(count);
+            return;
+          }
+          if (count === currentMonitorCount) {
+            // Same displays as before the sleep — macOS may have shuffled the window around
+            // while they were gone, or a restore was deferred while minimized; put it back.
+            if (wasAsleep || deferredRestoreCount === count) {
+              await restoreOrDefer(count);
+            }
+            return;
+          }
+          const oldCount = currentMonitorCount;
           currentMonitorCount = count;
-          // First displays this window has ever seen: it launched into the dark, so
-          // nothing has placed it yet. Do it now, before the debounced save can write the
-          // position macOS chose back under this (real) monitor count.
-          logInfo(`Displays back (${count}) after starting in the dark — restoring saved geometry`);
-          if (await commands.restoreWindowGeometry(count).catch(() => false)) placedFor = count;
-          return;
-        }
-        if (count === currentMonitorCount) {
-          // Same displays as before the sleep — but macOS may have shuffled the window
-          // around while they were gone, so put it back where this layout had it.
-          if (wasAsleep && await commands.restoreWindowGeometry(count).catch(() => false)) {
-            placedFor = count;
+          logInfo(`Monitor count changed: ${oldCount} → ${count}, repositioning window`);
+          // Save current position under the old monitor count before repositioning —
+          // but only when we watched the change happen. If the displays changed while
+          // they were asleep (unplugged the external overnight), macOS has already
+          // relocated this window onto what's left, so its position now describes the
+          // NEW configuration; saving it under the old count would overwrite the
+          // arrangement we want back when those displays return.
+          // The same applies to a count we only read: macOS brings the displays back one at
+          // a time, so an intermediate tick can adopt a count while the window still sits
+          // where a dark launch left it. `placedFor` is what makes the difference visible —
+          // only a rect we placed, or one the user arranged and we saved, describes a layout
+          // worth keeping.
+          if (!wasAsleep && placedFor === oldCount && deferredRestoreCount === null) {
+            await commands.saveWindowGeometry(oldCount).catch(() => {});
           }
-          return;
-        }
-        const oldCount = currentMonitorCount;
-        currentMonitorCount = count;
-        logInfo(`Monitor count changed: ${oldCount} → ${count}, repositioning window`);
-        // Save current position under the old monitor count before repositioning —
-        // but only when we watched the change happen. If the displays changed while
-        // they were asleep (unplugged the external overnight), macOS has already
-        // relocated this window onto what's left, so its position now describes the
-        // NEW configuration; saving it under the old count would overwrite the
-        // arrangement we want back when those displays return.
-        // The same applies to a count we only read: macOS brings the displays back one at
-        // a time, so an intermediate tick can adopt a count while the window still sits
-        // where a dark launch left it. `placedFor` is what makes the difference visible —
-        // only a rect we placed, or one the user arranged and we saved, describes a layout
-        // worth keeping.
-        if (!wasAsleep && placedFor === oldCount) await commands.saveWindowGeometry(oldCount).catch(() => {});
-        // Restore saved geometry for the new monitor count (if any)
-        if (await commands.restoreWindowGeometry(count).catch(() => false)) placedFor = count;
+          // Restore saved geometry for the new monitor count (if any), or defer until un-minimized.
+          await restoreOrDefer(count);
+        }).finally(() => {
+          monitorPollInFlight = false;
+        });
       }, 2000);
     });
 
     function saveGeometryDebounced() {
       clearTimeout(geometryTimer);
-      geometryTimer = setTimeout(async () => {
-        if (currentMonitorCount === null) return;
-        // Ask for the count here rather than trusting `displaysAsleep`: the events
-        // that bring us here are macOS shuffling the window around the screens it is
-        // putting to sleep, and they fire up to a full poll interval before the flag
-        // flips — so most of them would slip past a flag check and persist a
-        // sleep-time rect as the layout to restore on wake.
-        if (await readMonitorCount() === 0) {
-          displaysAsleep = true;
-          return;
-        }
-        // Minimizing on Windows fires Move/Resize with (-32000, -32000) / 0x0; never treat
-        // that as a user-arranged layout or overwrite saved geometry.
-        if (await appWindow.isMinimized().catch(() => false)) return;
-        // A rect the user arranged under a real count describes that layout, whatever put
-        // the window there originally.
-        placedFor = currentMonitorCount;
-        commands.saveWindowGeometry(currentMonitorCount).catch(() => {});
+      geometryTimer = setTimeout(() => {
+        const seq = restoreSeq;
+        runGeometryOp(async () => {
+          if (currentMonitorCount === null || restoreSeq !== seq) return;
+          // Ask for the count here rather than trusting `displaysAsleep`: the events
+          // that bring us here are macOS shuffling the window around the screens it is
+          // putting to sleep, and they fire up to a full poll interval before the flag
+          // flips — so most of them would slip past a flag check and persist a
+          // sleep-time rect as the layout to restore on wake.
+          if (await readMonitorCount() === 0) {
+            displaysAsleep = true;
+            return;
+          }
+          // Minimizing on Windows fires Move/Resize with (-32000, -32000) / 0x0; never treat
+          // that as a user-arranged layout or overwrite saved geometry.
+          if (await appWindow.isMinimized().catch(() => false)) return;
+          // If a layout restore was deferred while minimized (e.g. dock/undock or display wake),
+          // apply it now instead of overwriting the saved layout with the un-restored rect.
+          if (deferredRestoreCount !== null) {
+            await restoreOrDefer(currentMonitorCount);
+            return;
+          }
+          // A rect the user arranged under a real count describes that layout, whatever put
+          // the window there originally.
+          placedFor = currentMonitorCount;
+          await commands.saveWindowGeometry(currentMonitorCount).catch(() => {});
+        });
       }, 500);
     }
     let unlistenResize: (() => void) | undefined;
