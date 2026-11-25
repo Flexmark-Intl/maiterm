@@ -709,13 +709,14 @@ fn windows_target_physical_size(
 }
 
 /// Apply a saved `WindowGeometry` position to a newly built `WebviewWindow` if it lands
-/// visibly on a connected monitor. On Windows, pre-sizes to the saved physical footprint
-/// before moving so `WM_DPICHANGED` fires cleanly across mixed-DPI monitors, then re-applies
-/// the logical inner size and exact physical origin at the settled DPI. Returns `true` if applied.
-pub fn apply_restored_position(
+/// visibly on a connected monitor, restoring `(min_w, min_h)` after lifting `min_size` on
+/// Windows. Returns `true` if applied.
+fn apply_restored_position_with_min(
     win: &tauri::WebviewWindow,
     geom: &crate::state::WindowGeometry,
     label: &str,
+    min_w: f64,
+    min_h: f64,
 ) -> bool {
     let scale = win.scale_factor().ok().filter(|s| s.is_finite() && *s > 0.0).unwrap_or(1.0);
     let monitors = win.available_monitors().unwrap_or_default();
@@ -745,10 +746,7 @@ pub fn apply_restored_position(
             let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(geom.width, geom.height)));
             let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(phys_x, phys_y)));
         }
-        let _ = win.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize::new(
-            APP_WINDOW_MIN_WIDTH,
-            APP_WINDOW_MIN_HEIGHT,
-        ))));
+        let _ = win.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize::new(min_w, min_h))));
         if let Err(e) = pos_result {
             log::warn!("Failed to set position for '{}': {}", label, e);
             return false;
@@ -756,12 +754,25 @@ pub fn apply_restored_position(
     }
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = (min_w, min_h);
         if let Err(e) = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(phys_x, phys_y))) {
             log::warn!("Failed to set position for '{}': {}", label, e);
             return false;
         }
     }
     true
+}
+
+/// Apply a saved `WindowGeometry` position to a newly built main/workspace `WebviewWindow` if it
+/// lands visibly on a connected monitor. On Windows, pre-sizes to the saved physical footprint
+/// before moving so `WM_DPICHANGED` fires cleanly across mixed-DPI monitors, then re-applies
+/// the logical inner size and exact physical origin at the settled DPI. Returns `true` if applied.
+pub fn apply_restored_position(
+    win: &tauri::WebviewWindow,
+    geom: &crate::state::WindowGeometry,
+    label: &str,
+) -> bool {
+    apply_restored_position_with_min(win, geom, label, APP_WINDOW_MIN_WIDTH, APP_WINDOW_MIN_HEIGHT)
 }
 
 #[tauri::command]
@@ -952,6 +963,76 @@ pub fn get_window_count(app: tauri::AppHandle) -> usize {
         .count()
 }
 
+/// Compute the centered geometry for a child dialog window of logical size `(child_w, child_h)`
+/// over a parent window with raw physical `outer_position` `(pos_x, pos_y)`, physical
+/// `outer_size` `(parent_w, parent_h)`, and DPI `parent_scale`.
+///
+/// - On Windows (`physical_origin == true`), `x`/`y` are unified physical virtual-desktop pixels
+///   (`physical_position: true`, `scale_factor: Some(scale)`) so centering works accurately across
+///   mixed-DPI monitors instead of dividing by `parent_scale` into `WebviewWindowBuilder::position`.
+/// - On macOS/Linux (`physical_origin == false`), `x`/`y` are global logical coordinates.
+fn centered_child_geometry(
+    pos_x: i32,
+    pos_y: i32,
+    parent_w: u32,
+    parent_h: u32,
+    parent_scale: f64,
+    child_w: f64,
+    child_h: f64,
+    physical_origin: bool,
+) -> crate::state::WindowGeometry {
+    let s = if parent_scale.is_finite() && parent_scale > 0.0 { parent_scale } else { 1.0 };
+    let (x, y) = if physical_origin {
+        (
+            pos_x as f64 + (parent_w as f64 - child_w * s) / 2.0,
+            pos_y as f64 + (parent_h as f64 - child_h * s) / 2.0,
+        )
+    } else {
+        let win_x = pos_x as f64 / s;
+        let win_y = pos_y as f64 / s;
+        let win_w = parent_w as f64 / s;
+        let win_h = parent_h as f64 / s;
+        (win_x + (win_w - child_w) / 2.0, win_y + (win_h - child_h) / 2.0)
+    };
+    crate::state::WindowGeometry {
+        x,
+        y,
+        width: child_w,
+        height: child_h,
+        physical_position: physical_origin,
+        scale_factor: physical_origin.then_some(s),
+    }
+}
+
+/// Compute centered geometry from the calling `WebviewWindow` before spawning a background
+/// thread (`WebviewWindow` is not `Send`), skipping minimized or invalid rects.
+fn parent_centered_geometry(
+    window: &tauri::WebviewWindow,
+    child_w: f64,
+    child_h: f64,
+) -> Option<crate::state::WindowGeometry> {
+    if window.is_minimized().unwrap_or(false) {
+        return None;
+    }
+    let pos = window.outer_position().ok()?;
+    let size = window.outer_size().ok()?;
+    if !is_valid_physical_rect(pos.x, pos.y, size.width, size.height) {
+        return None;
+    }
+    let scale = window.scale_factor().ok().filter(|s| s.is_finite() && *s > 0.0).unwrap_or(1.0);
+    let geom = centered_child_geometry(
+        pos.x,
+        pos.y,
+        size.width,
+        size.height,
+        scale,
+        child_w,
+        child_h,
+        cfg!(target_os = "windows"),
+    );
+    geom.is_valid().then_some(geom)
+}
+
 #[tauri::command]
 pub fn open_preferences_window(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<(), String> {
     // If already open, focus it
@@ -962,26 +1043,11 @@ pub fn open_preferences_window(window: tauri::WebviewWindow, app: tauri::AppHand
 
     let pref_w: f64 = 900.0;
     let pref_h: f64 = 650.0;
+    let pref_min_w: f64 = 500.0;
+    let pref_min_h: f64 = 400.0;
 
-    // Compute position from the calling window before spawning (WebviewWindow is not Send)
-    let position = if !window.is_minimized().unwrap_or(false) {
-        if let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) {
-            if is_valid_physical_rect(pos.x, pos.y, size.width, size.height) {
-                let scale = window.scale_factor().ok().filter(|s| s.is_finite() && *s > 0.0).unwrap_or(1.0);
-                let win_x = pos.x as f64 / scale;
-                let win_y = pos.y as f64 / scale;
-                let win_w = size.width as f64 / scale;
-                let win_h = size.height as f64 / scale;
-                Some((win_x + (win_w - pref_w) / 2.0, win_y + (win_h - pref_h) / 2.0))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    // Compute centered geometry from the calling window before spawning (WebviewWindow is not Send)
+    let centered = parent_centered_geometry(&window, pref_w, pref_h);
 
     // Spawn in background thread — calling build() on the command handler thread
     // deadlocks on Windows because WebView2 init dispatches to the main thread
@@ -998,7 +1064,7 @@ pub fn open_preferences_window(window: tauri::WebviewWindow, app: tauri::AppHand
         let mut builder = WebviewWindowBuilder::new(&app, "preferences", url)
             .title(title)
             .inner_size(pref_w, pref_h)
-            .min_inner_size(500.0, 400.0)
+            .min_inner_size(pref_min_w, pref_min_h)
             .resizable(true)
             .fullscreen(false)
             .background_color(DEFAULT_WINDOW_BG);
@@ -1011,12 +1077,23 @@ pub fn open_preferences_window(window: tauri::WebviewWindow, app: tauri::AppHand
                 .title_bar_style(tauri::TitleBarStyle::Overlay);
         }
 
-        if let Some((x, y)) = position {
-            builder = builder.position(x, y);
+        #[cfg(not(target_os = "windows"))]
+        if let Some(ref geom) = centered {
+            builder = builder.position(geom.x, geom.y);
         }
 
-        if let Err(e) = builder.build() {
-            log::error!("Failed to create preferences window: {}", e);
+        match builder.build() {
+            Ok(win) => {
+                #[cfg(target_os = "windows")]
+                if let Some(ref geom) = centered {
+                    apply_restored_position_with_min(&win, geom, "preferences", pref_min_w, pref_min_h);
+                }
+                #[cfg(not(target_os = "windows"))]
+                let _ = win;
+            }
+            Err(e) => {
+                log::error!("Failed to create preferences window: {}", e);
+            }
         }
     });
 
@@ -1039,26 +1116,11 @@ pub fn open_help_window(window: tauri::WebviewWindow, app: tauri::AppHandle, sec
 
     let help_w: f64 = 680.0;
     let help_h: f64 = 600.0;
+    let help_min_w: f64 = 500.0;
+    let help_min_h: f64 = 400.0;
 
-    // Compute position from the calling window before spawning (WebviewWindow is not Send)
-    let position = if !window.is_minimized().unwrap_or(false) {
-        if let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) {
-            if is_valid_physical_rect(pos.x, pos.y, size.width, size.height) {
-                let scale = window.scale_factor().ok().filter(|s| s.is_finite() && *s > 0.0).unwrap_or(1.0);
-                let win_x = pos.x as f64 / scale;
-                let win_y = pos.y as f64 / scale;
-                let win_w = size.width as f64 / scale;
-                let win_h = size.height as f64 / scale;
-                Some((win_x + (win_w - help_w) / 2.0, win_y + (win_h - help_h) / 2.0))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    // Compute centered geometry from the calling window before spawning (WebviewWindow is not Send)
+    let centered = parent_centered_geometry(&window, help_w, help_h);
 
     // Spawn in background thread — see open_preferences_window for rationale
     std::thread::spawn(move || {
@@ -1078,7 +1140,7 @@ pub fn open_help_window(window: tauri::WebviewWindow, app: tauri::AppHandle, sec
         let mut builder = WebviewWindowBuilder::new(&app, "help", url)
             .title(title)
             .inner_size(help_w, help_h)
-            .min_inner_size(500.0, 400.0)
+            .min_inner_size(help_min_w, help_min_h)
             .resizable(true)
             .fullscreen(false)
             .background_color(DEFAULT_WINDOW_BG);
@@ -1088,12 +1150,23 @@ pub fn open_help_window(window: tauri::WebviewWindow, app: tauri::AppHandle, sec
             builder = builder.hidden_title(true);
         }
 
-        if let Some((x, y)) = position {
-            builder = builder.position(x, y);
+        #[cfg(not(target_os = "windows"))]
+        if let Some(ref geom) = centered {
+            builder = builder.position(geom.x, geom.y);
         }
 
-        if let Err(e) = builder.build() {
-            log::error!("Failed to create help window: {}", e);
+        match builder.build() {
+            Ok(win) => {
+                #[cfg(target_os = "windows")]
+                if let Some(ref geom) = centered {
+                    apply_restored_position_with_min(&win, geom, "help", help_min_w, help_min_h);
+                }
+                #[cfg(not(target_os = "windows"))]
+                let _ = win;
+            }
+            Err(e) => {
+                log::error!("Failed to create help window: {}", e);
+            }
         }
     });
 
@@ -1750,5 +1823,36 @@ mod clone_ids_tests {
         assert!(win.geometry_for(2).is_some());
         // Sole valid entry serves as fallback when last_geometry_monitors points to an invalid one.
         assert_eq!(win.last_geometry().map(|g| (g.width, g.height)), Some((1200.0, 800.0)));
+    }
+
+    #[test]
+    fn centered_child_geometry_handles_windows_mixed_dpi_and_logical_platforms() {
+        // Windows: Primary 1080p@100% [0..1920) + Secondary 4K@200% [1920..5760).
+        // Parent on 4K@200% at physical (2000, 100), outer size 2400x1600.
+        // Preferences (900x650 logical -> 1800x1300 physical at 2x) must center at (2300, 250) on 4K.
+        let win_monitors = [(0, 0, 1920, 1080, 1.0), (1920, 0, 3840, 2160, 2.0)];
+        let pref = super::centered_child_geometry(2000, 100, 2400, 1600, 2.0, 900.0, 650.0, true);
+        assert!(pref.physical_position);
+        assert_eq!(pref.scale_factor, Some(2.0));
+        assert_eq!((pref.x, pref.y, pref.width, pref.height), (2300.0, 250.0, 900.0, 650.0));
+        assert!(super::geometry_visible_physical(&pref, 1.0, &win_monitors));
+        assert_eq!(super::resolve_physical_position(&pref, 1.0, true), (2300, 250));
+        assert_eq!(super::windows_target_physical_size(&pref, 2300, 250, 1.0, &win_monitors), (1800, 1300));
+
+        // Windows reverse: Primary 4K@200% [0..3840) + Secondary 1080p@100% LEFT [-1920..0).
+        // Parent on left 1080p@100% at (-1600, 100), outer size 1400x900; Help is 680x600.
+        let left_monitors = [(0, 0, 3840, 2160, 2.0), (-1920, 0, 1920, 1080, 1.0)];
+        let help = super::centered_child_geometry(-1600, 100, 1400, 900, 1.0, 680.0, 600.0, true);
+        assert_eq!((help.x, help.y, help.width, help.height), (-1240.0, 250.0, 680.0, 600.0));
+        assert!(super::geometry_visible_physical(&help, 2.0, &left_monitors));
+        assert_eq!(super::resolve_physical_position(&help, 2.0, true), (-1240, 250));
+        assert_eq!(super::windows_target_physical_size(&help, -1240, 250, 2.0, &left_monitors), (680, 600));
+
+        // macOS/Linux: parent on 2x Retina at physical (200, 200) -> logical (100, 100),
+        // outer size 2400x1600 -> logical 1200x800; Preferences (900x650) centers at logical (250, 175).
+        let mac_pref = super::centered_child_geometry(200, 200, 2400, 1600, 2.0, 900.0, 650.0, false);
+        assert!(!mac_pref.physical_position);
+        assert_eq!(mac_pref.scale_factor, None);
+        assert_eq!((mac_pref.x, mac_pref.y, mac_pref.width, mac_pref.height), (250.0, 175.0, 900.0, 650.0));
     }
 }
