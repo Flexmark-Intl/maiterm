@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.18.1
+
+- **maiTerm's windows reopen where you left them.** A window that was minimized when maiTerm saved or quit no longer comes back off-screen or zero-sized. On Windows with monitors at different scaling, a window returns to the right monitor at the right size.
+- **A tab's phone thread stays on its current chat.** On some machines a reloaded tab's maiLink thread still showed the conversation from before the reload. The phone now follows the chat that is actually sending events.
+- **Agents understand an action card's Run button.** A plain command runs in a new tab that opens in the agent's folder and logs into its ssh session first. A one-line `! command` runs inside the agent's own Claude tab, where the agent sees the output.
+
 ## v3.18.0
 
 Agent Defaults sets each agent's model, effort and advisor in one place and keeps your ssh hosts in step. Agents can read your Apple Mail, and watch scripts run on Windows.
