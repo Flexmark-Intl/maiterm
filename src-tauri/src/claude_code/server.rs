@@ -5933,6 +5933,7 @@ async fn hooks_handler(
     // (verified on agy 1.5.13, docs/agy-integration-review.md). Every later hook still carries
     // `conversationId`, `transcriptPath`, `cwd`, `modelName`, and `?tab_id=`, so register an
     // unseen session (or rebind one moved to a new tab via reload/duplicate) before processing.
+    let mut agy_auto_registered = false;
     if runtime == crate::state::AgentRuntime::Gemini
         && !session_id.is_empty()
         && hook_event_name != "SessionStart"
@@ -6000,6 +6001,7 @@ async fn hooks_handler(
                 );
             }
             if unseen {
+                agy_auto_registered = true;
                 let mut app_data = srv.state.app_data.write();
                 let mut changed = false;
                 'find_tab: for win in &mut app_data.windows {
@@ -6963,24 +6965,46 @@ async fn hooks_handler(
             // continuations and reactive wakeups (e.g. background task completion). If maiTerm
             // restarted mid-turn or a prior Stop exited `watch_agy_permission`, re-arm the screen
             // watcher here without resetting Files baselines (which `HookPhase::Prompt` owns).
+            // When this re-activates an idle/stopped or just-auto-registered session, also emit
+            // `agent-hook-user-prompt` so the frontend mirror flips `state = 'active'` and
+            // `mainTurnOpen = true` in lockstep with Rust.
             if runtime == crate::state::AgentRuntime::Gemini
                 && hook_event_name == "PreInvocation"
                 && !session_id.is_empty()
             {
-                let tab_id = {
+                let (tab_id, reactivated) = {
                     use crate::state::app_state::AgentSessionState;
                     let mut sessions = srv.state.agent_sessions.write();
                     if let Some(session) = sessions.get_mut(&session_id) {
-                        if matches!(session.state, AgentSessionState::WaitingInput | AgentSessionState::Stopped) {
+                        let was_idle = matches!(
+                            session.state,
+                            AgentSessionState::WaitingInput | AgentSessionState::Stopped
+                        );
+                        if was_idle {
                             session.state = AgentSessionState::Active;
                         }
-                        Some(session.tab_id.clone())
+                        (Some(session.tab_id.clone()), was_idle || agy_auto_registered)
                     } else {
-                        None
+                        (None, false)
                     }
-                }
-                .or(tab_id_from_param);
+                };
+                let tab_id = tab_id.or(tab_id_from_param);
                 if let Some(tid) = tab_id.filter(|t| !t.is_empty()) {
+                    if reactivated {
+                        let turn = tauri::Manager::try_state::<Arc<crate::filetree::FileTreeState>>(&srv.app_handle)
+                            .and_then(|ft| ft.agents.turn_of(&tid));
+                        emit_dual(
+                            &srv.app_handle,
+                            "agent-hook-user-prompt",
+                            "claude-hook-user-prompt",
+                            serde_json::json!({
+                                "runtime": runtime_key,
+                                "session_id": session_id,
+                                "tab_id": tid,
+                                "turn": turn,
+                            }),
+                        );
+                    }
                     watch_agy_permission(srv.state.clone(), srv.app_handle.clone(), session_id.clone(), tid);
                 }
             }

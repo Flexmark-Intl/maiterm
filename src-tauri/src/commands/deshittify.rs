@@ -146,19 +146,34 @@ fn read_json_settings_at(
     display_path: &str,
     runtime_name: &str,
 ) -> Result<serde_json::Value, String> {
-    if !path.exists() {
-        return Ok(serde_json::json!({}));
+    // Check symlink_metadata first (matching `util::json_file::edit_json_object`) so a dangling
+    // symlink is reported as unreadable rather than mistaken for an absent file.
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(serde_json::json!({})),
+        Err(e) => return Err(format!("Cannot read {display_path}: {e}")),
+        Ok(meta) if meta.file_type().is_symlink() && !path.exists() => {
+            return Err(format!(
+                "{display_path} is a dangling symlink. maiTerm won't overwrite it — fix or remove the symlink and come back."
+            ));
+        }
+        Ok(_) => {}
     }
     let raw = fs::read_to_string(path)
         .map_err(|e| format!("Cannot read {display_path}: {e}"))?;
     if raw.trim().is_empty() {
         return Ok(serde_json::json!({}));
     }
-    serde_json::from_str(&raw).map_err(|e| {
+    let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
         format!(
             "{display_path} could not be parsed ({e}). maiTerm won't overwrite settings it can't read — fix the file ({runtime_name} is rejecting it too) and come back."
         )
-    })
+    })?;
+    if !val.is_object() {
+        return Err(format!(
+            "{display_path} is not a JSON object. maiTerm won't overwrite settings it can't read — fix the file ({runtime_name} is rejecting it too) and come back."
+        ));
+    }
+    Ok(val)
 }
 
 // ─── ~/.gemini/antigravity-cli/settings.json ───────────────────────────────
@@ -1285,60 +1300,71 @@ if os.path.islink(p):
     if not os.path.exists(p):
         sys.exit(0)
     p=os.path.realpath(p)
-if not os.path.exists(p):
+existed=os.path.exists(p)
+orig_mode=None
+if not existed:
     if not d["allowSet"]:
         sys.exit(0)
     s={}
-    before=None
 else:
     try:
+        orig_mode=os.stat(p).st_mode&0o7777
         raw=open(p).read()
         s=json.loads(raw) if raw.strip() else {}
     except Exception:
         sys.exit(0)
     if not isinstance(s,dict):
         sys.exit(0)
-    before=json.dumps(s,sort_keys=True)
 perms=s.get("permissions")
 if perms is None:
     if not d["allowSet"]:
         sys.exit(0)
-    perms=s["permissions"]={}
+    perms={}
 if not isinstance(perms,dict):
     sys.exit(0)
 allow=perms.get("allow")
 if allow is None:
     if not d["allowSet"]:
         sys.exit(0)
-    allow=perms["allow"]=[]
+    allow=[]
 if not isinstance(allow,list):
     sys.exit(0)
+changed=False
 for r in d["allowSet"]:
-    if r not in allow:
+    if not any(isinstance(x,str) and x==r for x in allow):
         allow.append(r)
+        changed=True
 unset=set(d["allowUnset"])
 if unset:
-    allow=[x for x in allow if x not in unset]
+    new_allow=[x for x in allow if not (isinstance(x,str) and x in unset)]
+    if len(new_allow)!=len(allow):
+        allow=new_allow
+        changed=True
+if not changed:
+    sys.exit(0)
 if allow:
     perms["allow"]=allow
 else:
     perms.pop("allow",None)
-if not perms:
+if perms:
+    s["permissions"]=perms
+else:
     s.pop("permissions",None)
-if before is None or json.dumps(s,sort_keys=True)!=before:
-    parent=os.path.dirname(p)
-    os.makedirs(parent,exist_ok=True)
-    fd,tmp=tempfile.mkstemp(prefix=".deshittify-",dir=parent)
+parent=os.path.dirname(p)
+os.makedirs(parent,exist_ok=True)
+fd,tmp=tempfile.mkstemp(prefix=".deshittify-",dir=parent)
+try:
+    with os.fdopen(fd,"w") as f:
+        f.write(json.dumps(s,indent=2)+"\n")
+    if orig_mode is not None:
+        os.chmod(tmp,orig_mode)
+    os.replace(tmp,p)
+except Exception:
     try:
-        with os.fdopen(fd,"w") as f:
-            f.write(json.dumps(s,indent=2)+"\n")
-        os.replace(tmp,p)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        sys.exit(0)"#;
+        os.unlink(tmp)
+    except OSError:
+        pass
+    sys.exit(0)"#;
 
 /// Render a shell script that makes a remote account match this machine's rules.
 ///
@@ -2548,8 +2574,38 @@ mod tests {
         assert!(out_idle.status.success());
         assert!(!home_idle.join(".gemini").exists(), "idle remote run must not create ~/.gemini");
 
+        // File mode preserved, unhashable allow entries don't crash, and empty `{"permissions":{"allow":[]}}`
+        // is untouched when all rules are off.
+        let home_edge = scratch("remote-agy-edge");
+        fs::create_dir_all(home_edge.join(".gemini/antigravity-cli")).unwrap();
+        let edge_path = home_edge.join(".gemini/antigravity-cli/settings.json");
+        let compact_empty = r#"{"permissions":{"allow":[]}}"#;
+        fs::write(&edge_path, compact_empty).unwrap();
+        fs::set_permissions(&edge_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let out_empty = run_remote_script(&off_script, &home_edge);
+        assert!(out_empty.status.success());
+        assert_eq!(fs::read_to_string(&edge_path).unwrap(), compact_empty, "idle run rewrote empty allow array");
+        assert_eq!(fs::metadata(&edge_path).unwrap().permissions().mode() & 0o777, 0o644);
+
+        fs::write(&edge_path, r#"{"permissions":{"allow":[{"custom":1},"mcp(*)"]}}"#).unwrap();
+        fs::set_permissions(&edge_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let out_unhash = run_remote_script(&off_script, &home_edge);
+        assert!(out_unhash.status.success(), "stderr: {}", String::from_utf8_lossy(&out_unhash.stderr));
+        let after_unhash: serde_json::Value = serde_json::from_str(&fs::read_to_string(&edge_path).unwrap()).unwrap();
+        assert_eq!(after_unhash["permissions"]["allow"], serde_json::json!([{"custom": 1}]));
+        assert_eq!(fs::metadata(&edge_path).unwrap().permissions().mode() & 0o777, 0o644, "file mode changed");
+
+        // Local reader refuses dangling symlinks and non-object JSON (never degrades to Ok({})).
+        let dangling = home_edge.join("dangling.json");
+        std::os::unix::fs::symlink(home_edge.join("missing.json"), &dangling).unwrap();
+        assert!(read_json_settings_at(&dangling, "~/.gemini/antigravity-cli/settings.json", "Antigravity (agy)").is_err());
+        let array_json = home_edge.join("array.json");
+        fs::write(&array_json, "[]").unwrap();
+        assert!(read_json_settings_at(&array_json, "~/.gemini/antigravity-cli/settings.json", "Antigravity (agy)").is_err());
+
         let _ = fs::remove_dir_all(&home);
         let _ = fs::remove_dir_all(&home_idle);
+        let _ = fs::remove_dir_all(&home_edge);
     }
 }
 

@@ -179,7 +179,7 @@ fn footer(lines: &[&str]) -> Option<(usize, DialogShape)> {
             break;
         }
         non_blank_seen += 1;
-        if non_blank_seen >= 2 {
+        if non_blank_seen > 2 {
             break;
         }
     }
@@ -199,12 +199,15 @@ fn footer(lines: &[&str]) -> Option<(usize, DialogShape)> {
 }
 
 /// True when a trailing line below a candidate `agy` dialog clearly belongs to an input box,
-/// another dialog type, or a shell prompt rather than `agy`'s hint/status bar.
+/// spinner/tool output, another dialog type, or a shell prompt rather than `agy`'s hint/status bar.
 fn is_non_status_trailing_line(line: &str) -> bool {
     let t = line.trim();
     if t.starts_with('─')
         || t.starts_with('❯')
         || t.starts_with('>')
+        || t.chars().next().is_some_and(|c| {
+            ('\u{2800}'..='\u{28ff}').contains(&c) || matches!(c, '✻' | '●' | '○' | '⏺' | '⎿' | '└')
+        })
         || t.contains("Esc to cancel")
         || t.contains("Enter to confirm")
         || t.contains("enter Confirm")
@@ -225,6 +228,70 @@ fn is_non_status_trailing_line(line: &str) -> bool {
     false
 }
 
+/// Try to parse an unbroken `agy` permission block ending at `end_idx` (last option row or its
+/// wrapped continuation). Returns `Some((end_idx + 1, DialogShape::Tool))` when rows `1..=N`
+/// start with `Yes` / include `No` and sit directly below an `agy` permission header.
+fn try_agy_rows_ending_at(lines: &[&str], end_idx: usize) -> Option<(usize, DialogShape)> {
+    let mut rows: Vec<(usize, String)> = Vec::new();
+    let mut cont: Vec<&str> = Vec::new();
+    let mut first_row = end_idx;
+    let mut walked_to_one = false;
+    for (j, rl) in lines[..=end_idx].iter().enumerate().rev() {
+        first_row = j;
+        if rl.trim().is_empty() {
+            return None;
+        }
+        if let Some((n, label)) = row(rl) {
+            let mut text = label.to_string();
+            for c in cont.drain(..).rev() {
+                text.push(' ');
+                text.push_str(c);
+            }
+            rows.push((n, text));
+            if n == 1 {
+                walked_to_one = true;
+                break;
+            }
+        } else if rl.starts_with("    ") {
+            cont.push(rl.trim());
+        } else {
+            return None;
+        }
+    }
+    if !walked_to_one || !cont.is_empty() || rows.len() < 2 {
+        return None;
+    }
+    rows.reverse();
+    if !rows.iter().enumerate().all(|(i, (n, _))| *n == i + 1) {
+        return None;
+    }
+    let has_yes = rows[0].1.starts_with("Yes");
+    let has_no = rows.iter().skip(1).any(|(_, l)| l.starts_with("No"));
+    if !has_yes || !has_no {
+        return None;
+    }
+    let header_lines: Vec<&str> = lines[..first_row]
+        .iter()
+        .rev()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .take_while(|s| {
+            !s.starts_with('─')
+                && !s.chars().next().is_some_and(|c| {
+                    ('\u{2800}'..='\u{28ff}').contains(&c) || matches!(c, '○' | '●' | '└')
+                })
+        })
+        .take(8)
+        .collect();
+    let asks = header_lines.iter().enumerate().any(|(offset, h)| {
+        h.contains("Run this command?")
+            || h.contains("Allow calling this tool?")
+            || h.contains("Requesting permission for:")
+            || (offset < 3 && h.starts_with("Allow ") && h.ends_with('?'))
+    });
+    asks.then_some((end_idx + 1, DialogShape::Tool))
+}
+
 /// An Antigravity (`agy`) permission prompt rendered without a `tab Amend` line (e.g.
 /// `Run this command?` above `> 1. Yes, run command` … `4. No, cancel`, followed by 0–3 trailing
 /// hint/status-bar lines). Requires strict row numbering (`1..=N`), a `Yes…` first row, at least
@@ -236,68 +303,23 @@ fn agy_permission_dialog(lines: &[&str], last: usize) -> Option<(usize, DialogSh
         if l.trim().is_empty() {
             continue;
         }
-        if row(l).is_some() || l.starts_with("    ") {
-            let mut rows: Vec<(usize, String)> = Vec::new();
-            let mut cont: Vec<&str> = Vec::new();
-            let mut first_row = idx;
-            let mut walked_to_one = false;
-            for (j, rl) in lines[..=idx].iter().enumerate().rev() {
-                first_row = j;
-                if rl.trim().is_empty() {
-                    return None;
-                }
-                if let Some((n, label)) = row(rl) {
-                    let mut text = label.to_string();
-                    for c in cont.drain(..).rev() {
-                        text.push(' ');
-                        text.push_str(c);
-                    }
-                    rows.push((n, text));
-                    if n == 1 {
-                        walked_to_one = true;
-                        break;
-                    }
-                } else if rl.starts_with("    ") {
-                    cont.push(rl.trim());
-                } else {
-                    return None;
-                }
-            }
-            if !walked_to_one || !cont.is_empty() || rows.len() < 2 {
-                return None;
-            }
-            rows.reverse();
-            if !rows.iter().enumerate().all(|(i, (n, _))| *n == i + 1) {
-                return None;
-            }
-            let has_yes = rows[0].1.starts_with("Yes");
-            let has_no = rows.iter().skip(1).any(|(_, l)| l.starts_with("No"));
-            if !has_yes || !has_no {
-                return None;
-            }
-            let header_lines: Vec<&str> = lines[..first_row]
-                .iter()
-                .rev()
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .take_while(|s| {
-                    !s.starts_with('─')
-                        && !s.chars().next().is_some_and(|c| {
-                            ('\u{2800}'..='\u{28ff}').contains(&c) || matches!(c, '○' | '●' | '└')
-                        })
-                })
-                .take(8)
-                .collect();
-            let asks = header_lines.iter().enumerate().any(|(offset, h)| {
-                h.contains("Run this command?")
-                    || h.contains("Allow calling this tool?")
-                    || h.contains("Requesting permission for:")
-                    || (offset < 3 && h.starts_with("Allow ") && h.ends_with('?'))
-            });
-            return asks.then_some((idx + 1, DialogShape::Tool));
+        // Check non-status lines first so indented prompts/rules (`    SHELL$ `, `    ────`)
+        // can never be mistaken for row continuations.
+        if row(l).is_some() {
+            return try_agy_rows_ending_at(lines, idx);
         }
         if is_non_status_trailing_line(l) {
             return None;
+        }
+        // A wrapped continuation of the last row has modest indent (4–8 spaces) and is not a
+        // status bar; a right-aligned status bar (`    ... auto • model • high`) fails this
+        // check or fails `try_agy_rows_ending_at` and falls through to be skipped as trailing.
+        let indent = l.len() - l.trim_start_matches(' ').len();
+        let looks_like_status = l.contains("esc to cancel") || l.contains(" • ") || l.contains(" · ");
+        if (4..=8).contains(&indent) && !looks_like_status {
+            if let Some(found) = try_agy_rows_ending_at(lines, idx) {
+                return Some(found);
+            }
         }
         skipped += 1;
         if skipped > 3 {
@@ -806,5 +828,50 @@ mod tests {
         );
         assert_eq!(parse(&after_input_box), None);
         assert!(!dialog_open(&after_input_box));
+
+        // 2-line stacked status bar below `tab Amend` must match `tab Amend` directly (even when
+        // rows are unreadable / header does not match `agy_permission_dialog`).
+        let stacked_tab_only = concat!(
+            "unreadable narrow rows\n",
+            "  ↑/↓ Navigate · tab Amend\n",
+            "esc to cancel                                             auto • gemini-3-pro • high\n",
+            "MACSTUDIO dprusak[~/projects/maiterm] (main) gemini-3-pro high 12.3%\n",
+        );
+        assert!(dialog_open(stacked_tab_only));
+        assert!(footer_open(stacked_tab_only));
+
+        // Right-aligned (4+-space-indented) status bar — both with and without a blank line —
+        // must be skipped as trailing rather than aborting the scan or corrupting the last row.
+        let right_aligned_blank = format!(
+            "{agy_cmd_bare}\n                                        auto • gemini-3-pro • high\n"
+        );
+        let d_ra1 = parse(&right_aligned_blank).expect("right-aligned status bar after blank line");
+        assert_eq!(d_ra1.options, d_bare.options);
+        assert_eq!(d_ra1.digest, d_bare.digest);
+
+        let right_aligned_adjacent = format!(
+            "{agy_cmd_bare}                                        auto • gemini-3-pro • high\n"
+        );
+        let d_ra2 = parse(&right_aligned_adjacent).expect("right-aligned status bar adjacent to last row");
+        assert_eq!(d_ra2.options, d_bare.options);
+        assert_eq!(d_ra2.digest, d_bare.digest);
+
+        // Indented non-status line (`    SHELL$ `, `    ────`) directly below a dismissed dialog
+        // must NOT be folded as a row continuation.
+        let indented_shell = format!("{agy_cmd_bare}    SHELL$ \n");
+        assert_eq!(parse(&indented_shell), None);
+        assert!(!dialog_open(&indented_shell));
+
+        // Real wrapped continuation of row 4 (5-space indent) above a custom statusLine still works.
+        let wrapped_last_row = concat!(
+            "Run this command?\n",
+            "> 1. Yes, run command\n",
+            "  2. No, cancel and tell agent\n",
+            "     what to do instead\n",
+            "\n",
+            "MACSTUDIO dprusak[~/projects/maiterm] (main) gemini-3-pro high 12.3%\n",
+        );
+        let d_wrap = parse(wrapped_last_row).expect("wrapped last row above custom statusLine");
+        assert_eq!(d_wrap.options, vec!["Yes, run command", "No, cancel and tell agent what to do instead"]);
     }
 }

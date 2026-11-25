@@ -1108,11 +1108,16 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
       setupPromises.push(commands.sshRunSetup(sshArgs, agyScript));
     }
 
+    const settled = Promise.allSettled(setupPromises);
+
     // Deshittification rides along on every connect, in both directions: rules on
     // here are applied there, rules off here are removed there. It is deliberately
     // NOT in setupPromises — it is a preference, not a dependency, so it must never
-    // gate 'connected' or fail a bridge. Idle when the user has enabled nothing.
+    // gate 'connected' or fail a bridge — and it runs only AFTER setupPromises settle
+    // so it never races buildSetupScript / buildAgySetupScript on the same remote
+    // settings.json files. Idle when the user has enabled nothing.
     const deshittified = (async () => {
+      if ((await settled).some((r) => r.status === 'rejected')) return;
       try {
         const script = await commands.buildDeshittifySetupScript();
         if (script.trim()) await commands.sshRunSetup(sshArgs, script);
@@ -1126,7 +1131,6 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
     // 'connected', and it runs only AFTER the setup above and Deshittify's script: all of them
     // read-modify-write the same remote files, and running beside them would lose a write.
     // Skipped when a setup failed, as the bridge is then marked failed.
-    const settled = Promise.allSettled(setupPromises);
     const agentDefaulted = (async () => {
       if ((await settled).some((r) => r.status === 'rejected')) return;
       await deshittified;
