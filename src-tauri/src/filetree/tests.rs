@@ -1,4 +1,8 @@
-//! Files, end to end against a real disk and the real watcher (docs/file-tree.md §20 phase 1).
+//! Files, end to end against a real disk (docs/file-tree.md §20 phase 1). Most tests drive
+//! events through `FileTreeState::for_test` + `Probe::deliver` (or `go_deaf`) so parallel runs do
+//! not queue dozens of `FSEventStreamStart` RPCs in `fseventsd`; the native OS watcher is
+//! exercised directly by `the_native_watcher_starts_and_reports_a_change`, the Linux inotify
+//! tests, `ops_tests`, and the `#[ignore]`d idle/budget tests.
 //!
 //! The convergence test is the one that matters: a client that follows the protocol (apply a
 //! Delta only on a matching generation, refresh otherwise) must end up holding exactly what a

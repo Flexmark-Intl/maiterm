@@ -441,9 +441,9 @@ fn wait_for(what: &str, timeout: Duration, mut f: impl FnMut() -> bool) {
     }
 }
 
-/// A tree on `root` whose watcher is running and whose open folders are listed: the hub's own
-/// account, never a sleep. FSEvents may still report the setup's writes at any time, late or
-/// never (docs/file-tree.md §6.1); nothing below depends on whether it does.
+/// A tree on `root` whose synthetic watcher is running and whose open folders are listed: the
+/// hub's own account, never a sleep. Uses `FileTreeState::for_test` so parallel runs don't queue
+/// an FSEvents stream start; every event below is delivered deterministically via `Probe::deliver`.
 fn open_tree(root: &Path, excludes: Vec<String>) -> (Arc<FileTreeState>, Arc<Recorder>, u64, Probe, Arc<RootHub>) {
     let ft = FileTreeState::for_test(Duration::from_secs(30), crate::filetree::watch::RAW_CAPACITY);
     let probe = Probe::new(&ft);
@@ -455,8 +455,7 @@ fn open_tree(root: &Path, excludes: Vec<String>) -> (Arc<FileTreeState>, Arc<Rec
     (ft, rec, ack.sub_id, probe, hub)
 }
 
-/// One tree for every end-to-end check: each FSEvents stream start is queued behind the
-/// process's others (about 2 s apiece on a busy machine).
+/// One tree for every end-to-end check.
 ///
 /// What the watcher reports is handed over by the test (`Probe::deliver`): this is about what
 /// the ledger and the tree do with a report, and FSEvents under load reports late, out of
