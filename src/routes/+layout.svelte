@@ -257,20 +257,7 @@
     let unlistenQuit: (() => void) | undefined;
     listen('quit-requested', async () => {
       logInfo('quit-requested — saving scrollback before exit');
-      // Save window geometry before exit (don't wait for debounce). Skipped while the
-      // displays are asleep, a deferred restore from a minimized state is still pending,
-      // or the live monitor count no longer matches `currentMonitorCount` (e.g. quitting
-      // right after a dock/undock or during a pre-poll display-sleep transition) —
-      // the rect then isn't the one the user arranged for this monitor count.
-      clearTimeout(geometryTimer);
-      await runGeometryOp(async () => {
-        if (currentMonitorCount !== null && !displaysAsleep && deferredRestoreCount === null) {
-          const actualCount = await readMonitorCount();
-          if (actualCount === currentMonitorCount) {
-            await commands.saveWindowGeometry(currentMonitorCount).catch(() => {});
-          }
-        }
-      });
+      await saveGeometryBeforeExit();
       await terminalsStore.saveAllScrollback();
       try {
         await invoke('sync_state');
@@ -333,6 +320,25 @@
 
     // An IPC failure is an absence, not a count — hold, same as 0.
     const readMonitorCount = () => commands.getMonitorCount().catch(() => 0);
+
+    // Save window geometry before exit/relaunch (don't wait for debounce). Shared by
+    // `quit-requested` and `updaterStore.flushBeforeExit()`. Skipped while displays are
+    // asleep, a deferred restore from a minimized state is still pending, or the live
+    // monitor count no longer matches `currentMonitorCount` (e.g. exiting right after a
+    // dock/undock or during a pre-poll display-sleep transition) — the rect then isn't
+    // the one the user arranged for this monitor count.
+    function saveGeometryBeforeExit(): Promise<void> {
+      clearTimeout(geometryTimer);
+      return runGeometryOp(async () => {
+        if (currentMonitorCount !== null && !displaysAsleep && deferredRestoreCount === null) {
+          const actualCount = await readMonitorCount();
+          if (actualCount === currentMonitorCount) {
+            await commands.saveWindowGeometry(currentMonitorCount).catch(() => {});
+          }
+        }
+      });
+    }
+    const unregisterGeometryFlush = updaterStore.registerGeometryFlush(saveGeometryBeforeExit);
 
     // Must be called inside `runGeometryOp`.
     async function restoreOrDefer(count: number) {
@@ -1647,6 +1653,7 @@
       unlistenFocus?.();
       unlistenResize?.();
       unlistenMove?.();
+      unregisterGeometryFlush();
       clearTimeout(geometryTimer);
       clearInterval(monitorPollTimer);
       clearInterval(updateCheckTimer);

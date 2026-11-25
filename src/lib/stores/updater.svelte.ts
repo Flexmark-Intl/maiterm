@@ -129,6 +129,20 @@ function createUpdaterStore() {
   let releaseNotes = $state<ChangelogEntry[]>([]);
   let loadingNotes = $state(false);
   let showWhatsNewRequested = $state(false);
+  /** Per-window guarded pre-exit geometry saver registered by `+layout.svelte`. */
+  let geometryFlushHook: (() => Promise<void>) | null = null;
+
+  /**
+   * Register this window's guarded pre-exit geometry saver (owned by `+layout.svelte`
+   * alongside `runGeometryOp`, `displaysAsleep`, `currentMonitorCount`, and
+   * `deferredRestoreCount`). Returns an unregister function for `onMount` cleanup.
+   */
+  function registerGeometryFlush(fn: () => Promise<void>): () => void {
+    geometryFlushHook = fn;
+    return () => {
+      if (geometryFlushHook === fn) geometryFlushHook = null;
+    };
+  }
 
   async function checkForUpdates(silent = false): Promise<Update | null> {
     if (downloading) {
@@ -394,11 +408,13 @@ function createUpdaterStore() {
         // First, before anything slow: every window, not just this one, has to stop closing
         // tabs for shells that die on the way out (commands/workspace.rs `begin_shutdown`).
         await commands.beginShutdown().catch((e) => logError(`begin_shutdown failed: ${e}`));
-        // 0 is "no answer" (displays asleep, list unreadable) and saveWindowGeometry
-        // refuses it — never fabricate a count here, or the update plants a layout the
-        // user never arranged under a real monitor-count key.
-        const monitorCount = await commands.getMonitorCount().catch(() => 0);
-        await commands.saveWindowGeometry(monitorCount).catch(() => {});
+        // Save this window's geometry through `+layout.svelte`'s serialized, guarded helper
+        // (same checks as `quit-requested`: skipped if displays are asleep, a deferred
+        // restore is pending, or the live monitor count no longer matches the layout this
+        // window was arranged under). Non-terminal windows do not register a hook and skip.
+        if (geometryFlushHook) {
+          await geometryFlushHook().catch(() => {});
+        }
         // This window's own terminals (also sets the shutting-down flag that
         // suppresses per-tab autosave races).
         await terminalsStore.saveAllScrollback();
@@ -472,6 +488,7 @@ function createUpdaterStore() {
     dismiss,
     restart,
     initSync,
+    registerGeometryFlush,
     requestShowWhatsNew() { showWhatsNewRequested = true; },
     clearShowWhatsNewRequest() { showWhatsNewRequested = false; },
   };
