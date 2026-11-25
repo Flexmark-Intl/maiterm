@@ -368,13 +368,14 @@
     deshittifyLoaded = true;
   }
 
-  async function refreshDeshittify() {
+  async function refreshDeshittify(clearErrors = true) {
     try {
       absorbDeshittify(await deshittifyStatus());
-      // Clear here, not only on the next toggle: the banner names a condition the
-      // user may have gone off and fixed, and re-entering the section is exactly
-      // how they come back to check.
-      deshittifyErrors = [];
+      // Clear here on section entry, not only on the next toggle: the banner names a
+      // condition the user may have gone off and fixed, and re-entering the section is
+      // exactly how they come back to check. When called from a failed toggle's catch
+      // block, keep the write error visible so the failure isn't silently swallowed.
+      if (clearErrors) deshittifyErrors = [];
     } catch (e) {
       deshittifyErrors = [String(e)];
       deshittifyLoaded = true;
@@ -427,7 +428,7 @@
       absorbDeshittify(await deshittifySetRule(id, !deshittifyApplied(id)));
     } catch (e) {
       deshittifyErrors = [String(e)];
-      await refreshDeshittify();
+      await refreshDeshittify(false);
     } finally {
       deshittifyBusy = null;
     }
@@ -445,7 +446,7 @@
       deshittifyErrors = errors;
     } catch (e) {
       deshittifyErrors = [String(e)];
-      await refreshDeshittify();
+      await refreshDeshittify(false);
     } finally {
       deshittifyBusy = null;
     }
