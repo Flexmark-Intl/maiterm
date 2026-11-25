@@ -157,8 +157,10 @@ fn watch_unattributed_prompt(app: Arc<AppState>, handle: AppHandle, session_id: 
     });
 }
 
-/// Sessions with an active [`watch_agy_permission`] watcher (at most one per session).
-static AGY_PERM_WATCHES: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
+/// `(session_id, tab_id)` pairs with an active [`watch_agy_permission`] watcher (at most one per
+/// session+tab; keying by both ensures a tab rebind spawns a watcher for the new tab immediately
+/// without colliding with the old tab's watcher while it wakes and exits).
+static AGY_PERM_WATCHES: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<(String, String)>>> =
     std::sync::LazyLock::new(Default::default);
 
 /// Watch an in-turn Antigravity (`agy`) tab for a tool-permission prompt on screen.
@@ -174,7 +176,8 @@ fn watch_agy_permission(app: Arc<AppState>, handle: AppHandle, session_id: Strin
     if session_id.is_empty() || tab_id.is_empty() {
         return;
     }
-    if !AGY_PERM_WATCHES.lock().insert(session_id.clone()) {
+    let watch_key = (session_id.clone(), tab_id.clone());
+    if !AGY_PERM_WATCHES.lock().insert(watch_key.clone()) {
         return;
     }
     tokio::spawn(async move {
@@ -201,7 +204,7 @@ fn watch_agy_permission(app: Arc<AppState>, handle: AppHandle, session_id: Strin
                     let tool_name = {
                         let mut sessions = app.agent_sessions.write();
                         match sessions.get_mut(&session_id) {
-                            Some(s) if s.state == AgentSessionState::Active => {
+                            Some(s) if s.tab_id == tab_id && s.state == AgentSessionState::Active => {
                                 s.state = AgentSessionState::WaitingPermission;
                                 s.claude_gate.prompt_opened();
                                 Some(s.tool_name.clone().unwrap_or_default())
@@ -237,7 +240,7 @@ fn watch_agy_permission(app: Arc<AppState>, handle: AppHandle, session_id: Strin
                     let tool_name = {
                         let mut sessions = app.agent_sessions.write();
                         match sessions.get_mut(&session_id) {
-                            Some(s) if s.state == AgentSessionState::WaitingPermission => {
+                            Some(s) if s.tab_id == tab_id && s.state == AgentSessionState::WaitingPermission => {
                                 s.state = AgentSessionState::Active;
                                 s.claude_gate.prompt_closed();
                                 Some(s.tool_name.clone().unwrap_or_default())
@@ -269,7 +272,7 @@ fn watch_agy_permission(app: Arc<AppState>, handle: AppHandle, session_id: Strin
                 }
             }
         }
-        AGY_PERM_WATCHES.lock().remove(&session_id);
+        AGY_PERM_WATCHES.lock().remove(&watch_key);
     });
 }
 
