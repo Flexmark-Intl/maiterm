@@ -98,19 +98,31 @@
     unclaimed?: boolean;
   }
 
+  const streams = $derived(tasksStore.workstreams(workspaceId));
+  const workstreamName = (id: string | null | undefined) =>
+    id ? (streams.find((w) => w.id === id)?.name ?? null) : null;
+
+  /** Tasks this tab's agent is actively working on right now, lifted into a dedicated section
+   *  at the top of the panel so the human can see what is in flight at a glance. Uses
+   *  `effectiveStatus` so a stored-`active` task held back by an unmet prerequisite stays in
+   *  its workstream group reading BLOCKED instead of appearing as live work. */
+  const activeTasks = $derived(
+    mine.filter((t) => effectiveStatus(t, all, workspacesStore.parkedTaskIds) === 'active'),
+  );
+  const activeIds = $derived(new Set(activeTasks.map((t) => t.id)));
+
   const groups = $derived.by<Group[]>(() => {
-    const streams = tasksStore.workstreams(workspaceId);
-    const nameOf = (id: string) => streams.find((w) => w.id === id)?.name ?? null;
     const byStream = new Map<string, Task[]>();
     for (const t of mine) {
+      if (activeIds.has(t.id)) continue;
       const k = t.workstream_id ?? '';
       if (!byStream.has(k)) byStream.set(k, []);
       byStream.get(k)!.push(t);
     }
     const out: Group[] = [...byStream.keys()]
       // Loose tasks last; named jobs alphabetical.
-      .sort((a, b) => (!a ? 1 : !b ? -1 : (nameOf(a) ?? '').localeCompare(nameOf(b) ?? '')))
-      .map((k) => ({ key: k, name: k ? nameOf(k) : null, list: visible(byStream.get(k)!) }))
+      .sort((a, b) => (!a ? 1 : !b ? -1 : (workstreamName(a) ?? '').localeCompare(workstreamName(b) ?? '')))
+      .map((k) => ({ key: k, name: workstreamName(k), list: visible(byStream.get(k)!) }))
       .filter((g) => g.list.length);
     if (showUnclaimed && unclaimed.length) {
       out.push({ key: '__unclaimed', name: null, list: unclaimed, unclaimed: true });
@@ -439,7 +451,7 @@
       </button>
     {/each}
 
-    {#if groups.length === 0 && approvals.length === 0}
+    {#if activeTasks.length === 0 && groups.length === 0 && approvals.length === 0}
       <p class="empty">
         {#if mine.length}
           Nothing in flight on this tab — the counts above hold the rest.
@@ -448,6 +460,207 @@
           updates the same list.
         {/if}
       </p>
+    {/if}
+
+    {#snippet taskRow(t: Task, isUnclaimed: boolean, wsLabel: string | null = null)}
+      {@const eff = effectiveStatus(t, all, workspacesStore.parkedTaskIds)}
+      {@const depBlocked = hasUnmetDeps(t, all, workspacesStore.parkedTaskIds)}
+      <li class="task" class:done={t.status === 'done'} class:parked={isParked(t.status)} class:dropped={isDropped(t.status)}>
+        <div class="task-main">
+          <div class="status-col">
+            <Tooltip text={isDropped(t.status)
+              ? 'Dropped — retracted, not finished. Nothing waiting on it counts it as done. Use ↑ to put it back in play.'
+              : depBlocked
+                ? `${blockedWhy(t)} The lane is held until then.`
+                : `${STATUS_LABEL[eff]} — click to advance, shift-click to go back`}>
+              <button
+                class="status s-{eff}"
+                disabled={isDropped(t.status) || depBlocked}
+                onclick={(e) => cycleStatus(t, e.shiftKey)}
+              >
+                {STATUS_LABEL[eff]}
+              </button>
+            </Tooltip>
+            <!-- Age since the row was created: on a long board it tells the
+                 week-old leftovers from what was raised this morning. -->
+            <Tooltip text="Created {new Date(t.created_at).toLocaleString()}">
+              <span class="age">{fmtAge(t.created_at)}</span>
+            </Tooltip>
+          </div>
+
+          <div class="title-col">
+            {#if editingId === t.id}
+              <!-- svelte-ignore a11y_autofocus -->
+              <input
+                class="edit-input"
+                autofocus
+                bind:value={editValue}
+                oninput={() => editingId && queueSave(() => saveTitle(editingId!, editValue))}
+                onblur={commitEdit}
+                onkeydown={(e) => {
+                  if (e.key === 'Enter') commitEdit();
+                  if (e.key === 'Escape') editingId = null;
+                }}
+              />
+            {:else}
+              <button class="task-title" ondblclick={() => startEdit(t)} onclick={() => toggleDetail(t)}>
+                {t.title}
+              </button>
+            {/if}
+            {#if wsLabel}
+              <span class="active-ws">{wsLabel}</span>
+            {/if}
+          </div>
+
+          <span class="row-ctl">
+            {#if t.origin !== 'human'}
+              <Tooltip text="Recorded by {t.origin === 'imported' ? "an import from the agent's own list" : t.origin}">
+                <span class="origin">
+                  {t.origin === 'imported' ? '⇥' : '◆'}
+                </span>
+              </Tooltip>
+            {/if}
+            <!-- Held while a prerequisite is unfinished, for the reason the board
+                 already pins its steppers: these write the STORED status while the row
+                 displays the EFFECTIVE one, so on a dependency-blocked row the chip
+                 would not move — "Unpark — back to To-do" would leave it reading
+                 BLOCKED, and Do it would tell the agent to start work whose
+                 prerequisite has not landed. The "waiting on" line below says which. -->
+            {#if !isUnclaimed && isDropped(t.status)}
+              <!-- The one control a retracted row needs: put it back in play. Park and
+                   Do it are meaningless here, and the status chip is disabled, so
+                   without this the human could only rescue it from the board. -->
+              <Tooltip text="Restore — back to To-do. Anything waiting on this starts counting it again.">
+                <button class="mini" onclick={() => tasksStore.update(workspaceId, t.id, { status: 'todo' })}>↑</button>
+              </Tooltip>
+            {:else if !isUnclaimed && t.status !== 'done'}
+              {#if depBlocked}
+                <Tooltip text="Waiting on an unfinished prerequisite. Parking and starting are held until it lands — the lane would change underneath a row that stayed put.">
+                  <button class="mini" disabled aria-disabled="true">▶</button>
+                </Tooltip>
+              {:else}
+                {#if isParked(t.status)}
+                  <Tooltip text="Unpark — back to To-do">
+                    <button class="mini" onclick={() => tasksStore.update(workspaceId, t.id, { status: 'todo' })}>↑</button>
+                  </Tooltip>
+                {:else}
+                  <Tooltip text="Park — shelve this for later, exempt from stale checks">
+                    <button class="mini" onclick={() => tasksStore.update(workspaceId, t.id, { status: 'backlog' })}>↓</button>
+                  </Tooltip>
+                {/if}
+                <Tooltip text="Do it — tell this tab's agent to start on it now">
+                  <button class="mini go" onclick={() => start(t)}>▶</button>
+                </Tooltip>
+              {/if}
+            {/if}
+            <Tooltip
+              text={isUnclaimed
+                ? 'Claim — assign this row to this tab'
+                : 'Unassign — drop this tab\'s claim so any tab can pick it up. Stays in its current lane; this is not the same as parking it.'}
+            >
+              <button
+                class="mini"
+                onclick={() => setAssignee(t, isUnclaimed)}
+              >
+                {isUnclaimed ? '↧' : '↥'}
+              </button>
+            </Tooltip>
+            {#if confirmingDelete === t.id}
+              <Tooltip text="Confirm delete">
+                <button class="mini danger" onclick={() => remove(t.id)}>✓</button>
+              </Tooltip>
+              <Tooltip text="Cancel">
+                <button class="mini" onclick={() => (confirmingDelete = null)}>✕</button>
+              </Tooltip>
+            {:else}
+              <Tooltip text="Delete">
+                <button class="mini" onclick={() => (confirmingDelete = t.id)}>
+                  <Icon name="trash" size={11} />
+                </button>
+              </Tooltip>
+            {/if}
+          </span>
+        </div>
+
+        <!-- Only what is actually HOLDING IT UP. Listing every `blocked_by` id said
+             "waiting on X" about a prerequisite that had finished, and a parked one —
+             off the list with an archived tab, still blocking — resolved to nothing
+             and fell into the "no longer exists" fallback, so a row rendered BLOCKED
+             while this line said the thing blocking it was gone. Naming the holding
+             tab is what makes it recoverable rather than just mysterious. -->
+        {#if unmetBlockers(t).length}
+          <div class="deps">
+            waiting on {unmetBlockers(t)
+              .map((b) =>
+                b.state === 'parked'
+                  ? b.title
+                    ? `${b.title} (parked with “${b.parked_with?.tab_name}”)`
+                    : 'a task parked with an archived tab'
+                  : // The lane, not just the title: "waiting on Retry queue" read
+                    // identically whether that row was active or retracted, and those
+                    // are opposite facts for whoever has to decide what to do next.
+                    b.status
+                    ? `${b.title} (${laneName(b.status)})`
+                    : b.title,
+              )
+              .join(', ')}
+          </div>
+        {/if}
+
+        <!-- What the agent stopped on, when it isn't another task: the question stays
+             here instead of scrolling away in the agent's output. -->
+        {#if t.blocker && t.status === 'blocked'}
+          <button class="waiting-btn blocker-slot" data-kind={t.blocker.kind} onclick={() => waitingStore.open(tabId, t.id, t.id)}>
+            <span class="wk">{BLOCKER_LABEL[t.blocker.kind]} · {fmtAge(t.blocker.asked_at)}</span>
+            <span class="wq"><TaskText text={t.blocker.question} of={t.id} /></span>
+          </button>
+        {/if}
+
+        {#if detailFor === t.id}
+          <textarea
+            class="detail"
+            placeholder="Notes, acceptance criteria, links…"
+            bind:value={detailValue}
+            oninput={() => detailFor && queueSave(() => saveDetail(detailFor!, detailValue))}
+            onblur={commitDetail}
+          ></textarea>
+        {:else if t.detail}
+          <button class="detail-preview" onclick={() => toggleDetail(t)}>{t.detail}</button>
+        {/if}
+
+        <!-- The log, below the spec, because that is the relationship between them:
+             `detail` says what the task is, these say what happened to it. Newest
+             last so it reads as a transcript, and only while the row is expanded —
+             a collapsed list is for scanning titles. -->
+        {#if detailFor === t.id && t.notes?.length}
+          <ol class="notes">
+            {#each t.notes as n, i (`${n.at}-${i}`)}
+              <li class="note" class:by-agent={n.by !== 'human'}>
+                <span class="note-when">{fmtAge(n.at)}</span>
+                <span class="note-text"><TaskText text={n.text} of={t.id} /></span>
+              </li>
+            {/each}
+          </ol>
+        {/if}
+        {#if startedNote?.id === t.id}
+          <p class="started-note">{startedNote.text}</p>
+        {/if}
+      </li>
+    {/snippet}
+
+    {#if activeTasks.length > 0}
+      <section class="active-now" aria-label="Active tasks">
+        <h4 class="group active-heading">
+          <span class="active-spinner" aria-hidden="true"></span>
+          <span class="group-name">Active now</span>
+          <span class="group-count active-count">{activeTasks.length}</span>
+        </h4>
+        <ul class="task-list">
+          {#each activeTasks as t (t.id)}
+            {@render taskRow(t, false, workstreamName(t.workstream_id))}
+          {/each}
+        </ul>
+      </section>
     {/if}
 
     {#each groups as group (group.key)}
@@ -478,186 +691,9 @@
             </Tooltip>
           {/if}
         </h4>
-      <ul class="task-list">
+        <ul class="task-list">
           {#each group.list as t (t.id)}
-            {@const eff = effectiveStatus(t, all, workspacesStore.parkedTaskIds)}
-            {@const depBlocked = hasUnmetDeps(t, all, workspacesStore.parkedTaskIds)}
-            <li class="task" class:done={t.status === 'done'} class:parked={isParked(t.status)} class:dropped={isDropped(t.status)}>
-              <div class="task-main">
-                <div class="status-col">
-                <Tooltip text={isDropped(t.status)
-                  ? 'Dropped — retracted, not finished. Nothing waiting on it counts it as done. Use ↑ to put it back in play.'
-                  : depBlocked
-                    ? `${blockedWhy(t)} The lane is held until then.`
-                    : `${STATUS_LABEL[eff]} — click to advance, shift-click to go back`}>
-                  <button
-                    class="status s-{eff}"
-                    disabled={isDropped(t.status) || depBlocked}
-                    onclick={(e) => cycleStatus(t, e.shiftKey)}
-                  >
-                    {STATUS_LABEL[eff]}
-                  </button>
-                </Tooltip>
-                <!-- Age since the row was created: on a long board it tells the
-                     week-old leftovers from what was raised this morning. -->
-                <Tooltip text="Created {new Date(t.created_at).toLocaleString()}">
-                  <span class="age">{fmtAge(t.created_at)}</span>
-                </Tooltip>
-                </div>
-
-                {#if editingId === t.id}
-                  <!-- svelte-ignore a11y_autofocus -->
-                  <input
-                    class="edit-input"
-                    autofocus
-                    bind:value={editValue}
-                    oninput={() => editingId && queueSave(() => saveTitle(editingId!, editValue))}
-                    onblur={commitEdit}
-                    onkeydown={(e) => {
-                      if (e.key === 'Enter') commitEdit();
-                      if (e.key === 'Escape') editingId = null;
-                    }}
-                  />
-                {:else}
-                  <button class="task-title" ondblclick={() => startEdit(t)} onclick={() => toggleDetail(t)}>
-                    {t.title}
-                  </button>
-                {/if}
-
-                <span class="row-ctl">
-                  {#if t.origin !== 'human'}
-                    <Tooltip text="Recorded by {t.origin === 'imported' ? "an import from the agent's own list" : t.origin}">
-                      <span class="origin">
-                        {t.origin === 'imported' ? '⇥' : '◆'}
-                      </span>
-                    </Tooltip>
-                  {/if}
-                  <!-- Held while a prerequisite is unfinished, for the reason the board
-                       already pins its steppers: these write the STORED status while the row
-                       displays the EFFECTIVE one, so on a dependency-blocked row the chip
-                       would not move — "Unpark — back to To-do" would leave it reading
-                       BLOCKED, and Do it would tell the agent to start work whose
-                       prerequisite has not landed. The "waiting on" line below says which. -->
-                  {#if !group.unclaimed && isDropped(t.status)}
-                    <!-- The one control a retracted row needs: put it back in play. Park and
-                         Do it are meaningless here, and the status chip is disabled, so
-                         without this the human could only rescue it from the board. -->
-                    <Tooltip text="Restore — back to To-do. Anything waiting on this starts counting it again.">
-                      <button class="mini" onclick={() => tasksStore.update(workspaceId, t.id, { status: 'todo' })}>↑</button>
-                    </Tooltip>
-                  {:else if !group.unclaimed && t.status !== 'done'}
-                    {#if depBlocked}
-                      <Tooltip text="Waiting on an unfinished prerequisite. Parking and starting are held until it lands — the lane would change underneath a row that stayed put.">
-                        <button class="mini" disabled aria-disabled="true">▶</button>
-                      </Tooltip>
-                    {:else}
-                      {#if isParked(t.status)}
-                        <Tooltip text="Unpark — back to To-do">
-                          <button class="mini" onclick={() => tasksStore.update(workspaceId, t.id, { status: 'todo' })}>↑</button>
-                        </Tooltip>
-                      {:else}
-                        <Tooltip text="Park — shelve this for later, exempt from stale checks">
-                          <button class="mini" onclick={() => tasksStore.update(workspaceId, t.id, { status: 'backlog' })}>↓</button>
-                        </Tooltip>
-                      {/if}
-                      <Tooltip text="Do it — tell this tab's agent to start on it now">
-                        <button class="mini go" onclick={() => start(t)}>▶</button>
-                      </Tooltip>
-                    {/if}
-                  {/if}
-                  <Tooltip
-                    text={group.unclaimed
-                      ? 'Claim — assign this row to this tab'
-                      : 'Unassign — drop this tab\'s claim so any tab can pick it up. Stays in its current lane; this is not the same as parking it.'}
-                  >
-                    <button
-                      class="mini"
-                      onclick={() => setAssignee(t, !!group.unclaimed)}
-                    >
-                      {group.unclaimed ? '↧' : '↥'}
-                    </button>
-                  </Tooltip>
-                  {#if confirmingDelete === t.id}
-                    <Tooltip text="Confirm delete">
-                      <button class="mini danger" onclick={() => remove(t.id)}>✓</button>
-                    </Tooltip>
-                    <Tooltip text="Cancel">
-                      <button class="mini" onclick={() => (confirmingDelete = null)}>✕</button>
-                    </Tooltip>
-                  {:else}
-                    <Tooltip text="Delete">
-                      <button class="mini" onclick={() => (confirmingDelete = t.id)}>
-                        <Icon name="trash" size={11} />
-                      </button>
-                    </Tooltip>
-                  {/if}
-                </span>
-              </div>
-
-              <!-- Only what is actually HOLDING IT UP. Listing every `blocked_by` id said
-                   "waiting on X" about a prerequisite that had finished, and a parked one —
-                   off the list with an archived tab, still blocking — resolved to nothing
-                   and fell into the "no longer exists" fallback, so a row rendered BLOCKED
-                   while this line said the thing blocking it was gone. Naming the holding
-                   tab is what makes it recoverable rather than just mysterious. -->
-              {#if unmetBlockers(t).length}
-                <div class="deps">
-                  waiting on {unmetBlockers(t)
-                    .map((b) =>
-                      b.state === 'parked'
-                        ? b.title
-                          ? `${b.title} (parked with “${b.parked_with?.tab_name}”)`
-                          : 'a task parked with an archived tab'
-                        : // The lane, not just the title: "waiting on Retry queue" read
-                          // identically whether that row was active or retracted, and those
-                          // are opposite facts for whoever has to decide what to do next.
-                          b.status
-                          ? `${b.title} (${laneName(b.status)})`
-                          : b.title,
-                    )
-                    .join(', ')}
-                </div>
-              {/if}
-
-              <!-- What the agent stopped on, when it isn't another task: the question stays
-                   here instead of scrolling away in the agent's output. -->
-              {#if t.blocker && t.status === 'blocked'}
-                <button class="waiting-btn blocker-slot" data-kind={t.blocker.kind} onclick={() => waitingStore.open(tabId, t.id, t.id)}>
-                  <span class="wk">{BLOCKER_LABEL[t.blocker.kind]} · {fmtAge(t.blocker.asked_at)}</span>
-                  <span class="wq"><TaskText text={t.blocker.question} of={t.id} /></span>
-                </button>
-              {/if}
-
-              {#if detailFor === t.id}
-                <textarea
-                  class="detail"
-                  placeholder="Notes, acceptance criteria, links…"
-                  bind:value={detailValue}
-                  oninput={() => detailFor && queueSave(() => saveDetail(detailFor!, detailValue))}
-                  onblur={commitDetail}
-                ></textarea>
-              {:else if t.detail}
-                <button class="detail-preview" onclick={() => toggleDetail(t)}>{t.detail}</button>
-              {/if}
-
-              <!-- The log, below the spec, because that is the relationship between them:
-                   `detail` says what the task is, these say what happened to it. Newest
-                   last so it reads as a transcript, and only while the row is expanded —
-                   a collapsed list is for scanning titles. -->
-              {#if detailFor === t.id && t.notes?.length}
-                <ol class="notes">
-                  {#each t.notes as n, i (`${n.at}-${i}`)}
-                    <li class="note" class:by-agent={n.by !== 'human'}>
-                      <span class="note-when">{fmtAge(n.at)}</span>
-                      <span class="note-text"><TaskText text={n.text} of={t.id} /></span>
-                    </li>
-                  {/each}
-                </ol>
-              {/if}
-              {#if startedNote?.id === t.id}
-                <p class="started-note">{startedNote.text}</p>
-              {/if}
-            </li>
+            {@render taskRow(t, !!group.unclaimed)}
           {/each}
         </ul>
       </section>
@@ -786,6 +822,66 @@
   }
 
   .group-loose { font-style: italic; opacity: 0.7; text-transform: none; letter-spacing: 0; }
+
+  .active-now {
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+    border-left: 2px solid var(--accent);
+    margin: 4px 0 6px;
+    padding: 2px 0 4px;
+  }
+
+  .active-heading {
+    align-items: center;
+    color: var(--accent);
+    margin: 6px 10px 4px;
+  }
+
+  .active-count {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    color: var(--accent);
+  }
+
+  .active-spinner {
+    animation: active-spin 1.1s linear infinite;
+    border: 1.5px solid color-mix(in srgb, var(--accent) 28%, transparent);
+    border-radius: 50%;
+    border-top-color: var(--accent);
+    flex-shrink: 0;
+    height: 10px;
+    width: 10px;
+  }
+
+  @keyframes active-spin {
+    to { transform: rotate(360deg); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .active-spinner {
+      animation: none;
+      background: var(--accent);
+      border-color: var(--accent);
+      height: 6px;
+      margin: 0 2px;
+      width: 6px;
+    }
+  }
+
+  .title-col {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  .active-ws {
+    color: var(--fg-dim);
+    font-size: 10px;
+    line-height: 1.25;
+    opacity: 0.8;
+    overflow-wrap: anywhere;
+  }
 
   /* A workstream is a different JOB, and the separation has to outweigh the hairline
      between two rows of the SAME job. It didn't: the heading was 10px dim text with no rule,
@@ -934,13 +1030,13 @@
     border: none;
     color: var(--fg);
     cursor: text;
-    flex: 1;
     font-size: 12px;
     line-height: 1.35;
     min-width: 0;
     overflow-wrap: anywhere;
     padding: 0;
     text-align: left;
+    width: 100%;
   }
   .task.done .task-title { text-decoration: line-through; }
   /* Same strike as done, but dotted — retracted reads as "crossed out", finished as
@@ -952,10 +1048,10 @@
     border: 1px solid var(--accent);
     border-radius: 3px;
     color: var(--fg);
-    flex: 1;
     font-size: 12px;
     min-width: 0;
     padding: 2px 4px;
+    width: 100%;
   }
   .edit-input:focus { outline: none; }
 
