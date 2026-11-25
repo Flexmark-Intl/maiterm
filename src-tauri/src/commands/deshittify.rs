@@ -57,6 +57,16 @@ const RULE_MEMORY_WRITES: &str = "cc_allow_memory_writes";
 /// then reads as off). The env var would outrank `/tui` and make it a dead command.
 const RULE_CLASSIC_RENDERER: &str = "cc_classic_renderer";
 
+/// Rule ids for Antigravity CLI (`agy`) `permissions.allow` wildcards in
+/// `~/.gemini/antigravity-cli/settings.json`. Opt-in (not in `DEFAULT_ON_RULES`):
+/// `agy`'s `Deny > Ask > Allow` precedence still lets users override any tool via `/permissions`.
+const RULE_AGY_ALLOW_ALL_MCP: &str = "agy_allow_all_mcp";
+const RULE_AGY_ALLOW_ALL_COMMANDS: &str = "agy_allow_all_commands";
+const AGY_ALLOW_RULES: &[(&str, &str)] = &[
+    (RULE_AGY_ALLOW_ALL_MCP, "mcp(*)"),
+    (RULE_AGY_ALLOW_ALL_COMMANDS, "command(*)"),
+];
+
 /// Rules maiTerm applies on its own, once per user account (`seed_default_rules`).
 /// After that the usual rule holds — disk is the toggle — so switching one off sticks.
 const DEFAULT_ON_RULES: &[&str] =
@@ -128,19 +138,99 @@ fn read_claude_settings() -> Result<serde_json::Value, String> {
 }
 
 fn read_settings_at(path: &std::path::Path) -> Result<serde_json::Value, String> {
+    read_json_settings_at(path, "~/.claude/settings.json", "Claude Code")
+}
+
+fn read_json_settings_at(
+    path: &std::path::Path,
+    display_path: &str,
+    runtime_name: &str,
+) -> Result<serde_json::Value, String> {
     if !path.exists() {
         return Ok(serde_json::json!({}));
     }
     let raw = fs::read_to_string(path)
-        .map_err(|e| format!("Cannot read ~/.claude/settings.json: {e}"))?;
+        .map_err(|e| format!("Cannot read {display_path}: {e}"))?;
     if raw.trim().is_empty() {
         return Ok(serde_json::json!({}));
     }
     serde_json::from_str(&raw).map_err(|e| {
         format!(
-            "~/.claude/settings.json could not be parsed ({e}). maiTerm won't overwrite settings it can't read — fix the file (Claude Code is rejecting it too) and come back."
+            "{display_path} could not be parsed ({e}). maiTerm won't overwrite settings it can't read — fix the file ({runtime_name} is rejecting it too) and come back."
         )
     })
+}
+
+// ─── ~/.gemini/antigravity-cli/settings.json ───────────────────────────────
+
+fn agy_user_settings_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".gemini").join("antigravity-cli").join("settings.json"))
+}
+
+fn read_agy_settings() -> Result<serde_json::Value, String> {
+    let path = agy_user_settings_path().ok_or("Could not determine home directory")?;
+    read_json_settings_at(&path, "~/.gemini/antigravity-cli/settings.json", "Antigravity (agy)")
+}
+
+fn edit_agy_settings(
+    mut f: impl FnMut(&mut serde_json::Map<String, serde_json::Value>) -> Result<(), String>,
+) -> Result<(), String> {
+    let path = agy_user_settings_path().ok_or("Could not determine home directory")?;
+    crate::util::json_file::edit_json_object(&path, true, |settings| {
+        let before = settings.clone();
+        f(settings
+            .as_object_mut()
+            .ok_or("~/.gemini/antigravity-cli/settings.json is not a JSON object")?)?;
+        Ok(*settings != before)
+    })
+    .map(|_| ())
+}
+
+fn agy_allow_applied(settings: &serde_json::Value, rule: &str) -> bool {
+    settings
+        .get("permissions")
+        .and_then(|p| p.get("allow"))
+        .and_then(|a| a.as_array())
+        .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some(rule)))
+}
+
+fn edit_agy_allow_rule(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    enabled: bool,
+    rule: &str,
+) -> Result<(), String> {
+    if enabled {
+        let perms = obj
+            .entry("permissions")
+            .or_insert_with(|| serde_json::json!({}));
+        let perms_obj = perms
+            .as_object_mut()
+            .ok_or("\"permissions\" in ~/.gemini/antigravity-cli/settings.json is not an object")?;
+        let allow = perms_obj
+            .entry("allow")
+            .or_insert_with(|| serde_json::json!([]));
+        let allow_arr = allow
+            .as_array_mut()
+            .ok_or("\"permissions.allow\" in ~/.gemini/antigravity-cli/settings.json is not an array")?;
+        if !allow_arr.iter().any(|v| v.as_str() == Some(rule)) {
+            allow_arr.push(serde_json::Value::String(rule.to_string()));
+        }
+    } else if let Some(perms_obj) = obj.get_mut("permissions").and_then(|p| p.as_object_mut()) {
+        if let Some(allow_arr) = perms_obj.get_mut("allow").and_then(|a| a.as_array_mut()) {
+            allow_arr.retain(|v| v.as_str() != Some(rule));
+            if allow_arr.is_empty() {
+                perms_obj.remove("allow");
+            }
+        }
+        if perms_obj.is_empty() {
+            obj.remove("permissions");
+        }
+    }
+    Ok(())
+}
+
+fn set_agy_allow_rule(enabled: bool, rule: &str) -> Result<(), String> {
+    edit_agy_settings(|obj| edit_agy_allow_rule(obj, enabled, rule))
 }
 
 /// Edit `~/.claude/settings.json` in place: read, `f`, and write back only when `f` changed
@@ -1047,6 +1137,21 @@ fn build_status() -> DeshittifyStatus {
     rules.push(memory_writes_status(&settings, &settings_err));
     rules.push(commit_hook_status());
 
+    // Antigravity (`agy`) rules read `~/.gemini/antigravity-cli/settings.json` independently so
+    // an unreadable Claude settings file never blocks Antigravity toggles (or vice versa).
+    let (agy_settings, agy_settings_err) = match read_agy_settings() {
+        Ok(v) => (v, None),
+        Err(e) => (serde_json::json!({}), Some(e)),
+    };
+    for (id, allow_rule) in AGY_ALLOW_RULES {
+        rules.push(DeshittifyRuleStatus {
+            id: (*id).into(),
+            applied: agy_settings_err.is_none() && agy_allow_applied(&agy_settings, allow_rule),
+            blocked: agy_settings_err.is_some(),
+            detail: agy_settings_err.clone(),
+        });
+    }
+
     DeshittifyStatus { rules }
 }
 
@@ -1067,6 +1172,9 @@ fn apply_rule(id: &str, enabled: bool) -> Result<(), String> {
 fn apply_rule_inner(id: &str, enabled: bool) -> Result<(), String> {
     if let Some((_, vars)) = ENV_RULES.iter().find(|(rid, _)| *rid == id) {
         return set_env_vars(enabled, vars);
+    }
+    if let Some((_, allow_rule)) = AGY_ALLOW_RULES.iter().find(|(rid, _)| *rid == id) {
+        return set_agy_allow_rule(enabled, allow_rule);
     }
     match id {
         RULE_CO_AUTHORED => set_co_authored(enabled),
@@ -1166,6 +1274,72 @@ elif isinstance(pr,list):
 if json.dumps(s,sort_keys=True)!=before:
     open(p,"w").write(json.dumps(s,indent=2))"#;
 
+/// Merges this machine's Antigravity (`agy`) `permissions.allow` deshittify rules into
+/// a remote `~/.gemini/antigravity-cli/settings.json`. Preserves symlinks (refuses dangling
+/// symlinks), writes atomically only when changed, and never creates the file if all rules
+/// are off. Pure ASCII, no single quotes.
+const PY_REMOTE_AGY_SETTINGS: &str = r#"import json,os,sys,tempfile
+d=json.load(sys.stdin)
+p=os.path.expanduser("~/.gemini/antigravity-cli/settings.json")
+if os.path.islink(p):
+    if not os.path.exists(p):
+        sys.exit(0)
+    p=os.path.realpath(p)
+if not os.path.exists(p):
+    if not d["allowSet"]:
+        sys.exit(0)
+    s={}
+    before=None
+else:
+    try:
+        raw=open(p).read()
+        s=json.loads(raw) if raw.strip() else {}
+    except Exception:
+        sys.exit(0)
+    if not isinstance(s,dict):
+        sys.exit(0)
+    before=json.dumps(s,sort_keys=True)
+perms=s.get("permissions")
+if perms is None:
+    if not d["allowSet"]:
+        sys.exit(0)
+    perms=s["permissions"]={}
+if not isinstance(perms,dict):
+    sys.exit(0)
+allow=perms.get("allow")
+if allow is None:
+    if not d["allowSet"]:
+        sys.exit(0)
+    allow=perms["allow"]=[]
+if not isinstance(allow,list):
+    sys.exit(0)
+for r in d["allowSet"]:
+    if r not in allow:
+        allow.append(r)
+unset=set(d["allowUnset"])
+if unset:
+    allow=[x for x in allow if x not in unset]
+if allow:
+    perms["allow"]=allow
+else:
+    perms.pop("allow",None)
+if not perms:
+    s.pop("permissions",None)
+if before is None or json.dumps(s,sort_keys=True)!=before:
+    parent=os.path.dirname(p)
+    os.makedirs(parent,exist_ok=True)
+    fd,tmp=tempfile.mkstemp(prefix=".deshittify-",dir=parent)
+    try:
+        with os.fdopen(fd,"w") as f:
+            f.write(json.dumps(s,indent=2)+"\n")
+        os.replace(tmp,p)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        sys.exit(0)"#;
+
 /// Render a shell script that makes a remote account match this machine's rules.
 ///
 /// This machine is the source of truth in both directions: a rule that is off
@@ -1183,10 +1357,23 @@ fn render_remote_setup_script() -> String {
     // A settings file we can't read locally tells us nothing about what the
     // remote should look like — leave the remote's alone rather than reading our
     // own failure as "the user wants all of this removed".
-    render_remote_setup_script_from(&build_status(), read_claude_settings().is_ok())
+    render_remote_setup_script_with(
+        &build_status(),
+        read_claude_settings().is_ok(),
+        read_agy_settings().is_ok(),
+    )
 }
 
+#[cfg(test)]
 fn render_remote_setup_script_from(status: &DeshittifyStatus, settings_readable: bool) -> String {
+    render_remote_setup_script_with(status, settings_readable, settings_readable)
+}
+
+fn render_remote_setup_script_with(
+    status: &DeshittifyStatus,
+    claude_settings_readable: bool,
+    agy_settings_readable: bool,
+) -> String {
     let applied = |id: &str| {
         status
             .rules
@@ -1196,7 +1383,7 @@ fn render_remote_setup_script_from(status: &DeshittifyStatus, settings_readable:
 
     let mut lines: Vec<String> = Vec::new();
 
-    if settings_readable {
+    if claude_settings_readable {
         let mut env_set = serde_json::Map::new();
         let mut env_unset: Vec<&str> = Vec::new();
         for (id, vars) in ENV_RULES {
@@ -1244,6 +1431,27 @@ fn render_remote_setup_script_from(status: &DeshittifyStatus, settings_readable:
             lines.push("rmdir \"${__mh%/*}\" 2>/dev/null".into());
             lines.push("fi".into());
         }
+    }
+
+    if agy_settings_readable {
+        let mut allow_set: Vec<&str> = Vec::new();
+        let mut allow_unset: Vec<&str> = Vec::new();
+        for (id, rule) in AGY_ALLOW_RULES {
+            if applied(id) {
+                allow_set.push(rule);
+            } else {
+                allow_unset.push(rule);
+            }
+        }
+        let agy_payload = serde_json::json!({
+            "allowSet": allow_set,
+            "allowUnset": allow_unset,
+        });
+        let escaped = agy_payload.to_string().replace('\'', r"'\''");
+        lines.push(format!("__desh_agy='{escaped}'"));
+        lines.push("if command -v python3 >/dev/null 2>&1; then".into());
+        lines.push(format!("printf '%s' \"$__desh_agy\" | python3 -c '{PY_REMOTE_AGY_SETTINGS}'"));
+        lines.push("fi".into());
     }
 
     lines.push("__gh=\"$HOME/.maiterm/githooks\"".into());
@@ -1670,7 +1878,15 @@ mod tests {
                 detail: None,
             })
             .collect();
-        for id in [RULE_CO_AUTHORED, RULE_COMMIT_HOOK, RULE_REMOTE_CONTROL, RULE_MEMORY_WRITES, RULE_CLASSIC_RENDERER] {
+        for id in [
+            RULE_CO_AUTHORED,
+            RULE_COMMIT_HOOK,
+            RULE_REMOTE_CONTROL,
+            RULE_MEMORY_WRITES,
+            RULE_CLASSIC_RENDERER,
+            RULE_AGY_ALLOW_ALL_MCP,
+            RULE_AGY_ALLOW_ALL_COMMANDS,
+        ] {
             rules.push(DeshittifyRuleStatus {
                 id: id.into(),
                 applied: all_on,
@@ -2271,6 +2487,69 @@ mod tests {
         assert!(hooks_path_is_ours("~/.maiterm/githooks", &ours));
         assert!(hooks_path_is_ours(&ours.to_string_lossy(), &ours));
         assert!(!hooks_path_is_ours("~/.husky", &ours));
+    }
+
+    #[test]
+    fn agy_allow_rules_local_and_remote_preserve_user_rules_and_symlinks() {
+        // Local helper preserves mcp(maiterm/*), deny/ask lists, and other settings.
+        let mut doc = serde_json::json!({
+            "colorScheme": "dark",
+            "permissions": {
+                "allow": ["mcp(maiterm/*)"],
+                "deny": ["command(rm -rf)"]
+            }
+        });
+        edit_agy_allow_rule(doc.as_object_mut().unwrap(), true, "mcp(*)").unwrap();
+        edit_agy_allow_rule(doc.as_object_mut().unwrap(), true, "mcp(*)").unwrap(); // idempotent
+        edit_agy_allow_rule(doc.as_object_mut().unwrap(), true, "command(*)").unwrap();
+        assert!(agy_allow_applied(&doc, "mcp(*)"));
+        assert!(agy_allow_applied(&doc, "command(*)"));
+        assert_eq!(doc["permissions"]["allow"], serde_json::json!(["mcp(maiterm/*)", "mcp(*)", "command(*)"]));
+        assert_eq!(doc["permissions"]["deny"], serde_json::json!(["command(rm -rf)"]));
+
+        // Turning off removes only our wildcard rules and keeps mcp(maiterm/*) + deny intact.
+        edit_agy_allow_rule(doc.as_object_mut().unwrap(), false, "mcp(*)").unwrap();
+        edit_agy_allow_rule(doc.as_object_mut().unwrap(), false, "command(*)").unwrap();
+        assert!(!agy_allow_applied(&doc, "mcp(*)"));
+        assert!(!agy_allow_applied(&doc, "command(*)"));
+        assert_eq!(doc["permissions"]["allow"], serde_json::json!(["mcp(maiterm/*)"]));
+        assert_eq!(doc["permissions"]["deny"], serde_json::json!(["command(rm -rf)"]));
+
+        // Remote script applies & reverts through a symlink without clobbering it, and skips
+        // creating ~/.gemini when all rules are off.
+        let home = scratch("remote-agy");
+        let dotfiles = home.join("dotfiles");
+        fs::create_dir_all(&dotfiles).unwrap();
+        let real = dotfiles.join("agy-settings.json");
+        fs::write(&real, r#"{"permissions":{"allow":["mcp(maiterm/*)"]},"agentMode":"auto"}"#).unwrap();
+        fs::create_dir_all(home.join(".gemini/antigravity-cli")).unwrap();
+        let link = home.join(".gemini/antigravity-cli/settings.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let on_script = render_remote_setup_script_with(&status_with(true), false, true);
+        assert!(Command::new("sh").args(["-n", "-c", &on_script]).status().unwrap().success());
+        let out_on = run_remote_script(&on_script, &home);
+        assert!(out_on.status.success(), "stderr: {}", String::from_utf8_lossy(&out_on.stderr));
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "remote script replaced symlink");
+        let after_on: serde_json::Value = serde_json::from_str(&fs::read_to_string(&real).unwrap()).unwrap();
+        assert_eq!(after_on["agentMode"], "auto");
+        assert_eq!(after_on["permissions"]["allow"], serde_json::json!(["mcp(maiterm/*)", "mcp(*)", "command(*)"]));
+
+        let off_script = render_remote_setup_script_with(&status_with(false), false, true);
+        let out_off = run_remote_script(&off_script, &home);
+        assert!(out_off.status.success(), "stderr: {}", String::from_utf8_lossy(&out_off.stderr));
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        let after_off: serde_json::Value = serde_json::from_str(&fs::read_to_string(&real).unwrap()).unwrap();
+        assert_eq!(after_off["permissions"]["allow"], serde_json::json!(["mcp(maiterm/*)"]));
+
+        // Idle remote with no ~/.gemini stays untouched when all rules are off.
+        let home_idle = scratch("remote-agy-idle");
+        let out_idle = run_remote_script(&off_script, &home_idle);
+        assert!(out_idle.status.success());
+        assert!(!home_idle.join(".gemini").exists(), "idle remote run must not create ~/.gemini");
+
+        let _ = fs::remove_dir_all(&home);
+        let _ = fs::remove_dir_all(&home_idle);
     }
 }
 

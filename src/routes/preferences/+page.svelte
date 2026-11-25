@@ -336,6 +336,23 @@
         },
       ],
     },
+    {
+      id: 'antigravity',
+      label: 'Antigravity (agy)',
+      blurb: 'Writes to ~/.gemini/antigravity-cli/settings.json. Antigravity picks the settings up on its next session. These also travel to SSH hosts you bridge to — applied on connect, and removed again on the next connect after you switch a rule off. Antigravity\'s Deny > Ask > Allow precedence still lets you deny or ask on specific tools via /permissions.',
+      rules: [
+        {
+          id: 'agy_allow_all_mcp',
+          label: 'Auto-allow all MCP tools',
+          hint: 'Adds "mcp(*)" to permissions.allow so Antigravity stops prompting for permission on every MCP server and tool you configured. Switching it off removes only "mcp(*)" — maiTerm\'s own mcp(maiterm/*) rule and any server-specific rules you added stay intact. Explicit ask or deny rules still take precedence.',
+        },
+        {
+          id: 'agy_allow_all_commands',
+          label: 'Auto-allow all terminal commands',
+          hint: 'Adds "command(*)" to permissions.allow so Antigravity runs shell commands without pausing at "Run this command?" prompts (including non-sandboxed or remote-mutating CLIs). Explicit ask or deny rules (e.g. command(rm -rf)) still take precedence.',
+        },
+      ],
+    },
   ];
 
   let deshittifyRules = $state<Record<string, { applied: boolean; blocked: boolean; detail?: string }>>({});
