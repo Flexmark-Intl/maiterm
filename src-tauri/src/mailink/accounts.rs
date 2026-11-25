@@ -228,6 +228,164 @@ pub(crate) fn clear_remote(app: &AppState, tab_id: &str) {
     }
 }
 
+/// Payload for the desktop `"remote-account-status"` event so a tab can show (or clear) a
+/// persistent error state whenever a managed remote account fails delivery or env precedence
+/// (§6.1). Never carries token material.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct RemoteAccountStatusEvent {
+    pub tab_id: String,
+    /// `"not_applied"` or `"ok"` (clears any previous tab error).
+    pub status: &'static str,
+    pub account_label: Option<String>,
+    pub reason: Option<String>,
+    /// `"hook"` (remote `SessionStart` precedence check), `"prepare"`, or `"clear"`.
+    pub source: &'static str,
+}
+
+pub(crate) fn emit_remote_account_status(
+    handle: &tauri::AppHandle,
+    event: &RemoteAccountStatusEvent,
+) {
+    let _ = handle.emit("remote-account-status", event);
+}
+
+/// Fast, lock-only precheck so `hooks_handler` pays zero `ps` overhead on local tabs and
+/// unmanaged SSH tabs: true only when this tab has a managed remote account record that a
+/// `SessionStart` precedence observation can downgrade (or clear after a previous env mismatch).
+pub(crate) fn needs_remote_auth_check(app: &AppState, tab_id: &str) -> bool {
+    let records = app.tab_accounts.read();
+    let Some(remote) = records.get(tab_id).and_then(|r| r.remote.as_ref()) else {
+        return false;
+    };
+    remote.account.is_some()
+        && matches!(remote.state, RemoteState::SentUnverified | RemoteState::NotApplied)
+}
+
+/// §6.1: verify the presence-only env report from a remote Claude `SessionStart` against this
+/// tab's bound remote handoff. Run off the async executor (it probes the foreground ssh via `ps`).
+pub(crate) fn verify_remote_auth_env(
+    app: &AppState,
+    handle: &tauri::AppHandle,
+    tab_id: &str,
+    env: &tab_record::RemoteAuthEnv,
+) {
+    if !needs_remote_auth_check(app, tab_id) {
+        return;
+    }
+    // Fresh probe: this runs once per managed remote Claude launch (never on a periodic tick), so
+    // an 800 ms cache predating the ssh must not hide the live ssh process.
+    let pty = app.tab_pty_map.read().get(tab_id).cloned();
+    let fg = pty
+        .as_deref()
+        .and_then(|p| crate::pty::get_pty_foreground(app, p, true).ok().flatten());
+    let tunnel = app.ssh_tunnels.read().values().any(|t| t.tab_ids.contains(tab_id));
+    let current_place = if fg.is_none() && !tunnel {
+        tab_record::Place::Local
+    } else {
+        let ssh = pty.as_deref().and_then(|p| crate::pty::get_pty_foreground_ssh(app, p, true));
+        tab_record::Place::Remote { ssh }
+    };
+    if let Some(ev) = apply_remote_auth_env(app, tab_id, current_place, env, app.started_at.elapsed()) {
+        emit_remote_account_status(handle, &ev);
+    }
+}
+
+/// Pure state transition for `verify_remote_auth_env`, separated from `ps` and `AppHandle` so unit
+/// tests can exercise every local/remote/binding/recovery edge directly.
+fn apply_remote_auth_env(
+    app: &AppState,
+    tab_id: &str,
+    current_place: tab_record::Place,
+    env: &tab_record::RemoteAuthEnv,
+    uptime: std::time::Duration,
+) -> Option<RemoteAccountStatusEvent> {
+    let tab_record::Place::Remote { ssh } = current_place else {
+        // Local shell (e.g. user exited SSH and launched local `claude` in the same tab): local
+        // tabs use CLAUDE_CONFIG_DIR and intentionally scrub CLAUDE_CODE_OAUTH_TOKEN. Never
+        // downgrade the old remote record, and clear any lingering remote error badge on the tab.
+        let had_remote_err = app
+            .tab_accounts
+            .read()
+            .get(tab_id)
+            .and_then(|r| r.remote.as_ref())
+            .is_some_and(|r| r.state == RemoteState::NotApplied);
+        return had_remote_err.then(|| RemoteAccountStatusEvent {
+            tab_id: tab_id.to_string(),
+            status: "ok",
+            account_label: None,
+            reason: None,
+            source: "hook",
+        });
+    };
+
+    let mismatch = env.mismatch_reason();
+    let (entering_failure, event) = {
+        let mut records = app.tab_accounts.write();
+        let Some(remote) = records.get_mut(tab_id).and_then(|r| r.remote.as_mut()) else {
+            return None;
+        };
+        let Some(account_label) = remote.account.as_ref().map(|a| a.label.clone()) else {
+            return None;
+        };
+        if remote.state != RemoteState::SentUnverified && !remote.env_mismatch {
+            return None;
+        }
+        // Only act when this SessionStart belongs to the exact SSH process this handoff owns.
+        // A different ssh (or an unbound handoff whose argv doesn't match) must not be mutated.
+        match (remote.ssh_pid, ssh) {
+            (Some(bound_pid), Some((now_pid, _))) if bound_pid == now_pid => {}
+            (None, Some((now_pid, ref cmd))) if tab_record::try_bind(remote, now_pid, cmd) => {}
+            _ => return None,
+        }
+
+        match mismatch {
+            Some(reason) => {
+                let was = remote.state;
+                let changed = was != RemoteState::NotApplied
+                    || remote.reason.as_deref() != Some(reason.as_str());
+                // Keep `ssh_pid` and `handle` intact so maiLink immediately serves `not_applied`
+                // for this live SSH session rather than dropping back to `{known: false}`.
+                remote.state = RemoteState::NotApplied;
+                remote.reason = Some(reason.clone());
+                remote.env_mismatch = true;
+                let entering_failure = was != RemoteState::NotApplied;
+                let ev = changed.then(|| RemoteAccountStatusEvent {
+                    tab_id: tab_id.to_string(),
+                    status: "not_applied",
+                    account_label: Some(account_label),
+                    reason: Some(reason),
+                    source: "hook",
+                });
+                (entering_failure, ev)
+            }
+            None if remote.env_mismatch => {
+                // The user fixed the remote environment (e.g. `unset ANTHROPIC_API_KEY`) and
+                // started Claude again in the same SSH session. Return to `SentUnverified` and
+                // clear the desktop tab error badge.
+                remote.state = RemoteState::SentUnverified;
+                remote.reason = None;
+                remote.env_mismatch = false;
+                (
+                    false,
+                    Some(RemoteAccountStatusEvent {
+                        tab_id: tab_id.to_string(),
+                        status: "ok",
+                        account_label: Some(account_label),
+                        reason: None,
+                        source: "hook",
+                    }),
+                )
+            }
+            None => (false, None),
+        }
+    };
+
+    if entering_failure && uptime >= RING_BASELINE_WINDOW {
+        queue_ring(app, tab_id);
+    }
+    event
+}
+
 /// A prepared handoff that the session never used: that session is not running as the account.
 ///
 /// **Only if the record is still THAT handoff's.** A newer prep for the same tab may have replaced
@@ -360,5 +518,82 @@ mod tests {
         let r = app.tab_accounts.read()[&tab].remote.clone().unwrap();
         assert_eq!(r.state, RemoteState::NotApplied);
         assert_eq!(r.account, account);
+    }
+
+    #[test]
+    fn remote_session_start_env_mismatch_downgrades_bound_ssh_keeps_pid_rings_and_recovers() {
+        let (app, tab) = fixture();
+        let account = Some(tab_record::AccountRef { id: "a".into(), label: "work@example.com".into() });
+        let mut r = RemoteRecord::new(account.clone(), RemoteState::SentUnverified, None);
+        r.handle = Some("h1".into());
+        r.ssh_pid = Some(100);
+        note_remote_at_uptime(&app, &tab, r, UP_LONG);
+
+        let bound_place = tab_record::Place::Remote { ssh: Some((100, "ssh nova".into())) };
+        let other_place = tab_record::Place::Remote { ssh: Some((200, "ssh other".into())) };
+        let shadowed = tab_record::RemoteAuthEnv { oauth_token: true, shadowed_by: vec!["ANTHROPIC_API_KEY"] };
+        let missing = tab_record::RemoteAuthEnv { oauth_token: false, shadowed_by: vec![] };
+        let clean = tab_record::RemoteAuthEnv { oauth_token: true, shadowed_by: vec![] };
+
+        // A local Claude session in the same tab (after exiting ssh) must NEVER downgrade the remote record.
+        assert!(apply_remote_auth_env(&app, &tab, tab_record::Place::Local, &missing, UP_LONG).is_none());
+        assert_eq!(app.tab_accounts.read()[&tab].remote.as_ref().unwrap().state, RemoteState::SentUnverified);
+
+        // An unrelated ssh session (different pid) must NOT mutate this handoff either.
+        assert!(apply_remote_auth_env(&app, &tab, other_place, &shadowed, UP_LONG).is_none());
+        assert_eq!(app.tab_accounts.read()[&tab].remote.as_ref().unwrap().state, RemoteState::SentUnverified);
+
+        // A mismatch on the bound ssh downgrades to NotApplied, keeps ssh_pid bound so maiLink
+        // serves not_applied immediately, rings once, and emits the desktop tab error event.
+        let ev = apply_remote_auth_env(&app, &tab, bound_place.clone(), &shadowed, UP_LONG).unwrap();
+        assert_eq!(ev.status, "not_applied");
+        assert_eq!(ev.account_label.as_deref(), Some("work@example.com"));
+        assert!(ev.reason.as_deref().unwrap().contains("ANTHROPIC_API_KEY"));
+        let stored = app.tab_accounts.read()[&tab].remote.clone().unwrap();
+        assert_eq!(stored.state, RemoteState::NotApplied);
+        assert_eq!(stored.ssh_pid, Some(100), "ssh_pid must stay bound so maiLink serves not_applied");
+        assert!(stored.env_mismatch);
+        assert_eq!(app.mailink_pending_rings.lock().len(), 1);
+
+        // Repeat with the identical reason is a no-op (no duplicate event or doorbell).
+        assert!(apply_remote_auth_env(&app, &tab, bound_place.clone(), &shadowed, UP_LONG).is_none());
+        assert_eq!(app.mailink_pending_rings.lock().len(), 1);
+
+        // Fixing the remote env and starting Claude again in the SAME ssh recovers back to SentUnverified.
+        let ok = apply_remote_auth_env(&app, &tab, bound_place, &clean, UP_LONG).unwrap();
+        assert_eq!(ok.status, "ok");
+        let stored = app.tab_accounts.read()[&tab].remote.clone().unwrap();
+        assert_eq!(stored.state, RemoteState::SentUnverified);
+        assert!(stored.reason.is_none());
+        assert!(!stored.env_mismatch);
+    }
+
+    #[test]
+    fn remote_session_start_binds_matching_unbound_handoff_and_never_clears_delivery_failure() {
+        let (app, tab) = fixture();
+        let account = Some(tab_record::AccountRef { id: "a".into(), label: "work@example.com".into() });
+        let mut r = RemoteRecord::new(account.clone(), RemoteState::SentUnverified, None);
+        r.handle = Some("t1-abcd".into());
+        note_remote_at_uptime(&app, &tab, r, UP_LONG);
+
+        let matching_ssh = tab_record::Place::Remote {
+            ssh: Some((300, "ssh -t nova '[ -r ~/.maiterm/tokens/tok-t1-abcd ] && . x'".into())),
+        };
+        let missing = tab_record::RemoteAuthEnv { oauth_token: false, shadowed_by: vec![] };
+        let ev = apply_remote_auth_env(&app, &tab, matching_ssh, &missing, UP_LONG).unwrap();
+        assert_eq!(ev.status, "not_applied");
+        assert_eq!(app.tab_accounts.read()[&tab].remote.as_ref().unwrap().ssh_pid, Some(300));
+
+        // A delivery/expiry refusal (env_mismatch == false) must NEVER be cleared by a clean hook
+        // on the remote SSH session, though leaving SSH to run local Claude clears the tab badge.
+        let mut refused = RemoteRecord::new(account, RemoteState::NotApplied, Some("token expired".into()));
+        refused.ssh_pid = Some(400);
+        note_remote_at_uptime(&app, &tab, refused, UP_LONG);
+        let clean = tab_record::RemoteAuthEnv { oauth_token: true, shadowed_by: vec![] };
+        let place400 = tab_record::Place::Remote { ssh: Some((400, "ssh nova".into())) };
+        assert!(apply_remote_auth_env(&app, &tab, place400, &clean, UP_LONG).is_none());
+        assert_eq!(app.tab_accounts.read()[&tab].remote.as_ref().unwrap().state, RemoteState::NotApplied);
+        let local_clear = apply_remote_auth_env(&app, &tab, tab_record::Place::Local, &missing, UP_LONG).unwrap();
+        assert_eq!(local_clear.status, "ok");
     }
 }

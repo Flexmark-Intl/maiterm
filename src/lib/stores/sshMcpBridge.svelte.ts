@@ -650,10 +650,18 @@ function buildSetupScript(
     sessionGate +
     "MAITERM_IN=$(cat); " +
     "MAITERM_SID=$(printf '%s' \"$MAITERM_IN\" | sed -n 's/.*\"session_id\" *: *\"\\([^\"]*\\)\".*/\\1/p' | head -1); " +
+    // §6.1: report env presence only (never values) so maiTerm can catch a dropped token or a
+    // higher-precedence env var on the remote host outranking CLAUDE_CODE_OAUTH_TOKEN.
+    "MAITERM_AE=\"tok=0\"; [ -n \"${CLAUDE_CODE_OAUTH_TOKEN:-}\" ] && MAITERM_AE=\"tok=1\"; " +
+    "case \"${CLAUDE_CODE_USE_BEDROCK:-}\" in 1|[tT][rR][uU][eE]) MAITERM_AE=\"$MAITERM_AE,CLAUDE_CODE_USE_BEDROCK\";; esac; " +
+    "case \"${CLAUDE_CODE_USE_VERTEX:-}\" in 1|[tT][rR][uU][eE]) MAITERM_AE=\"$MAITERM_AE,CLAUDE_CODE_USE_VERTEX\";; esac; " +
+    "case \"${CLAUDE_CODE_USE_FOUNDRY:-}\" in 1|[tT][rR][uU][eE]) MAITERM_AE=\"$MAITERM_AE,CLAUDE_CODE_USE_FOUNDRY\";; esac; " +
+    "[ -n \"${ANTHROPIC_AUTH_TOKEN:-}\" ] && MAITERM_AE=\"$MAITERM_AE,ANTHROPIC_AUTH_TOKEN\"; " +
+    "[ -n \"${ANTHROPIC_API_KEY:-}\" ] && MAITERM_AE=\"$MAITERM_AE,ANTHROPIC_API_KEY\"; " +
     "MAITERM_PRIME=$(curl -s --connect-timeout 2 --max-time 4 " +
     "-H \"x-claude-code-ide-authorization: $MAITERM_AUTH\" -H 'content-type: application/json' " +
     "--data-binary \"$MAITERM_IN\" " +
-    "\"http://127.0.0.1:$MAITERM_PORT/hooks?tab_id=$MAITERM_TAB_ID&prime=1\" 2>/dev/null); " +
+    "\"http://127.0.0.1:$MAITERM_PORT/hooks?tab_id=$MAITERM_TAB_ID&prime=1&auth_env=$MAITERM_AE\" 2>/dev/null); " +
     "echo 'Your maiTerm tab ID is '$MAITERM_TAB_ID'. Your session ID is '$MAITERM_SID'. " +
     "maiTerm already knows this tab and session; you do NOT need to initialize. Only if a maiTerm tool answers that it does not know your tab, call the maiterm initSession tool with this tabId and sessionId to re-bind.'\"$MAITERM_PRIME\"; " +
     "} || true";

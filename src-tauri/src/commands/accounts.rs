@@ -1988,6 +1988,16 @@ pub async fn prepare_remote_account_token(
         Err(e) => {
             // No outcome to record — but an earlier session's record must not stand in for it.
             crate::mailink::accounts::clear_remote(state.inner(), &tab_id);
+            crate::mailink::accounts::emit_remote_account_status(
+                &app,
+                &crate::mailink::accounts::RemoteAccountStatusEvent {
+                    tab_id: tab_id.clone(),
+                    status: "ok",
+                    account_label: None,
+                    reason: None,
+                    source: "clear",
+                },
+            );
             return Err(e);
         }
     };
@@ -2039,6 +2049,28 @@ pub async fn prepare_remote_account_token(
         if bind_now.unwrap_or(false) {
             crate::mailink::accounts::bind_remote_now(state.inner(), &tab_id);
         }
+        // Keep the desktop tab's error indicator in step with the handoff outcome: clear any
+        // previous error on a fresh `ready` / `not_applicable` handoff, and surface delivery or
+        // expiry failures on the tab itself (not only in a transient toast).
+        let status_ev = match state_ {
+            RemoteState::NotApplied => crate::mailink::accounts::RemoteAccountStatusEvent {
+                tab_id: tab_id.clone(),
+                status: "not_applied",
+                account_label: prep.account_label.clone(),
+                reason: prep.detail.clone().or_else(|| Some("the token could not be placed".into())),
+                source: "prepare",
+            },
+            RemoteState::SentUnverified | RemoteState::HostLogin => {
+                crate::mailink::accounts::RemoteAccountStatusEvent {
+                    tab_id: tab_id.clone(),
+                    status: "ok",
+                    account_label: prep.account_label.clone(),
+                    reason: None,
+                    source: "prepare",
+                }
+            }
+        };
+        crate::mailink::accounts::emit_remote_account_status(&app, &status_ev);
     }
     Ok(prep)
 }

@@ -1281,6 +1281,7 @@
     {@const hasActivity = !isEditor && tab.id !== pane.active_tab_id && activityStore.hasActivity(tab.id)}
     {@const tabState = !isEditor && tab.id !== pane.active_tab_id ? activityStore.getTabState(tab.id) : undefined}
     {@const claudeState = !isEditor ? claudeStateStore.getState(tab.id) : undefined}
+    {@const accountError = !isEditor ? claudeStateStore.getRemoteAccountError(tab.id) : undefined}
     {@const sshDropped = !isEditor ? sshDisconnectStore.isDisconnected(tab.id) : false}
     <div
       class="tab"
@@ -1369,6 +1370,9 @@
           <span class="indicator" class:completed-indicator={shellState.exitCode === 0} class:failed-indicator={shellState.exitCode !== 0}>{#if shellState.exitCode === 0}<Icon name="check" size={11} />{:else}<Icon name="cross" size={11} />{/if}</span>
         {:else if hasActivity}
           <span class="indicator"><StatusDot color="accent" /></span>
+        {/if}
+        {#if accountError}
+          <Tooltip text={`Account not applied${accountError.accountLabel ? ` (${accountError.accountLabel})` : ''}: ${accountError.reason}`}><span class="account-error-indicator" aria-label="Agent account not applied"><Icon name="warning" size={12} /></span></Tooltip>
         {/if}
         {#if !isEditor && preferencesStore.claudeCodeIde && preferencesStore.claudeCodeIdeSsh}
           {@const bridgeStatus = getBridgeStatus(tab.id)}
@@ -1904,6 +1908,14 @@
   }
   .bridge-failed {
     opacity: 0.6;
+  }
+
+  .account-error-indicator {
+    flex-shrink: 0;
+    margin-right: 3px;
+    display: inline-flex;
+    align-items: center;
+    color: var(--red, #f7768e);
   }
 
   .editor-icon {

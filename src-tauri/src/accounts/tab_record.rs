@@ -66,11 +66,102 @@ pub struct RemoteRecord {
     /// This handoff's own name (`remote::handoff_handle` — tab id plus a per-prepare nonce). The
     /// evidence an ssh is recognised by. `None` when nothing was staged (a refusal, host_login).
     pub handle: Option<String>,
+    /// True when `state == RemoteState::NotApplied` was set by a remote `SessionStart` env
+    /// precedence check (§6.1), rather than a delivery/expiry failure. Lets a subsequent clean
+    /// `SessionStart` inside the same SSH session (e.g. after `unset ANTHROPIC_API_KEY`) clear
+    /// the error without falsely clearing a delivery refusal where no token was ever sent.
+    pub env_mismatch: bool,
 }
 
 impl RemoteRecord {
     pub fn new(account: Option<AccountRef>, state: RemoteState, reason: Option<String>) -> Self {
-        Self { account, state, reason, ssh_pid: None, handle: None }
+        Self { account, state, reason, ssh_pid: None, handle: None, env_mismatch: false }
+    }
+}
+
+/// Env variables in `docs/login.md` §2.2 that outrank `CLAUDE_CODE_OAUTH_TOKEN` (#5) from above.
+/// Whitelisted so untrusted hook inputs can never inject arbitrary text or secret values into a
+/// tab error message or maiLink `reason`.
+const REMOTE_SHADOWING_VARS: &[&str] = &[
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+];
+
+/// Presence-only env report from a remote Claude `SessionStart` hook (§6.1). Never holds values.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteAuthEnv {
+    pub oauth_token: bool,
+    pub shadowed_by: Vec<&'static str>,
+}
+
+impl RemoteAuthEnv {
+    /// Parse `maiterm_auth_env` from the `maiterm-tab` mod's `SessionStart` JSON payload.
+    pub fn from_hook_event(event: &serde_json::Value) -> Option<Self> {
+        let obj = event.get("maiterm_auth_env")?.as_object()?;
+        let oauth_token = obj.get("oauth_token")?.as_bool()?;
+        let mut shadowed_by = Vec::new();
+        if let Some(arr) = obj.get("shadowed_by").and_then(|v| v.as_array()) {
+            for item in arr {
+                if let Some(name) = item.as_str() {
+                    if let Some(&known) = REMOTE_SHADOWING_VARS.iter().find(|&&v| v == name) {
+                        if !shadowed_by.contains(&known) {
+                            shadowed_by.push(known);
+                        }
+                    }
+                }
+            }
+        }
+        Some(Self { oauth_token, shadowed_by })
+    }
+
+    /// Parse `auth_env` query param from the fallback remote `settings.json` `SessionStart` hook
+    /// (`tok=1` or `tok=0,ANTHROPIC_API_KEY,...`).
+    pub fn from_query_param(raw: &str) -> Option<Self> {
+        let mut parts = raw.split(',');
+        let oauth_token = match parts.next()? {
+            "tok=1" => true,
+            "tok=0" => false,
+            _ => return None,
+        };
+        let mut shadowed_by = Vec::new();
+        for name in parts {
+            if let Some(&known) = REMOTE_SHADOWING_VARS.iter().find(|&&v| v == name) {
+                if !shadowed_by.contains(&known) {
+                    shadowed_by.push(known);
+                }
+            }
+        }
+        Some(Self { oauth_token, shadowed_by })
+    }
+
+    /// One human sentence describing why the injected token did not win precedence, or `None` when
+    /// `CLAUDE_CODE_OAUTH_TOKEN` is present and unshadowed by higher env rungs.
+    pub fn mismatch_reason(&self) -> Option<String> {
+        if !self.shadowed_by.is_empty() {
+            let vars = self.shadowed_by.join(", ");
+            let singular = self.shadowed_by.len() == 1;
+            if !self.oauth_token {
+                return Some(format!(
+                    "CLAUDE_CODE_OAUTH_TOKEN is unset and {vars} {} set on the remote host",
+                    if singular { "is" } else { "are" }
+                ));
+            }
+            return Some(format!(
+                "{vars} {} set on the remote host and {} the injected account token",
+                if singular { "is" } else { "are" },
+                if singular { "outranks" } else { "outrank" }
+            ));
+        }
+        if !self.oauth_token {
+            return Some(
+                "CLAUDE_CODE_OAUTH_TOKEN is not set in the remote Claude session — it fell through to the host's own login"
+                    .to_string(),
+            );
+        }
+        None
     }
 }
 
@@ -420,5 +511,51 @@ mod tests {
         let mut p = prefs_with("a");
         p.accounts_enabled = false;
         assert_eq!(wire(Some(&mut local("a")), "claude", Place::Local, &p).unwrap()["stale"], true);
+    }
+
+    #[test]
+    fn remote_auth_env_parses_mod_json_and_whitelists_shadow_vars() {
+        let clean = RemoteAuthEnv::from_hook_event(&serde_json::json!({
+            "maiterm_auth_env": { "oauth_token": true, "shadowed_by": [] }
+        }))
+        .unwrap();
+        assert_eq!(clean.mismatch_reason(), None);
+
+        let shadowed = RemoteAuthEnv::from_hook_event(&serde_json::json!({
+            "maiterm_auth_env": {
+                "oauth_token": true,
+                "shadowed_by": ["ANTHROPIC_API_KEY", "sk-ant-secret-must-be-ignored", "ANTHROPIC_API_KEY", "CLAUDE_CODE_USE_BEDROCK"]
+            }
+        }))
+        .unwrap();
+        assert_eq!(shadowed.shadowed_by, vec!["ANTHROPIC_API_KEY", "CLAUDE_CODE_USE_BEDROCK"]);
+        let reason = shadowed.mismatch_reason().unwrap();
+        assert!(reason.contains("ANTHROPIC_API_KEY, CLAUDE_CODE_USE_BEDROCK"), "{reason}");
+        assert!(!reason.contains("sk-ant"), "unlisted values must never reach reason: {reason}");
+
+        // Missing or malformed field returns None (older hooks stay quiet).
+        assert!(RemoteAuthEnv::from_hook_event(&serde_json::json!({})).is_none());
+        assert!(RemoteAuthEnv::from_hook_event(&serde_json::json!({"maiterm_auth_env": {}})).is_none());
+    }
+
+    #[test]
+    fn remote_auth_env_parses_query_param_and_reports_every_mismatch_case() {
+        assert_eq!(RemoteAuthEnv::from_query_param("tok=1").unwrap().mismatch_reason(), None);
+
+        let missing = RemoteAuthEnv::from_query_param("tok=0").unwrap();
+        assert!(missing.mismatch_reason().unwrap().contains("CLAUDE_CODE_OAUTH_TOKEN is not set"));
+
+        let shadowed = RemoteAuthEnv::from_query_param("tok=1,ANTHROPIC_API_KEY,BOGUS").unwrap();
+        assert_eq!(shadowed.shadowed_by, vec!["ANTHROPIC_API_KEY"]);
+        let reason = shadowed.mismatch_reason().unwrap();
+        assert!(reason.contains("ANTHROPIC_API_KEY is set"), "{reason}");
+        assert!(!reason.contains("BOGUS"), "{reason}");
+
+        let both = RemoteAuthEnv::from_query_param("tok=0,CLAUDE_CODE_USE_VERTEX").unwrap();
+        let reason = both.mismatch_reason().unwrap();
+        assert!(reason.contains("CLAUDE_CODE_OAUTH_TOKEN is unset") && reason.contains("CLAUDE_CODE_USE_VERTEX"), "{reason}");
+
+        assert!(RemoteAuthEnv::from_query_param("garbage").is_none());
+        assert!(RemoteAuthEnv::from_query_param("").is_none());
     }
 }

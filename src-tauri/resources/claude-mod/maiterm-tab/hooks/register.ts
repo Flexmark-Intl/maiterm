@@ -234,6 +234,34 @@ async function reportAppended($: EngineInterface, to: Link): Promise<void> {
   }
 }
 
+// `{ maiterm_auth_env: { oauth_token, shadowed_by } }` — presence only, never values (§6.1, §9.1).
+// Lets maiTerm verify on remote tabs that an injected `CLAUDE_CODE_OAUTH_TOKEN` survived shell
+// startup and was not outranked by a higher-precedence env var on the remote host (§2.2).
+const SHADOW_BOOL_VARS = ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'] as const
+const SHADOW_VALUE_VARS = ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY'] as const
+
+async function authEnvCheck($: EngineInterface): Promise<Record<string, unknown>> {
+  try {
+    const [tok, ...rest] = await Promise.all([
+      $.env.get('CLAUDE_CODE_OAUTH_TOKEN'),
+      ...SHADOW_BOOL_VARS.map(k => $.env.get(k)),
+      ...SHADOW_VALUE_VARS.map(k => $.env.get(k)),
+    ])
+    const shadowed_by: string[] = []
+    SHADOW_BOOL_VARS.forEach((name, i) => {
+      const v = rest[i]?.trim().toLowerCase()
+      if (v === '1' || v === 'true') shadowed_by.push(name)
+    })
+    SHADOW_VALUE_VARS.forEach((name, i) => {
+      const v = rest[SHADOW_BOOL_VARS.length + i]
+      if (v && v.length > 0) shadowed_by.push(name)
+    })
+    return { maiterm_auth_env: { oauth_token: Boolean(tok && tok.length > 0), shadowed_by } }
+  } catch {
+    return {}
+  }
+}
+
 // `{ maiterm_context: { model, window } }` for the session's current model, or nothing when Claude
 // can't say. The model rides along so maiTerm applies the window only while the transcript still
 // names that model: a `/model` switch otherwise leaves the old window on the new one until a turn ends.
@@ -292,7 +320,7 @@ export const register: Register = on => {
     if (inboxRunning) await $.env.set('MAITERM_MOD_SESSION', e.session_id)
     // The server's reply is the session's standing instructions: the tab and session ids and
     // whatever this tab's features need (the Overlord, tasks, the stack, follow-ups).
-    const priming = await send($, to, e, '&prime=1')
+    const priming = await send($, to, { ...e, ...(await authEnvCheck($)) }, '&prime=1')
     const result = await next(e)
     if (!priming) return result
     return { ...result, additionalContext: [...(result.additionalContext ?? []), priming] }

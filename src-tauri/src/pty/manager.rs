@@ -394,7 +394,24 @@ pub fn spawn_pty(
         // Recorded HERE, from the same resolution, because this is the only place that knows
         // what the shell was actually handed — maiLink §14 serves it rather than guessing from
         // the active account, which a tab stops following the moment someone switches.
-        state.tab_accounts.write().insert(tab_id.to_string(), record);
+        let prev_remote_err = state
+            .tab_accounts
+            .write()
+            .insert(tab_id.to_string(), record)
+            .and_then(|old| old.remote)
+            .is_some_and(|r| r.state == crate::accounts::tab_record::RemoteState::NotApplied);
+        if prev_remote_err {
+            crate::mailink::accounts::emit_remote_account_status(
+                app_handle,
+                &crate::mailink::accounts::RemoteAccountStatusEvent {
+                    tab_id: tab_id.to_string(),
+                    status: "ok",
+                    account_label: None,
+                    reason: None,
+                    source: "clear",
+                },
+            );
+        }
         for (k, v) in set {
             cmd.env(k, v);
         }

@@ -17,6 +17,7 @@ import {
 } from '$lib/tauri/commands';
 import type { RemoteTokenPrep } from '$lib/tauri/commands';
 import { dispatch } from '$lib/stores/notificationDispatch';
+import { claudeStateStore } from '$lib/stores/agentState.svelte';
 
 /** Say that this host is about to be somebody else. Shared so the wording cannot drift. */
 async function announceMiss(
@@ -110,6 +111,7 @@ export function beginRemoteAccount(
       if (!p || p.status !== 'ready' || taken || abandoned) return;
       abandoned = true;
       if (p.handle) await discardRemoteAccountToken(tabId, sshArgs, p.handle).catch(() => {});
+      claudeStateStore.setRemoteAccountError(tabId, p.account_label, why);
       await announceMiss(tabId, p.account_label, p.host, why);
     },
 

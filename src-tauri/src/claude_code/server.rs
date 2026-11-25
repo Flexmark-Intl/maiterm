@@ -6404,6 +6404,29 @@ async fn hooks_handler(
                 hive_session_started(&srv, &tab_id, &session_id, transcript_path.clone());
             }
 
+            // §6.1: verify remote Claude env precedence (CLAUDE_CODE_OAUTH_TOKEN present and not
+            // shadowed by ANTHROPIC_API_KEY / Bedrock / Vertex / Foundry / ANTHROPIC_AUTH_TOKEN).
+            // Fast lock-only precheck avoids any `ps` work on local tabs and unmanaged SSH tabs.
+            if runtime == crate::state::AgentRuntime::Claude && !tab_id.is_empty() {
+                let auth_env = crate::accounts::tab_record::RemoteAuthEnv::from_hook_event(&event)
+                    .or_else(|| {
+                        params
+                            .get("auth_env")
+                            .and_then(|raw| crate::accounts::tab_record::RemoteAuthEnv::from_query_param(raw))
+                    });
+                if let Some(auth_env) = auth_env {
+                    if crate::mailink::accounts::needs_remote_auth_check(&srv.state, &tab_id) {
+                        let state = srv.state.clone();
+                        let app_handle = srv.app_handle.clone();
+                        let tab = tab_id.clone();
+                        let _ = tauri::async_runtime::spawn_blocking(move || {
+                            crate::mailink::accounts::verify_remote_auth_env(&state, &app_handle, &tab, &auth_env);
+                        })
+                        .await;
+                    }
+                }
+            }
+
             emit_dual(&srv.app_handle, "agent-hook-session-start", "claude-hook-session-start", serde_json::json!({
                 "runtime": runtime_key,
                 "session_id": session_id,

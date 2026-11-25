@@ -713,9 +713,32 @@ The same applies above us: a stray `ANTHROPIC_API_KEY` is #3 and outranks our in
 too. That is not hypothetical — this machine has one, and it surfaced during testing as
 `loggedIn: true, authMethod: api_key` on a config dir holding no credential at all.
 
-> **Decision: never treat `loggedIn` as confirmation.** Verify identity **positively** — read
-> `claude auth status --json` and compare `email` / `orgId` against the identity that was
-> intended. A mismatch is an error state shown on the tab, not a warning in a log.
+> **Decision: never treat `loggedIn` as confirmation.** (Revised after live probe, 2026-09-21.)
+>
+> An earlier draft of this section called for reading `claude auth status --json` on the remote
+> and comparing `email` / `orgId` against the intended identity. **That check is impossible for
+> a `setup-token`:** a token has only `user:inference` scope (§8), so `auth status --json`
+> never returns `email` or `orgId` — it returns `authMethod: "oauth_token"` with five fields
+> and no profile, and it returns `loggedIn: true` even for a garbage token.
+>
+> What IS achievable — and what maiTerm checks — is **precedence verification inside the remote
+> Claude session itself** (`SessionStart`, both in the `maiterm-tab` mod and in the fallback
+> remote `settings.json` command hook, with zero extra SSH round trips):
+>
+> - Inspect **presence only** (never values, per §9.1/§9.3) of `CLAUDE_CODE_OAUTH_TOKEN` and
+>   the higher-precedence env rungs (§2.2: `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`,
+>   `CLAUDE_CODE_USE_FOUNDRY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`).
+> - If a managed remote tab's bound SSH session starts Claude with `CLAUDE_CODE_OAUTH_TOKEN`
+>   missing/empty (dropped by shell init, `csh`, `tmux`, `sudo`, or an unconsumed handoff) or
+>   with a higher-precedence env var shadowing it, downgrade the tab's remote record to
+>   `not_applied` (keeping `ssh_pid` bound so maiLink serves `not_applied` and rings the
+>   `account` doorbell), show a persistent error indicator on the desktop tab, and notify.
+> - **Limits kept explicit:** env precedence proves our variable is present and unshadowed by
+>   higher env rungs — it cannot prove which account a token was minted for (§5.1's browser
+>   picker controls that), cannot see a `settings.json` `apiKeyHelper` rung, and cannot detect
+>   a revoked token before the first API call (`StopFailure` / `authentication_failed`). Passing
+>   remote tabs therefore stay `sent_unverified` on maiLink rather than claiming confirmed email
+>   identity.
 
 This is the `absence-read-as-a-claim` defect class the repo has hit six times: a default that is
 correct where it is defined, read by a consumer as a positive assertion of something else.

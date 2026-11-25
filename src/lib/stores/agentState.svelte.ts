@@ -88,6 +88,14 @@ export interface AgentTabSession {
   failure?: string;
 }
 
+/** §6.1: persistent error shown on an SSH tab when a managed remote account failed delivery or
+ *  did not win env precedence at remote `SessionStart` (`CLAUDE_CODE_OAUTH_TOKEN` missing or
+ *  shadowed by `ANTHROPIC_API_KEY` / Bedrock / Vertex / Foundry / `ANTHROPIC_AUTH_TOKEN`). */
+export interface RemoteAccountError {
+  accountLabel: string | null;
+  reason: string;
+}
+
 /** Validate a hook payload's runtime field, defaulting to Claude. */
 function runtimeOf(payload: { runtime?: string }): AgentRuntime {
   const r = payload.runtime;
@@ -173,6 +181,9 @@ class SessionTable {
 
 function createAgentStateStore() {
   const sessions = new SessionTable();
+  // Seeded per tab alongside `sessions` so reading `getRemoteAccountError(tabId)` in
+  // TerminalTabs subscribes only to its own key, never the whole map.
+  const remoteAccountErrors = new SvelteMap<string, RemoteAccountError | null>();
   let stopSeeding: (() => void) | null = null;
   const unlisteners: (() => void)[] = [];
   // tabId → timeout handle for stale tool detection
@@ -372,6 +383,22 @@ function createAgentStateStore() {
       return sessions.get(tabId);
     },
 
+    /** §6.1: remote account error for this tab, if delivery failed or remote SessionStart saw
+     *  the injected token missing/shadowed. */
+    getRemoteAccountError(tabId: string): RemoteAccountError | undefined {
+      return remoteAccountErrors.get(tabId) ?? undefined;
+    },
+
+    /** Set a remote account error badge on `tabId` (e.g. when a handoff is abandoned). */
+    setRemoteAccountError(tabId: string, accountLabel: string | null, reason: string) {
+      remoteAccountErrors.set(tabId, { accountLabel, reason });
+    },
+
+    /** Clear any remote account error badge on `tabId` (e.g. on PTY respawn). */
+    clearRemoteAccountError(tabId: string) {
+      if (remoteAccountErrors.get(tabId) != null) remoteAccountErrors.set(tabId, null);
+    },
+
     /** The tab reads 'active' only because of a background subagent: the main agent's own turn
      *  has ended (Stop since its last prompt). False when unknown. */
     onlySubagentsActive(tabId: string): boolean {
@@ -497,6 +524,9 @@ function createAgentStateStore() {
               for (const tab of pane.tabs) ids.add(tab.id);
           untrack(() => {
             sessions.seed(ids);
+            for (const id of ids) if (!remoteAccountErrors.has(id)) remoteAccountErrors.set(id, null);
+            const goneErr = [...remoteAccountErrors].filter(([id, v]) => v === null && !ids.has(id)).map(([id]) => id);
+            for (const id of goneErr) remoteAccountErrors.delete(id);
             backfill(ids);
           });
         });
@@ -765,6 +795,37 @@ function createAgentStateStore() {
         }
       });
       unlisteners.push(u9);
+
+      const u12 = await listen<{
+        tab_id: string;
+        status: 'not_applied' | 'ok';
+        account_label?: string | null;
+        reason?: string | null;
+        source?: string;
+      }>('remote-account-status', (e) => {
+        const { tab_id, status, account_label, reason, source } = e.payload;
+        if (!tab_id) return;
+        if (status === 'not_applied' && reason) {
+          const prev = remoteAccountErrors.get(tab_id);
+          remoteAccountErrors.set(tab_id, { accountLabel: account_label ?? null, reason });
+          // `source === 'prepare'` already announced via `remoteAccountToken.ts` (`announceMiss`);
+          // `source === 'hook'` comes from remote SessionStart precedence verification (§6.1).
+          if (source === 'hook' && prev?.reason !== reason) {
+            const who = account_label ?? 'the active account';
+            void dispatch(
+              'Agent account not applied',
+              `This remote tab is not running as ${who}: ${reason}.`,
+              'error',
+              { tabId: tab_id },
+            );
+          }
+        } else if (status === 'ok') {
+          if (remoteAccountErrors.get(tab_id) != null) {
+            remoteAccountErrors.set(tab_id, null);
+          }
+        }
+      });
+      unlisteners.push(u12);
 
       // Every listener is attached: from here a hook can't be missed between Rust's answer and
       // the page applying it, so the backfill may run.
