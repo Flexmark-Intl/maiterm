@@ -6959,6 +6959,31 @@ async fn hooks_handler(
         }
 
         HookPhase::Other => {
+            // Antigravity (`agy`) emits `PreInvocation` with `invocationNum > 0` for tool-loop
+            // continuations and reactive wakeups (e.g. background task completion). If maiTerm
+            // restarted mid-turn or a prior Stop exited `watch_agy_permission`, re-arm the screen
+            // watcher here without resetting Files baselines (which `HookPhase::Prompt` owns).
+            if runtime == crate::state::AgentRuntime::Gemini
+                && hook_event_name == "PreInvocation"
+                && !session_id.is_empty()
+            {
+                let tab_id = {
+                    use crate::state::app_state::AgentSessionState;
+                    let mut sessions = srv.state.agent_sessions.write();
+                    if let Some(session) = sessions.get_mut(&session_id) {
+                        if matches!(session.state, AgentSessionState::WaitingInput | AgentSessionState::Stopped) {
+                            session.state = AgentSessionState::Active;
+                        }
+                        Some(session.tab_id.clone())
+                    } else {
+                        None
+                    }
+                }
+                .or(tab_id_from_param);
+                if let Some(tid) = tab_id.filter(|t| !t.is_empty()) {
+                    watch_agy_permission(srv.state.clone(), srv.app_handle.clone(), session_id.clone(), tid);
+                }
+            }
             log::debug!("Claude hook: unhandled event type '{}'", hook_event_name);
         }
     }

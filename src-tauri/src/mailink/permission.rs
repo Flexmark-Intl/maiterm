@@ -149,7 +149,9 @@ const PLAN_FOOTER_MAX_LINES: usize = 6;
 /// Where the dialog's footer starts, when one ends the screen. A tool dialog's footer is the
 /// last non-blank line. The plan dialog's wraps with its path, so it may start a few lines up,
 /// provided nothing between it and the end is blank or a row. Antigravity (`agy`) renders
-/// `↑/↓ Navigate · tab Amend` directly above its 1-line `esc to cancel ... auto · ...` status bar.
+/// `↑/↓ Navigate · tab Amend` (or no `tab Amend` footer on some command prompts) above 0–2
+/// status-bar lines (default `esc to cancel ... auto • ...`, custom `statusLine`, or both when
+/// `stack_with_default: true`).
 fn footer(lines: &[&str]) -> Option<(usize, DialogShape)> {
     let last = lines.iter().rposition(|l| !l.trim().is_empty())?;
     // "Esc to cancel" is Claude's generic dialog footer. The AskUserQuestion selector
@@ -160,16 +162,25 @@ fn footer(lines: &[&str]) -> Option<(usize, DialogShape)> {
     if lines[last].contains("Esc to cancel") && !lines[last].contains("Enter to") {
         return Some((last, DialogShape::Tool));
     }
-    // Antigravity (`agy`) tool-permission dialog: `↑/↓ Navigate · tab Amend` sits either as the
-    // last non-blank line or one line above its 1-line status bar (`esc to cancel ... auto · ...`).
-    if lines[last].contains("tab Amend") {
-        return Some((last, DialogShape::Tool));
-    }
-    if last > 0 && (lines[last].contains("esc to cancel") || lines[last].contains(" · ")) {
-        if let Some(prev) = lines[..last].iter().rposition(|l| !l.trim().is_empty()) {
-            if lines[prev].contains("tab Amend") {
-                return Some((prev, DialogShape::Tool));
-            }
+    // Antigravity (`agy`) tool-permission dialog with `tab Amend`: sits on `last` or up to 2
+    // non-blank status-bar lines above `last` (default status bar, custom `statusLine`, or both
+    // stacked). Stop walking upward at any rule, prompt, or numbered row so old scrollback above
+    // an active input box or shell prompt never matches.
+    let mut non_blank_seen = 0usize;
+    for (idx, l) in lines[..=last].iter().enumerate().rev() {
+        let trimmed = l.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if l.contains("tab Amend") {
+            return Some((idx, DialogShape::Tool));
+        }
+        if is_non_status_trailing_line(l) || row(l).is_some() {
+            break;
+        }
+        non_blank_seen += 1;
+        if non_blank_seen >= 2 {
+            break;
         }
     }
     for i in (last.saturating_sub(PLAN_FOOTER_MAX_LINES - 1)..=last).rev() {
@@ -181,7 +192,119 @@ fn footer(lines: &[&str]) -> Option<(usize, DialogShape)> {
             break;
         }
     }
-    bare_dialog(lines, last)
+    if let Some(bare) = bare_dialog(lines, last) {
+        return Some(bare);
+    }
+    agy_permission_dialog(lines, last)
+}
+
+/// True when a trailing line below a candidate `agy` dialog clearly belongs to an input box,
+/// another dialog type, or a shell prompt rather than `agy`'s hint/status bar.
+fn is_non_status_trailing_line(line: &str) -> bool {
+    let t = line.trim();
+    if t.starts_with('─')
+        || t.starts_with('❯')
+        || t.starts_with('>')
+        || t.contains("Esc to cancel")
+        || t.contains("Enter to confirm")
+        || t.contains("enter Confirm")
+        || t.contains("Enter to select")
+    {
+        return true;
+    }
+    // Shell prompts (`SHELL$ `, `root# `, `host% `) end with a prompt sigil; distinguish a zsh
+    // `%` prompt from a status-line percentage like `12.3%` (digit before `%`).
+    if t.ends_with('$') || t.ends_with('#') || t.ends_with('❯') {
+        return true;
+    }
+    if let Some(before_pct) = t.strip_suffix('%') {
+        if !before_pct.chars().last().is_some_and(|c| c.is_ascii_digit()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// An Antigravity (`agy`) permission prompt rendered without a `tab Amend` line (e.g.
+/// `Run this command?` above `> 1. Yes, run command` … `4. No, cancel`, followed by 0–3 trailing
+/// hint/status-bar lines). Requires strict row numbering (`1..=N`), a `Yes…` first row, at least
+/// one `No…` row, and an `agy` permission question directly above row 1 so ordinary lists and
+/// non-permission pickers never match.
+fn agy_permission_dialog(lines: &[&str], last: usize) -> Option<(usize, DialogShape)> {
+    let mut skipped = 0usize;
+    for (idx, l) in lines[..=last].iter().enumerate().rev() {
+        if l.trim().is_empty() {
+            continue;
+        }
+        if row(l).is_some() || l.starts_with("    ") {
+            let mut rows: Vec<(usize, String)> = Vec::new();
+            let mut cont: Vec<&str> = Vec::new();
+            let mut first_row = idx;
+            let mut walked_to_one = false;
+            for (j, rl) in lines[..=idx].iter().enumerate().rev() {
+                first_row = j;
+                if rl.trim().is_empty() {
+                    return None;
+                }
+                if let Some((n, label)) = row(rl) {
+                    let mut text = label.to_string();
+                    for c in cont.drain(..).rev() {
+                        text.push(' ');
+                        text.push_str(c);
+                    }
+                    rows.push((n, text));
+                    if n == 1 {
+                        walked_to_one = true;
+                        break;
+                    }
+                } else if rl.starts_with("    ") {
+                    cont.push(rl.trim());
+                } else {
+                    return None;
+                }
+            }
+            if !walked_to_one || !cont.is_empty() || rows.len() < 2 {
+                return None;
+            }
+            rows.reverse();
+            if !rows.iter().enumerate().all(|(i, (n, _))| *n == i + 1) {
+                return None;
+            }
+            let has_yes = rows[0].1.starts_with("Yes");
+            let has_no = rows.iter().skip(1).any(|(_, l)| l.starts_with("No"));
+            if !has_yes || !has_no {
+                return None;
+            }
+            let header_lines: Vec<&str> = lines[..first_row]
+                .iter()
+                .rev()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .take_while(|s| {
+                    !s.starts_with('─')
+                        && !s.chars().next().is_some_and(|c| {
+                            ('\u{2800}'..='\u{28ff}').contains(&c) || matches!(c, '○' | '●' | '└')
+                        })
+                })
+                .take(8)
+                .collect();
+            let asks = header_lines.iter().enumerate().any(|(offset, h)| {
+                h.contains("Run this command?")
+                    || h.contains("Allow calling this tool?")
+                    || h.contains("Requesting permission for:")
+                    || (offset < 3 && h.starts_with("Allow ") && h.ends_with('?'))
+            });
+            return asks.then_some((idx + 1, DialogShape::Tool));
+        }
+        if is_non_status_trailing_line(l) {
+            return None;
+        }
+        skipped += 1;
+        if skipped > 3 {
+            return None;
+        }
+    }
+    None
 }
 
 /// A dialog with no footer: the screen ends in its rows (or a row's wrapped continuation),
@@ -302,7 +425,8 @@ pub(crate) fn parse(screen: &str) -> Option<PermissionDialog> {
     // (both change with the width) and the `❯` highlight (arrows at the desk move it) are
     // dropped, so a resize or a moved highlight keeps the id.
     let rule_above = |end: usize| lines[..end].iter().rposition(|l| l.starts_with('─'));
-    let is_agy = lines.get(foot).is_some_and(|l| l.contains("tab Amend"));
+    let is_agy = kind == DialogShape::Tool
+        && !lines.get(foot).is_some_and(|l| l.contains("Esc to cancel"));
     let mut top = rule_above(first_row).unwrap_or(0);
     if is_agy {
         // Antigravity draws no `─` rule directly above its permission prompt; cap the header
@@ -626,5 +750,61 @@ mod tests {
         assert!(!dialog_open(working));
         assert!(!any_dialog_open(working));
         assert_eq!(parse(working), None);
+    }
+
+    #[test]
+    fn reads_agy_command_prompt_and_custom_or_stacked_statusline_variants() {
+        // Real command-permission dialog from agy 1.5.17 (no `tab Amend` line, or with custom/bullet status bar).
+        let agy_cmd_bare = concat!(
+            "Reason: The command triggers domain verification on the remote Resend service, which mutates remote account state in a way that cannot be directly reverted.\n",
+            "Requesting permission for:\n",
+            "  resend domains verify 3b0d3940-81c3-4e24-9bdc-e5538cbe9931 --json\n",
+            "\n",
+            "Run this command?\n",
+            "> 1. Yes, run command\n",
+            "  2. Yes, and always allow in this conversation for commands that start with 'resend'\n",
+            "  3. Yes, and always allow for commands that start with 'resend' (Persist to settings.json)\n",
+            "  4. No, cancel\n",
+        );
+        let d_bare = parse(agy_cmd_bare).expect("bare agy command permission dialog parsed");
+        assert_eq!(d_bare.shape, DialogShape::Tool);
+        assert_eq!(d_bare.options.len(), 4);
+        assert_eq!(d_bare.options[0], "Yes, run command");
+        assert_eq!(d_bare.options[3], "No, cancel");
+        assert!(d_bare.text.contains("resend domains verify"), "{}", d_bare.text);
+        assert!(d_bare.text.contains("Run this command?"), "{}", d_bare.text);
+        assert!(dialog_open(agy_cmd_bare));
+        assert!(footer_open(agy_cmd_bare));
+        assert_eq!(permission_key_for(Some(&d_bare), true, "Esc"), Ok(PermissionKey::Esc));
+
+        // Same command prompt above custom statusLine (`stack_with_default: false` — no `esc to cancel` or ` · `).
+        let agy_cmd_custom_sl = format!(
+            "{agy_cmd_bare}\nMACSTUDIO dprusak[~/projects/maiterm] (main) gemini-3-pro high 12.3%\n"
+        );
+        let d_sl = parse(&agy_cmd_custom_sl).expect("agy command prompt above custom statusLine");
+        assert_eq!(d_sl.options, d_bare.options);
+        assert_eq!(d_sl.digest, d_bare.digest);
+
+        // Same command prompt above `tab Amend` + custom statusLine, and above stacked 2-line status bar.
+        let agy_cmd_tab_custom = format!(
+            "{agy_cmd_bare}\n  ↑/↓ Navigate • tab Amend\nMACSTUDIO dprusak[~/projects/maiterm] (main) gemini-3-pro high 12.3%\n"
+        );
+        assert_eq!(parse(&agy_cmd_tab_custom).expect("tab Amend + custom statusLine").options, d_bare.options);
+
+        let agy_cmd_stacked = format!(
+            "{agy_cmd_bare}\n  ↑/↓ Navigate · tab Amend\nesc to cancel                                             auto • gemini-3-pro • high\nMACSTUDIO dprusak[~/projects/maiterm] (main) gemini-3-pro high 12.3%\n"
+        );
+        assert_eq!(parse(&agy_cmd_stacked).expect("tab Amend + stacked 2-line statusLine").options, d_bare.options);
+
+        // Dismissed dialog left in scrollback above a shell prompt or input box must NOT match.
+        let after_exit = format!("{agy_cmd_bare}\nSHELL$ ");
+        assert_eq!(parse(&after_exit), None);
+        assert!(!dialog_open(&after_exit));
+
+        let after_input_box = format!(
+            "{agy_cmd_bare}\n────────────────────────────────────────\n> \n────────────────────────────────────────\nMACSTUDIO dprusak[~/projects/maiterm] (main) gemini-3-pro high 12.3%\n"
+        );
+        assert_eq!(parse(&after_input_box), None);
+        assert!(!dialog_open(&after_input_box));
     }
 }
