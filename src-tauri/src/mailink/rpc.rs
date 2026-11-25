@@ -61,6 +61,28 @@ pub(crate) async fn request_with_timeout(
     request_on(app, handle, EVENT, window_label, verb, args, timeout).await
 }
 
+/// Removes an `AppState::ide_pending` entry if `request_on` exits early (emit failure, timeout,
+/// channel disconnect, or the caller dropping the future mid-await when an HTTP client disconnects).
+struct PendingRpcGuard<'a> {
+    app: &'a AppState,
+    request_id: String,
+    completed: bool,
+}
+
+impl PendingRpcGuard<'_> {
+    fn disarm(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for PendingRpcGuard<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.app.ide_pending.write().remove(&self.request_id);
+        }
+    }
+}
+
 /// The same request on another event: a feature whose verbs must not ride this one's
 /// dispatcher (the Hive's, hive/rpc.rs) gets its own listener, answered through the same map.
 pub(crate) async fn request_on(
@@ -79,21 +101,22 @@ pub(crate) async fn request_on(
     let request_id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = tokio::sync::oneshot::channel::<Value>();
     app.ide_pending.write().insert(request_id.clone(), tx);
+    let mut guard = PendingRpcGuard {
+        app,
+        request_id: request_id.clone(),
+        completed: false,
+    };
     let payload = json!({ "request_id": request_id, "verb": verb, "args": args });
     if handle.emit_to(window_label, event, payload).is_err() {
-        app.ide_pending.write().remove(&request_id);
         return Outcome::NoWindow;
     }
     match tokio::time::timeout(timeout, rx).await {
-        Ok(Ok(v)) => Outcome::Answered(v),
-        Ok(Err(_)) => {
-            app.ide_pending.write().remove(&request_id);
-            Outcome::Disconnected
+        Ok(Ok(v)) => {
+            guard.disarm();
+            Outcome::Answered(v)
         }
-        Err(_) => {
-            app.ide_pending.write().remove(&request_id);
-            Outcome::Timeout
-        }
+        Ok(Err(_)) => Outcome::Disconnected,
+        Err(_) => Outcome::Timeout,
     }
 }
 
@@ -139,5 +162,32 @@ mod tests {
 
         let r = response(Outcome::NoWindow);
         assert_eq!((r["accepted"].as_bool(), r["confirmed"].as_bool()), (Some(false), Some(true)));
+    }
+
+    #[test]
+    fn pending_rpc_guard_cleans_up_on_drop_and_skips_when_disarmed() {
+        let app = AppState::new();
+        let (tx_drop, _rx_drop) = tokio::sync::oneshot::channel();
+        let (tx_keep, _rx_keep) = tokio::sync::oneshot::channel();
+        app.ide_pending.write().insert("rpc-drop".into(), tx_drop);
+        app.ide_pending.write().insert("rpc-keep".into(), tx_keep);
+
+        {
+            let _cancelled = PendingRpcGuard {
+                app: &app,
+                request_id: "rpc-drop".into(),
+                completed: false,
+            };
+            let mut answered = PendingRpcGuard {
+                app: &app,
+                request_id: "rpc-keep".into(),
+                completed: false,
+            };
+            answered.disarm();
+        }
+
+        let pending = app.ide_pending.read();
+        assert!(!pending.contains_key("rpc-drop"), "dropped future must remove ide_pending entry");
+        assert!(pending.contains_key("rpc-keep"), "disarmed guard must not touch ide_pending");
     }
 }

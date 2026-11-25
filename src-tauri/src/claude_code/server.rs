@@ -155,17 +155,30 @@ struct ServerState {
 /// Emit an event under both its runtime-neutral name and the legacy claude-* name,
 /// so a frontend listener on either keeps working during the rename's soak. The
 /// legacy emit is dropped in a later release once all listeners are migrated.
-fn emit_dual(app: &AppHandle, agent_event: &str, legacy_event: &str, payload: Value) {
-    let _ = app.emit(agent_event, payload.clone());
-    let _ = app.emit(legacy_event, payload);
+/// Returns `true` if at least one emit succeeded.
+fn emit_dual(app: &AppHandle, agent_event: &str, legacy_event: &str, payload: Value) -> bool {
+    let mut ok = false;
+    match app.emit(agent_event, payload.clone()) {
+        Ok(()) => ok = true,
+        Err(e) => log::warn!("emit({}) failed: {}", agent_event, e),
+    }
+    match app.emit(legacy_event, payload) {
+        Ok(()) => ok = true,
+        Err(e) => log::warn!("emit({}) failed: {}", legacy_event, e),
+    }
+    ok
 }
-fn emit_dual_to(app: &AppHandle, label: &str, agent_event: &str, legacy_event: &str, payload: Value) {
-    if let Err(e) = app.emit_to(label, agent_event, payload.clone()) {
-        log::warn!("emit_to({}, {}) failed: {}", label, agent_event, e);
+fn emit_dual_to(app: &AppHandle, label: &str, agent_event: &str, legacy_event: &str, payload: Value) -> bool {
+    let mut ok = false;
+    match app.emit_to(label, agent_event, payload.clone()) {
+        Ok(()) => ok = true,
+        Err(e) => log::warn!("emit_to({}, {}) failed: {}", label, agent_event, e),
     }
-    if let Err(e) = app.emit_to(label, legacy_event, payload) {
-        log::warn!("emit_to({}, {}) failed: {}", label, legacy_event, e);
+    match app.emit_to(label, legacy_event, payload) {
+        Ok(()) => ok = true,
+        Err(e) => log::warn!("emit_to({}, {}) failed: {}", label, legacy_event, e),
     }
+    ok
 }
 
 /// Sessions with a [`watch_unattributed_prompt`] running, so a repeated Notification for the
@@ -4900,13 +4913,6 @@ async fn process_message(
                             call_started_at.elapsed().as_millis()
                         );
                     }
-                    if let Some(ref label) = target_window {
-                        emit_dual_to(app_handle, label, "agent-ide-tool", "claude-code-tool", payload);
-                    } else {
-                        emit_dual(app_handle, "agent-ide-tool", "claude-code-tool", payload);
-                    }
-
-                    let timeout = frontend_tool_timeout(&tool_name);
                     let mut guard = PendingRequestGuard {
                         state,
                         request_id: request_id.clone(),
@@ -4917,6 +4923,34 @@ async fn process_message(
                         trace_task,
                         completed: false,
                     };
+
+                    let delivered = if let Some(ref label) = target_window {
+                        emit_dual_to(app_handle, label, "agent-ide-tool", "claude-code-tool", payload)
+                    } else {
+                        emit_dual(app_handle, "agent-ide-tool", "claude-code-tool", payload)
+                    };
+                    if !delivered {
+                        guard.finish_and_remove();
+                        log::warn!(
+                            "Tool event delivery failed: {} req={} tab={} window={} elapsed={}ms",
+                            tool_name,
+                            req_short,
+                            tab_short,
+                            window_display,
+                            call_started_at.elapsed().as_millis()
+                        );
+                        let resp = JsonRpcResponse::error(
+                            id,
+                            -32603,
+                            format!(
+                                "Failed to deliver tool request '{}' to window '{}'",
+                                tool_name, window_display
+                            ),
+                        );
+                        return Some(serde_json::to_string(&resp).unwrap());
+                    }
+
+                    let timeout = frontend_tool_timeout(&tool_name);
 
                     match tokio::time::timeout(timeout, rx).await {
                         Ok(Ok(result)) => {
