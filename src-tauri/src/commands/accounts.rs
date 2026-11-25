@@ -608,6 +608,38 @@ mod tests {
         let _ = child.lock().wait();
         unregister_login(id);
     }
+
+    #[test]
+    fn pty_command_wraps_windows_batch_shims_in_cmd_exe() {
+        use std::ffi::OsStr;
+        use std::path::Path;
+
+        let npm_cmd = Path::new(r"C:\Users\ann\AppData\Roaming\npm\claude.cmd");
+        let win_cmd = super::pty_command_for_cli_impl(npm_cmd, &["setup-token"], true);
+        assert_eq!(
+            win_cmd.get_argv(),
+            &[
+                OsStr::new("cmd.exe"),
+                OsStr::new("/d"),
+                OsStr::new("/c"),
+                npm_cmd.as_os_str(),
+                OsStr::new("setup-token"),
+            ]
+        );
+
+        let bat_upper = Path::new(r"C:\bin\claude.BAT");
+        let win_bat = super::pty_command_for_cli_impl(bat_upper, &["setup-token"], true);
+        assert_eq!(win_bat.get_argv()[0], OsStr::new("cmd.exe"));
+        assert_eq!(win_bat.get_argv()[3], bat_upper.as_os_str());
+
+        let native_exe = Path::new(r"C:\Users\ann\.local\bin\claude.exe");
+        let win_exe = super::pty_command_for_cli_impl(native_exe, &["setup-token"], true);
+        assert_eq!(win_exe.get_argv(), &[native_exe.as_os_str(), OsStr::new("setup-token")]);
+
+        // On Unix, a `.cmd` path is never wrapped in `cmd.exe`.
+        let unix_cmd = super::pty_command_for_cli_impl(npm_cmd, &["setup-token"], false);
+        assert_eq!(unix_cmd.get_argv(), &[npm_cmd.as_os_str(), OsStr::new("setup-token")]);
+    }
 }
 
 /// Stop a sign-in that is still running. The child is killed, so the browser flow cannot
@@ -1379,6 +1411,42 @@ fn extract_setup_token(transcript: &str, require_terminated: bool) -> Option<acc
 /// now doubled: the TUI wraps its URL in an OSC 8 hyperlink and splits it across rows, and the
 /// buffer holding it is secret. The shim's capture is also the *right* link — the localhost
 /// variant the runtime was about to open, not the manual one it prints on screen.
+/// Whether `cli` is a Windows batch shim (`.cmd`/`.bat`) that `CreateProcessW` — and
+/// therefore `portable_pty::CommandBuilder` — cannot execute directly without `cmd.exe /d /c`.
+fn is_windows_batch_shim(cli: &std::path::Path) -> bool {
+    cli.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
+}
+
+/// Build a `portable_pty::CommandBuilder` for `cli` and `args`.
+///
+/// Unlike `std::process::Command`, `portable_pty::CommandBuilder` passes `exe` directly to
+/// `CreateProcessW` on Windows without `.cmd`/`.bat` translation, so an npm shim like
+/// `claude.cmd` fails with `ERROR_BAD_EXE_FORMAT` (193) unless launched via `cmd.exe /d /c`.
+fn pty_command_for_cli_impl(
+    cli: &std::path::Path,
+    args: &[&str],
+    windows: bool,
+) -> portable_pty::CommandBuilder {
+    let mut cmd = if windows && is_windows_batch_shim(cli) {
+        let mut c = portable_pty::CommandBuilder::new("cmd.exe");
+        c.args(["/d", "/c"]);
+        c.arg(cli.as_os_str());
+        c
+    } else {
+        portable_pty::CommandBuilder::new(cli)
+    };
+    for arg in args {
+        cmd.arg(arg);
+    }
+    cmd
+}
+
+fn pty_command_for_cli(cli: &std::path::Path, args: &[&str]) -> portable_pty::CommandBuilder {
+    pty_command_for_cli_impl(cli, args, cfg!(windows))
+}
+
 async fn run_mint_on_pty(
     app: &tauri::AppHandle,
     rt: Runtime,
@@ -1386,7 +1454,7 @@ async fn run_mint_on_pty(
     timeout_secs: Option<u64>,
     open_with: Option<String>,
 ) -> Result<accounts::vault::Secret, String> {
-    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use portable_pty::{native_pty_system, PtySize};
 
     let profile = rt.profile();
     let account_id = account_id.to_string();
@@ -1407,8 +1475,7 @@ async fn run_mint_on_pty(
             .openpty(PtySize { rows: 50, cols: MINT_PTY_COLS, pixel_width: 0, pixel_height: 0 })
             .map_err(|e| format!("could not open a terminal for the mint: {e}"))?;
 
-        let mut cmd = CommandBuilder::new(&cli);
-        cmd.arg("setup-token");
+        let mut cmd = pty_command_for_cli(&cli, &["setup-token"]);
         cmd.env(&config_env, root.to_string_lossy().to_string());
         for var in &scrub {
             cmd.env_remove(var);

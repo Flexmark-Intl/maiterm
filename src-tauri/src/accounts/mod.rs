@@ -417,7 +417,7 @@ pub fn cli_candidates(profile: &RuntimeProfile) -> Vec<PathBuf> {
 }
 
 /// Extensions that `std::process::Command::new` can spawn on Windows: `CreateProcessW` launches
-/// `.exe`/`.com` directly and Rust's `Command` invokes `%COMSPEC%` for `.bat`/`.cmd`. Other
+/// `.exe`/`.com` directly and Rust's `Command` invokes `cmd.exe` for `.bat`/`.cmd`. Other
 /// default `PATHEXT` entries (`.vbs`, `.js`, `.msc`, …) fail with `ERROR_BAD_EXE_FORMAT`.
 const WINDOWS_LAUNCHABLE_EXTS: &[&str] = &[".com", ".exe", ".bat", ".cmd"];
 
