@@ -993,6 +993,61 @@ fn symlink(source: &Path, link: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Record that `account_id`'s remote token (matching `expected_minted_at`) was actually staged
+/// onto `host` (§9.4). Returns `true` when `remote_seen_hosts` changed and needs persisting.
+///
+/// Checking `expected_minted_at` prevents a push that completed mid-flight from polluting a
+/// removed or freshly re-minted token's inventory.
+pub fn record_remote_seen_host(
+    prefs: &mut crate::state::Preferences,
+    account_id: &str,
+    expected_minted_at: Option<u64>,
+    host: &str,
+) -> bool {
+    let Some(expected) = expected_minted_at else {
+        return false;
+    };
+    let host = host.trim().to_ascii_lowercase();
+    if host.is_empty() {
+        return false;
+    }
+    let Some(account) = prefs.managed_accounts.iter_mut().find(|a| a.id == account_id) else {
+        return false;
+    };
+    if account.token_minted_at != Some(expected) {
+        return false;
+    }
+    if account.remote_seen_hosts.iter().any(|h| h.eq_ignore_ascii_case(&host)) {
+        return false;
+    }
+    account.remote_seen_hosts.push(host);
+    true
+}
+
+/// Keep backend-owned `remote_seen_hosts` intact across frontend `set_preferences` writes while
+/// the account still holds the same token (`token_minted_at`), and clear it when the token is
+/// removed or replaced by a new mint.
+pub fn preserve_remote_seen_hosts(
+    incoming: &mut crate::state::Preferences,
+    existing: &crate::state::Preferences,
+) {
+    for acct in &mut incoming.managed_accounts {
+        let same_token = acct.token_minted_at.is_some()
+            && existing
+                .managed_accounts
+                .iter()
+                .find(|e| e.id == acct.id)
+                .is_some_and(|e| e.token_minted_at == acct.token_minted_at);
+        if same_token {
+            if let Some(prev) = existing.managed_accounts.iter().find(|e| e.id == acct.id) {
+                acct.remote_seen_hosts = prev.remote_seen_hosts.clone();
+            }
+        } else {
+            acct.remote_seen_hosts.clear();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1455,6 +1510,7 @@ mod tests {
                 remote_hosts: vec![],
                 token_minted_at: None,
                 remote_all_hosts: false,
+                remote_seen_hosts: vec![],
             });
             p.active_account_ids.insert("claude".into(), id.to_string());
         }
@@ -1493,6 +1549,7 @@ mod tests {
                 remote_hosts: hosts.iter().map(|h| h.to_string()).collect(),
                 token_minted_at: tok.then_some(1),
                 remote_all_hosts: *all,
+                remote_seen_hosts: vec![],
             });
         }
         if let Some(a) = active {
@@ -1680,5 +1737,58 @@ mod tests {
                 "{required} can answer instead of the account's own login and must be scrubbed"
             );
         }
+    }
+
+    #[test]
+    fn record_remote_seen_host_dedups_normalizes_and_checks_token_generation() {
+        let mut prefs = prefs_with_remotes(&[("work", &[], true, true)], Some("work"));
+        prefs.managed_accounts[0].token_minted_at = Some(1700);
+
+        // First push records normalized lowercase host.
+        assert!(record_remote_seen_host(&mut prefs, "work", Some(1700), " EWS@Nova "));
+        assert_eq!(prefs.managed_accounts[0].remote_seen_hosts, vec!["ews@nova"]);
+
+        // Repeat (even in different case) is a no-op.
+        assert!(!record_remote_seen_host(&mut prefs, "work", Some(1700), "ews@nova"));
+        assert!(!record_remote_seen_host(&mut prefs, "work", Some(1700), "EWS@NOVA"));
+
+        // Second distinct host appends in order.
+        assert!(record_remote_seen_host(&mut prefs, "work", Some(1700), "root@eca"));
+        assert_eq!(prefs.managed_accounts[0].remote_seen_hosts, vec!["ews@nova", "root@eca"]);
+
+        // Stale push from an earlier or removed token must not pollute the current token.
+        assert!(!record_remote_seen_host(&mut prefs, "work", Some(1600), "stale@host"));
+        assert!(!record_remote_seen_host(&mut prefs, "work", None, "none@host"));
+        assert!(!record_remote_seen_host(&mut prefs, "work", Some(1700), "   "));
+        assert_eq!(prefs.managed_accounts[0].remote_seen_hosts, vec!["ews@nova", "root@eca"]);
+    }
+
+    #[test]
+    fn preserve_remote_seen_hosts_keeps_inventory_for_same_token_and_clears_on_remove_or_remint() {
+        let mut existing = prefs_with_remotes(&[("work", &[], true, true)], Some("work"));
+        existing.managed_accounts[0].token_minted_at = Some(1700);
+        existing.managed_accounts[0].remote_seen_hosts = vec!["ews@nova".into(), "root@eca".into()];
+
+        // Unrelated preference save (frontend has stale empty seen_hosts) preserves backend inventory.
+        let mut incoming_same = existing.clone();
+        incoming_same.managed_accounts[0].remote_seen_hosts.clear();
+        incoming_same.managed_accounts[0].remote_all_hosts = false;
+        preserve_remote_seen_hosts(&mut incoming_same, &existing);
+        assert_eq!(
+            incoming_same.managed_accounts[0].remote_seen_hosts,
+            vec!["ews@nova", "root@eca"]
+        );
+
+        // Removing the token clears remote_seen_hosts.
+        let mut incoming_removed = existing.clone();
+        incoming_removed.managed_accounts[0].token_minted_at = None;
+        preserve_remote_seen_hosts(&mut incoming_removed, &existing);
+        assert!(incoming_removed.managed_accounts[0].remote_seen_hosts.is_empty());
+
+        // Minting a new token (different token_minted_at) clears old token's inventory.
+        let mut incoming_reminted = existing.clone();
+        incoming_reminted.managed_accounts[0].token_minted_at = Some(1800);
+        preserve_remote_seen_hosts(&mut incoming_reminted, &existing);
+        assert!(incoming_reminted.managed_accounts[0].remote_seen_hosts.is_empty());
     }
 }

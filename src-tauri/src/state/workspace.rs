@@ -1834,11 +1834,19 @@ pub struct ManagedAccount {
     /// problem created by resolving across all accounts. Since only the active account is
     /// consulted, two accounts each saying "cover everything when I am in use" cannot contend.
     ///
-    /// **It trades away the inventory.** With this on, `remote_hosts` is empty and nothing
-    /// records where the token actually went — see `docs/login.md` §9.4, whose revocation story
-    /// otherwise rests on that list being the only such record.
+    /// Actual delivery is still tracked in `remote_seen_hosts`, so turning this on no longer
+    /// leaves the user without an inventory of where the token went (§9.4).
     #[serde(default)]
     pub remote_all_hosts: bool,
+    /// SSH hosts this account's current remote token has actually been staged onto (§9.4).
+    ///
+    /// Backend-owned: appended by `prepare_remote_account_token` whenever a push succeeds
+    /// (`ready`), preserved across frontend `set_preferences` writes while `token_minted_at`
+    /// matches, and cleared when the token is removed or re-minted. Derived from what happened
+    /// rather than from configuration, so removing a host from `remote_hosts` or using
+    /// `remote_all_hosts` still leaves an honest inventory of where the standing credential went.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_seen_hosts: Vec<String>,
     /// When the remote token was minted, unix seconds. Expiry is DERIVED from this
     /// (`minted_at` + 1 year), never parsed out of a credential blob (§7).
     #[serde(default, skip_serializing_if = "Option::is_none")]

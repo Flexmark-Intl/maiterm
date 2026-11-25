@@ -1325,6 +1325,7 @@ pub(crate) mod tests {
             remote_hosts: vec![],
             token_minted_at: None,
             remote_all_hosts: false,
+            remote_seen_hosts: vec![],
         });
         p.active_account_ids.insert("claude".into(), id.into());
         p

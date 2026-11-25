@@ -526,9 +526,11 @@
     busy = true;
     error = null;
     notice = null;
-    // Read before the patch clears it: the notice below is the last place it is shown, and it
-    // is what the user matches against claude.ai's list of identical "Claude Code" rows.
+    // Read before the patch clears them: the notice below is the last place they are shown,
+    // matching claude.ai's list of identical "Claude Code" rows and telling the user which hosts
+    // received this token.
     const mintedAt = account.token_minted_at;
+    const seenHosts = [...(account.remote_seen_hosts ?? [])];
     try {
       // **Keychain FIRST, state second — the opposite of `removeAccount` below, and for a
       // reason specific to this pair rather than a contradiction of it.**
@@ -551,11 +553,14 @@
         token_minted_at: undefined,
         remote_hosts: [],
         remote_all_hosts: false,
+        remote_seen_hosts: [],
       });
       hasToken = { ...hasToken, [account.id]: false };
       notice =
         `Removed the remote token for ${account.label}. Hosts that already have it keep ` +
-        `working until it expires. To cut it off, delete it on claude.ai under Settings → ` +
+        `working until it expires` +
+        (seenHosts.length ? ` (hosts this token reached: ${seenHosts.join(', ')})` : '') +
+        `. To cut it off, delete it on claude.ai under Settings → ` +
         `Claude Code → Authorization tokens` +
         (mintedAt ? ` — the entry connected ${mintedOn(mintedAt)}.` : '.');
     } catch (e) {
@@ -888,6 +893,19 @@
                       Add host
                     </Button>
                   </form>
+
+                  {#if (account.remote_seen_hosts ?? []).length}
+                    <div class="seen-hosts">
+                      <span class="seen-label">Hosts this token has reached</span>
+                      <ul class="hosts" aria-label={`Hosts ${account.label}'s token has reached`}>
+                        {#each account.remote_seen_hosts ?? [] as host (host)}
+                          <li class="host seen"><span class="host-name">{host}</span></li>
+                        {/each}
+                      </ul>
+                    </div>
+                  {:else if account.remote_all_hosts}
+                    <p class="remote-hint">No SSH hosts have received this token yet.</p>
+                  {/if}
                 {/if}
               </div>
 
@@ -1002,7 +1020,7 @@
       // Record BEFORE closing, same reason as the setup modal: closing destroys the component
       // that owns the promise, so a failure would have nowhere to report.
       try {
-        await patchAccount(acct.id, { token_minted_at: mint.minted_at });
+        await patchAccount(acct.id, { token_minted_at: mint.minted_at, remote_seen_hosts: [] });
         notice =
           `Remote token ready for ${acct.label}` +
           (mint.identity.email && mint.identity.email !== acct.email
@@ -1428,6 +1446,27 @@
   .host-name {
     min-width: 0;
     overflow-wrap: anywhere;
+  }
+
+  .seen-hosts {
+    border-top: 1px dashed var(--bg-light);
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin-top: 2px;
+    padding-top: 7px;
+  }
+
+  .seen-label {
+    color: var(--fg-dim);
+    font-size: 0.72rem;
+    font-weight: 500;
+  }
+
+  .host.seen {
+    background: transparent;
+    color: var(--fg-dim);
+    padding: 1px 7px;
   }
 
   .host-x {

@@ -425,11 +425,11 @@
             </li>
             <li class="fact">
               <details>
-                <summary>Only named hosts leave a record of where it went</summary>
+                <summary>maiTerm records every host it sends this token to</summary>
                 <p>
-                  Revoking the token cuts off every host at once, but the list of hosts you name is
-                  the only note of where it went. Turn on “every SSH host” and there is no such list
-                  to consult later.
+                  Each time maiTerm stages the token onto an SSH host, that host is recorded on the
+                  account card — even when “Use on every SSH host” is on — so you always have a
+                  record of where the credential went if you need to revoke it on claude.ai.
                 </p>
               </details>
             </li>

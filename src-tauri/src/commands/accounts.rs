@@ -1977,12 +1977,13 @@ impl RemoteTokenPrep {
 /// would be indistinguishable from success.
 #[tauri::command]
 pub async fn prepare_remote_account_token(
+    app: tauri::AppHandle,
     state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
     tab_id: String,
     ssh_args: String,
     bind_now: Option<bool>,
 ) -> Result<RemoteTokenPrep, String> {
-    let prep = match prepare_inner(state.inner(), &tab_id, &ssh_args).await {
+    let (prep, minted_at) = match prepare_inner(state.inner(), &tab_id, &ssh_args).await {
         Ok(p) => p,
         Err(e) => {
             // No outcome to record — but an earlier session's record must not stand in for it.
@@ -1990,6 +1991,27 @@ pub async fn prepare_remote_account_token(
             return Err(e);
         }
     };
+    // Record the host on the account's inventory whenever the token actually landed there (§9.4).
+    // Even if the caller later discards the handoff file, the credential left this machine.
+    if prep.status == "ready" {
+        if let (Some(acct_id), Some(host)) = (prep.account_id.as_deref(), prep.host.as_deref()) {
+            let changed = {
+                let mut data = state.app_data.write();
+                if accounts::record_remote_seen_host(&mut data.preferences, acct_id, minted_at, host) {
+                    Some(data.clone())
+                } else {
+                    None
+                }
+            };
+            if let Some(data_clone) = changed {
+                if let Err(e) = crate::state::save_state(&data_clone) {
+                    log::warn!("accounts: failed to persist remote_seen_hosts: {e}");
+                }
+                use tauri::Emitter;
+                let _ = app.emit("preferences-changed", &data_clone.preferences);
+            }
+        }
+    }
     // Record how far the handoff got, for maiLink §14. `ready` is recorded as SENT — never as
     // applied: nothing can read back which account a token is (login.md §2.4), and a bad one
     // falls through to the host's own login instead of failing (§6.1). An abandoned prep is
@@ -2025,12 +2047,12 @@ async fn prepare_inner(
     state: &std::sync::Arc<crate::state::AppState>,
     tab_id: &str,
     ssh_args: &str,
-) -> Result<RemoteTokenPrep, String> {
+) -> Result<(RemoteTokenPrep, Option<u64>), String> {
     let (tab_id, ssh_args) = (tab_id.to_string(), ssh_args.to_string());
     // A tab id is a UUID everywhere it is minted. Anything else is not ours to name a file
     // after, let alone interpolate into a remote shell command.
     if !accounts::remote::is_safe_handle(&tab_id) {
-        return Ok(RemoteTokenPrep::not_applicable());
+        return Ok((RemoteTokenPrep::not_applicable(), None));
     }
 
     // The stored ssh value is free-form and routinely carries flags (`-x -C ews@nova`,
@@ -2047,7 +2069,7 @@ async fn prepare_inner(
             // The plan goes with the token: without it the remote cannot tell what the account is
             // entitled to and silently resolves a different model. See `stage_contents`.
             Some(a) => (a.id.clone(), a.label.clone(), a.plan.clone(), a.token_minted_at),
-            None => return Ok(RemoteTokenPrep::not_applicable()),
+            None => return Ok((RemoteTokenPrep::not_applicable(), None)),
         }
     };
 
@@ -2063,7 +2085,7 @@ async fn prepare_inner(
             .unwrap_or(0);
         if now > minted.saturating_add(accounts::TOKEN_LIFETIME_SECS) {
             log::warn!("accounts: the remote token for {account_id} has expired — not sending it");
-            return Ok(RemoteTokenPrep {
+            return Ok((RemoteTokenPrep {
                 status: "missing_credential",
                 export: None,
                 account_label: Some(label),
@@ -2071,7 +2093,7 @@ async fn prepare_inner(
                 detail: Some("its remote token has expired — mint a new one in Preferences → Accounts".into()),
                 account_id: Some(account_id),
                 handle: None,
-            });
+            }, minted_at));
         }
     }
 
@@ -2090,7 +2112,7 @@ async fn prepare_inner(
                 "accounts: {target} is enabled for account {account_id} but its token is not in \
                  the vault — injecting nothing, so the host keeps its own login"
             );
-            return Ok(RemoteTokenPrep {
+            return Ok((RemoteTokenPrep {
                 status: "missing_credential",
                 export: None,
                 account_label: Some(label),
@@ -2102,11 +2124,11 @@ async fn prepare_inner(
                 ),
                 account_id: Some(account_id.clone()),
                 handle: None,
-            });
+            }, minted_at));
         }
         Err(e) => {
             log::warn!("accounts: could not read the token for {account_id}: {e}");
-            return Ok(RemoteTokenPrep {
+            return Ok((RemoteTokenPrep {
                 status: "failed",
                 export: None,
                 account_label: Some(label),
@@ -2114,7 +2136,7 @@ async fn prepare_inner(
                 detail: Some(format!("the keychain could not be read ({e})")),
                 account_id: Some(account_id.clone()),
                 handle: None,
-            });
+            }, minted_at));
         }
     };
 
@@ -2123,7 +2145,7 @@ async fn prepare_inner(
     // a computer we do not own.
     if !token.looks_like_setup_token() {
         log::warn!("accounts: the vault entry for {account_id} is not a setup-token — not sending it");
-        return Ok(RemoteTokenPrep {
+        return Ok((RemoteTokenPrep {
             status: "missing_credential",
             export: None,
             account_label: Some(label),
@@ -2131,7 +2153,7 @@ async fn prepare_inner(
             detail: Some("its stored remote token is not in the expected form — mint it again".into()),
             account_id: Some(account_id.clone()),
             handle: None,
-        });
+        }, minted_at));
     }
 
     let handle = accounts::remote::handoff_handle(&tab_id).ok_or_else(|| "unusable tab id".to_string())?;
@@ -2140,7 +2162,7 @@ async fn prepare_inner(
     let contents = accounts::remote::stage_contents(token.expose(), plan.as_deref());
     if let Err(e) = run_ssh(&ssh_args, &script, Some(&contents)).await {
         log::warn!("accounts: could not place the token on {target}: {e}");
-        return Ok(RemoteTokenPrep {
+        return Ok((RemoteTokenPrep {
             status: "failed",
             export: None,
             account_label: Some(label),
@@ -2148,10 +2170,10 @@ async fn prepare_inner(
             detail: Some(e),
             account_id: Some(account_id.clone()),
             handle: None,
-        });
+        }, minted_at));
     }
 
-    Ok(RemoteTokenPrep {
+    Ok((RemoteTokenPrep {
         status: "ready",
         export: accounts::remote::export_fragment(&handle),
         account_label: Some(label),
@@ -2159,7 +2181,7 @@ async fn prepare_inner(
         detail: None,
         account_id: Some(account_id),
         handle: Some(handle),
-    })
+    }, minted_at))
 }
 
 /// Take back a handoff file that is not going to be used.

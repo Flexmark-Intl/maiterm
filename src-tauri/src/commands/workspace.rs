@@ -1875,6 +1875,10 @@ pub fn set_preferences(app: tauri::AppHandle, state: State<'_, Arc<AppState>>, m
         // list, so a wholesale replace here would wipe every paired phone on any
         // unrelated preference change. Preserve the stored value.
         preferences.mailink_devices = app_data.preferences.mailink_devices.clone();
+        // `remote_seen_hosts` is backend-owned (recorded when `prepare_remote_account_token`
+        // actually stages a token onto a host). Preserve it while the account keeps the same
+        // token (`token_minted_at`) so concurrent preference writes can't drop seen hosts.
+        crate::accounts::preserve_remote_seen_hosts(&mut preferences, &app_data.preferences);
         let excludes_changed = app_data.preferences.file_tree_exclude != preferences.file_tree_exclude;
         let git_changed = app_data.preferences.file_tree_git != preferences.file_tree_git;
         // Agent marks start or stop reaching the open trees at once.

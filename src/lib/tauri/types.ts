@@ -327,6 +327,9 @@ export interface ManagedAccount {
    *  question with no answer, and per §6.1 the wrong answer is invisible. Named hosts win over
    *  it, which is how one box is split off from the catch-all. */
   remote_all_hosts?: boolean;
+  /** SSH hosts this account's current remote token has actually been staged onto (§9.4).
+   *  Backend-owned (appended by `prepare_remote_account_token`); cleared on token remove/re-mint. */
+  remote_seen_hosts?: string[];
   /** Unix seconds. Expiry is DERIVED from this + 1 year, never parsed from a credential. */
   token_minted_at?: number;
 }

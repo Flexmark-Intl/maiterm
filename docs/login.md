@@ -883,14 +883,13 @@ revoke).
 
 Assuming the worse answer is what produces the revoke story, rather than what postpones it:
 
-- **The per-host list is the inventory — unless the catch-all is on, and then there isn't one.**
-  Where hosts are named, that list is the only record of where a standing one-year credential
-  has been placed. `remote_all_hosts` (§6) trades that away deliberately: with it on,
-  `remote_hosts` is empty and maiTerm has **no record of which hosts received the token**, so a
-  user who runs that way for a month has nowhere to look when they want to know. The mint dialog
-  has to say so, and the honest fix when step 2 lands is to record the hosts actually injected
-  into rather than to infer them — an inventory derived from what happened, not from what was
-  configured.
+- **Inventory derived from actual delivery (`remote_seen_hosts`, §9.4).** Whenever
+  `prepare_remote_account_token` stages a token onto a host (`ready`), Rust appends the
+  normalized host to `account.remote_seen_hosts` (backend-owned, preserved across preference
+  writes while `token_minted_at` matches, cleared only when the token is removed or re-minted).
+  The Accounts pane shows this list as "Hosts this token has reached" and repeats it in the
+  Remove-token notice — so even with `remote_all_hosts` on, or after removing a host from
+  `remote_hosts`, maiTerm keeps an honest record of every host the standing credential reached.
 - **Remove and Clear setup must say what they do not do.** They delete the root and the vault
   entry, which stops *maiTerm* handing the token out; they do not promise the token is dead on
   a host that already has it. Saying otherwise would be the `absence-read-as-a-claim` mistake
