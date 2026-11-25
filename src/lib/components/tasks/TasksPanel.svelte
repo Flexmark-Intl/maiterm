@@ -508,7 +508,18 @@
               </button>
             {/if}
             {#if wsLabel}
-              <span class="active-ws">{wsLabel}</span>
+              <span class="active-ws-row">
+                <span class="active-ws">{wsLabel}</span>
+                <Tooltip text="Add a task to {wsLabel}">
+                  <button
+                    class="group-add active-ws-add"
+                    aria-label="Add a task to {wsLabel}"
+                    onclick={() => (addingTo = { workstreamId: t.workstream_id ?? null, name: wsLabel })}
+                  >
+                    <Icon name="plus" size={10} />
+                  </button>
+                </Tooltip>
+              </span>
             {/if}
           </div>
 
@@ -831,17 +842,6 @@
     padding: 2px 0 4px;
   }
 
-  .active-heading {
-    align-items: center;
-    color: var(--accent);
-    margin: 6px 10px 4px;
-  }
-
-  .active-count {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
-  }
-
   .active-spinner {
     animation: active-spin 1.1s linear infinite;
     border: 1.5px solid color-mix(in srgb, var(--accent) 28%, transparent);
@@ -872,6 +872,13 @@
     flex: 1;
     flex-direction: column;
     gap: 1px;
+    min-width: 0;
+  }
+
+  .active-ws-row {
+    align-items: center;
+    display: flex;
+    gap: 4px;
     min-width: 0;
   }
 
@@ -954,6 +961,24 @@
     letter-spacing: 0;
     padding: 1px 6px;
   }
+
+  .group.active-heading {
+    align-items: center;
+    color: var(--accent);
+    margin: 6px 10px 4px;
+  }
+
+  .group-count.active-count {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    color: var(--accent);
+  }
+
+  .group-add.active-ws-add {
+    opacity: 0.7;
+    padding: 1px;
+  }
+  .group-add.active-ws-add:hover,
+  .group-add.active-ws-add:focus-visible { opacity: 1; }
 
   /* Without this the last row's hairline sat directly above the next group's heading, so the
      boundary looked like it belonged to the heading rather than closing the group. */
