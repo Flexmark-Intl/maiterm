@@ -1458,19 +1458,22 @@ const AGY_MCP_CONFIG_MERGE_PY: &str = concat!(
     "    changed=True\n",
     "if changed:\n",
     " parent=os.path.dirname(p)\n",
-    " os.makedirs(parent,exist_ok=True)\n",
-    " fd,tmp=tempfile.mkstemp(prefix=\".maiterm-tmp-\",dir=parent)\n",
+    " tmp=None\n",
     " try:\n",
+    "  os.makedirs(parent,exist_ok=True)\n",
+    "  fd,tmp=tempfile.mkstemp(prefix=\".maiterm-tmp-\",dir=parent)\n",
     "  with os.fdopen(fd,\"w\") as f:\n",
     "   f.write(json.dumps(cur,indent=2)+\"\\n\")\n",
     "  if orig_mode is not None:\n",
     "   os.chmod(tmp,orig_mode)\n",
     "  os.replace(tmp,p)\n",
-    " except Exception:\n",
-    "  try:\n",
-    "   os.unlink(tmp)\n",
-    "  except OSError:\n",
-    "   pass\n",
+    " except Exception as e:\n",
+    "  sys.stderr.write(\"maiterm: could not update ~/.gemini/config/mcp_config.json: \"+str(e)+\"\\n\")\n",
+    "  if tmp is not None:\n",
+    "   try:\n",
+    "    os.unlink(tmp)\n",
+    "   except OSError:\n",
+    "    pass\n",
     "  sys.exit(0)\n",
 );
 
@@ -1513,19 +1516,22 @@ const AGY_SETTINGS_ALLOW_MERGE_PY: &str = concat!(
     "if not any(isinstance(x,str) and x==rule for x in allow):\n",
     " allow.append(rule)\n",
     " parent=os.path.dirname(p)\n",
-    " os.makedirs(parent,exist_ok=True)\n",
-    " fd,tmp=tempfile.mkstemp(prefix=\".maiterm-tmp-\",dir=parent)\n",
+    " tmp=None\n",
     " try:\n",
+    "  os.makedirs(parent,exist_ok=True)\n",
+    "  fd,tmp=tempfile.mkstemp(prefix=\".maiterm-tmp-\",dir=parent)\n",
     "  with os.fdopen(fd,\"w\") as f:\n",
     "   f.write(json.dumps(cur,indent=2)+\"\\n\")\n",
     "  if orig_mode is not None:\n",
     "   os.chmod(tmp,orig_mode)\n",
     "  os.replace(tmp,p)\n",
-    " except Exception:\n",
-    "  try:\n",
-    "   os.unlink(tmp)\n",
-    "  except OSError:\n",
-    "   pass\n",
+    " except Exception as e:\n",
+    "  sys.stderr.write(\"maiterm: could not update ~/.gemini/antigravity-cli/settings.json: \"+str(e)+\"\\n\")\n",
+    "  if tmp is not None:\n",
+    "   try:\n",
+    "    os.unlink(tmp)\n",
+    "   except OSError:\n",
+    "    pass\n",
     "  sys.exit(0)\n",
 );
 
@@ -2575,6 +2581,31 @@ mod tests {
             assert!(std::fs::symlink_metadata(&settings_link).unwrap().file_type().is_symlink());
             assert!(!missing_mcp.exists());
             assert!(!missing_set.exists());
+
+            // Read-only symlink target dir (e.g. Nix Home Manager) must degrade gracefully with
+            // exit 0 and a `maiterm:` stderr note instead of crashing SSH setup.
+            let ro_dir = home.join("ro-store");
+            std::fs::create_dir_all(&ro_dir).unwrap();
+            let ro_mcp = ro_dir.join("mcp_config.json");
+            let ro_set = ro_dir.join("settings.json");
+            std::fs::write(&ro_mcp, r#"{}"#).unwrap();
+            std::fs::write(&ro_set, r#"{}"#).unwrap();
+            std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+            std::fs::remove_file(&mcp_link).unwrap();
+            std::fs::remove_file(&settings_link).unwrap();
+            symlink(&ro_mcp, &mcp_link).unwrap();
+            symlink(&ro_set, &settings_link).unwrap();
+            for src in [AGY_MCP_CONFIG_MERGE_PY, AGY_SETTINGS_ALLOW_MERGE_PY] {
+                let out = Command::new("python3")
+                    .args(["-c", src])
+                    .env("HOME", &home)
+                    .output()
+                    .unwrap();
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                assert!(out.status.success(), "read-only symlink target must exit 0: {stderr}");
+                assert!(stderr.contains("maiterm:"), "expected maiterm: stderr log, got: {stderr}");
+            }
+            let _ = std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o755));
 
             let _ = std::fs::remove_dir_all(&home);
         }

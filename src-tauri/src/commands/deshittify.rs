@@ -1351,19 +1351,22 @@ if perms:
 else:
     s.pop("permissions",None)
 parent=os.path.dirname(p)
-os.makedirs(parent,exist_ok=True)
-fd,tmp=tempfile.mkstemp(prefix=".deshittify-",dir=parent)
+tmp=None
 try:
+    os.makedirs(parent,exist_ok=True)
+    fd,tmp=tempfile.mkstemp(prefix=".deshittify-",dir=parent)
     with os.fdopen(fd,"w") as f:
         f.write(json.dumps(s,indent=2)+"\n")
     if orig_mode is not None:
         os.chmod(tmp,orig_mode)
     os.replace(tmp,p)
-except Exception:
-    try:
-        os.unlink(tmp)
-    except OSError:
-        pass
+except Exception as e:
+    sys.stderr.write("maiterm: could not update ~/.gemini/antigravity-cli/settings.json: "+str(e)+"\n")
+    if tmp is not None:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
     sys.exit(0)"#;
 
 /// Render a shell script that makes a remote account match this machine's rules.
