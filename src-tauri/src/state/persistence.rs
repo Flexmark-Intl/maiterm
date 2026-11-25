@@ -464,11 +464,28 @@ pub fn migrate_app_data(data: &mut AppData) {
     // A "0 monitors" geometry key is a phantom layout, never a configuration: macOS
     // reports every screen gone while the displays sleep, and runs that predate that rule
     // saved the sleep-time rect under "0". Launch would then restore it whenever the app
-    // came up in the dark. Nothing writes one any more (commands::window), so drop the
-    // ones already on disk rather than leaving a trap for the next dark start.
+    // came up in the dark. Similarly, older Windows builds saved Win32's minimized rect
+    // (-32000, -32000 / 0x0) into `window_geometry`. Drop any phantom or invalid entries
+    // already on disk so affected users recover cleanly on upgrade.
     for win in data.windows.iter_mut() {
         if win.window_geometry.remove("0").is_some() {
             log::info!("Migration: dropped phantom 0-monitor geometry for window '{}'", win.label);
+        }
+        win.window_geometry.retain(|monitors, geom| {
+            if geom.is_valid() {
+                true
+            } else {
+                log::info!(
+                    "Migration: dropped invalid window geometry for window '{}' (monitors={}): ({}, {}) {}x{}",
+                    win.label, monitors, geom.x, geom.y, geom.width, geom.height
+                );
+                false
+            }
+        });
+        if let Some(last) = win.last_geometry_monitors {
+            if !win.window_geometry.contains_key(&last.to_string()) {
+                win.last_geometry_monitors = None;
+            }
         }
     }
 
@@ -1219,6 +1236,27 @@ mod migration_tests {
         let mut data = window_with_legacy("ws-1", serde_json::json!([]));
         migrate_app_data(&mut data);
         assert!(data.windows[0].workspaces[0].tasks.is_empty());
+    }
+
+    #[test]
+    fn migration_drops_minimized_windows_geometry_and_keeps_valid_multi_monitor_geometry() {
+        use crate::state::WindowGeometry;
+        let mut data = window_with_legacy("ws-1", serde_json::json!([]));
+        let win = &mut data.windows[0];
+        // Corrupted Windows minimized entries (100% and 150% DPI).
+        win.window_geometry.insert("1".into(), WindowGeometry { x: -32000.0, y: -32000.0, width: 0.0, height: 0.0 });
+        win.window_geometry.insert("2".into(), WindowGeometry { x: -21333.33, y: -21333.33, width: 1200.0, height: 800.0 });
+        // Valid secondary-monitor negative x coordinate.
+        win.window_geometry.insert("3".into(), WindowGeometry { x: -1920.0, y: 40.0, width: 1400.0, height: 900.0 });
+        win.last_geometry_monitors = Some(1);
+
+        migrate_app_data(&mut data);
+
+        let win = &data.windows[0];
+        assert!(!win.window_geometry.contains_key("1"), "0x0 minimized geometry dropped");
+        assert!(!win.window_geometry.contains_key("2"), "-32000/scale minimized geometry dropped");
+        assert!(win.window_geometry.contains_key("3"), "valid negative multi-monitor geometry kept");
+        assert_eq!(win.last_geometry_monitors, None, "dangling last_geometry_monitors cleared");
     }
 }
 

@@ -443,6 +443,75 @@ pub fn set_window_name(
     Ok(())
 }
 
+/// Reject raw physical window rects that represent a minimized or collapsed window.
+///
+/// On Windows, minimizing a window moves it to `(-32000, -32000)` in physical pixels and
+/// shrinks its client size to `0x0`. Checking the raw physical coordinates catches that
+/// sentinel even at extreme DPI scales (400%+ where `-32000 / scale` would exceed `-10000`).
+fn is_valid_physical_rect(pos_x: i32, pos_y: i32, width: u32, height: u32) -> bool {
+    if width == 0 || height == 0 {
+        return false;
+    }
+    if pos_x <= -30_000 && pos_y <= -30_000 {
+        return false;
+    }
+    true
+}
+
+/// Pure overlap check between a physical window rect and a slice of physical monitor rects
+/// `(x, y, width, height)`. Returns true when the monitors list is empty (unreadable) or
+/// when at least 50x30 physical pixels of the window intersect some connected monitor.
+fn rect_visible_on_monitors(
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    monitors: &[(i32, i32, u32, u32)],
+) -> bool {
+    if monitors.is_empty() {
+        return true;
+    }
+    let x1 = x as i64;
+    let y1 = y as i64;
+    let x2 = x1 + w as i64;
+    let y2 = y1 + h as i64;
+    monitors.iter().any(|&(mx, my, mw, mh)| {
+        let mx1 = mx as i64;
+        let my1 = my as i64;
+        let mx2 = mx1 + mw as i64;
+        let my2 = my1 + mh as i64;
+        let overlap_w = x2.min(mx2) - x1.max(mx1);
+        let overlap_h = y2.min(my2) - y1.max(my1);
+        overlap_w >= 50 && overlap_h >= 30
+    })
+}
+
+/// Whether `geom` (in logical pixels, scaled by `scale`) lands visibly on at least one
+/// currently connected monitor. Prevents restoring a window off-screen (e.g. a stale
+/// minimized coordinate or a monitor arrangement that changed sides).
+pub fn geometry_visible_on_monitors(
+    geom: &crate::state::WindowGeometry,
+    scale: f64,
+    monitors: &[tauri::Monitor],
+) -> bool {
+    if !geom.is_valid() || !scale.is_finite() || scale <= 0.0 {
+        return false;
+    }
+    let phys_x = (geom.x * scale).round() as i32;
+    let phys_y = (geom.y * scale).round() as i32;
+    let phys_w = (geom.width * scale).round().max(0.0) as u32;
+    let phys_h = (geom.height * scale).round().max(0.0) as u32;
+    let rects: Vec<(i32, i32, u32, u32)> = monitors
+        .iter()
+        .map(|m| {
+            let p = m.position();
+            let s = m.size();
+            (p.x, p.y, s.width, s.height)
+        })
+        .collect();
+    rect_visible_on_monitors(phys_x, phys_y, phys_w, phys_h, &rects)
+}
+
 #[tauri::command]
 pub fn save_window_geometry(window: tauri::Window, state: State<'_, Arc<AppState>>, monitor_count: usize) -> Result<(), String> {
     // Never key a layout to an absence (see `monitor_count`). The frontend already holds
@@ -452,10 +521,23 @@ pub fn save_window_geometry(window: tauri::Window, state: State<'_, Arc<AppState
         return Ok(());
     }
     let label = window.label().to_string();
-    let scale = window.scale_factor().unwrap_or(1.0);
+    // Never overwrite saved geometry while minimized: on Windows a minimized window sits at
+    // (-32000, -32000) with 0x0 inner size, and Win32 fires WM_MOVE/WM_SIZE on minimize.
+    if window.is_minimized().unwrap_or(false) {
+        log::debug!("Skipping geometry save for '{}' while minimized", label);
+        return Ok(());
+    }
+    let scale = window.scale_factor().ok().filter(|s| s.is_finite() && *s > 0.0).unwrap_or(1.0);
 
     let pos = window.outer_position().map_err(|e| e.to_string())?;
     let size = window.inner_size().map_err(|e| e.to_string())?;
+    if !is_valid_physical_rect(pos.x, pos.y, size.width, size.height) {
+        log::debug!(
+            "Skipping invalid physical geometry for '{}': ({}, {}) {}x{}",
+            label, pos.x, pos.y, size.width, size.height
+        );
+        return Ok(());
+    }
 
     let geom = crate::state::WindowGeometry {
         x: pos.x as f64 / scale,
@@ -463,6 +545,13 @@ pub fn save_window_geometry(window: tauri::Window, state: State<'_, Arc<AppState
         width: size.width as f64 / scale,
         height: size.height as f64 / scale,
     };
+    if !geom.is_valid() {
+        log::debug!(
+            "Skipping invalid logical geometry for '{}': ({}, {}) {}x{}",
+            label, geom.x, geom.y, geom.width, geom.height
+        );
+        return Ok(());
+    }
 
     let data_clone = {
         let mut app_data = state.app_data.write();
@@ -503,7 +592,7 @@ pub fn get_monitor_count(window: tauri::Window) -> usize {
 /// Returns true if geometry was found and applied, false otherwise.
 #[tauri::command]
 pub fn restore_window_geometry(window: tauri::Window, state: State<'_, Arc<AppState>>, monitor_count: usize) -> bool {
-    if monitor_count == 0 {
+    if monitor_count == 0 || window.is_minimized().unwrap_or(false) {
         return false;
     }
     let label = window.label().to_string();
@@ -513,10 +602,18 @@ pub fn restore_window_geometry(window: tauri::Window, state: State<'_, Arc<AppSt
     };
 
     if let Some(geom) = geometry {
-        let scale = window.scale_factor().unwrap_or(1.0);
+        let scale = window.scale_factor().ok().filter(|s| s.is_finite() && *s > 0.0).unwrap_or(1.0);
+        let monitors = window.available_monitors().unwrap_or_default();
+        if !geometry_visible_on_monitors(&geom, scale, &monitors) {
+            log::warn!(
+                "Skipping off-screen saved geometry for '{}' (monitors={}) at ({}, {}) {}x{}",
+                label, monitor_count, geom.x, geom.y, geom.width, geom.height
+            );
+            return false;
+        }
         let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(geom.width, geom.height)));
-        let phys_x = (geom.x * scale) as i32;
-        let phys_y = (geom.y * scale) as i32;
+        let phys_x = (geom.x * scale).round() as i32;
+        let phys_y = (geom.y * scale).round() as i32;
         let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(phys_x, phys_y)));
         log::info!("Restored geometry for '{}' (monitors={}) at ({}, {}) {}x{}",
             label, monitor_count, geom.x, geom.y, geom.width, geom.height);
@@ -581,13 +678,21 @@ pub fn open_preferences_window(window: tauri::WebviewWindow, app: tauri::AppHand
     let pref_h: f64 = 650.0;
 
     // Compute position from the calling window before spawning (WebviewWindow is not Send)
-    let position = if let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) {
-        let scale = window.scale_factor().unwrap_or(1.0);
-        let win_x = pos.x as f64 / scale;
-        let win_y = pos.y as f64 / scale;
-        let win_w = size.width as f64 / scale;
-        let win_h = size.height as f64 / scale;
-        Some((win_x + (win_w - pref_w) / 2.0, win_y + (win_h - pref_h) / 2.0))
+    let position = if !window.is_minimized().unwrap_or(false) {
+        if let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) {
+            if is_valid_physical_rect(pos.x, pos.y, size.width, size.height) {
+                let scale = window.scale_factor().ok().filter(|s| s.is_finite() && *s > 0.0).unwrap_or(1.0);
+                let win_x = pos.x as f64 / scale;
+                let win_y = pos.y as f64 / scale;
+                let win_w = size.width as f64 / scale;
+                let win_h = size.height as f64 / scale;
+                Some((win_x + (win_w - pref_w) / 2.0, win_y + (win_h - pref_h) / 2.0))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -650,13 +755,21 @@ pub fn open_help_window(window: tauri::WebviewWindow, app: tauri::AppHandle, sec
     let help_h: f64 = 600.0;
 
     // Compute position from the calling window before spawning (WebviewWindow is not Send)
-    let position = if let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) {
-        let scale = window.scale_factor().unwrap_or(1.0);
-        let win_x = pos.x as f64 / scale;
-        let win_y = pos.y as f64 / scale;
-        let win_w = size.width as f64 / scale;
-        let win_h = size.height as f64 / scale;
-        Some((win_x + (win_w - help_w) / 2.0, win_y + (win_h - help_h) / 2.0))
+    let position = if !window.is_minimized().unwrap_or(false) {
+        if let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) {
+            if is_valid_physical_rect(pos.x, pos.y, size.width, size.height) {
+                let scale = window.scale_factor().ok().filter(|s| s.is_finite() && *s > 0.0).unwrap_or(1.0);
+                let win_x = pos.x as f64 / scale;
+                let win_y = pos.y as f64 / scale;
+                let win_w = size.width as f64 / scale;
+                let win_h = size.height as f64 / scale;
+                Some((win_x + (win_w - help_w) / 2.0, win_y + (win_h - help_h) / 2.0))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -763,10 +876,18 @@ fn build_window_sync(app: &tauri::AppHandle, label: &str) -> Result<(), String> 
         .map_err(|e| format!("Failed to create window: {}", e))?;
 
     if let Some(ref geom) = geometry {
-        let scale = win.scale_factor().unwrap_or(1.0);
-        let phys_x = (geom.x * scale) as i32;
-        let phys_y = (geom.y * scale) as i32;
-        let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(phys_x, phys_y)));
+        let scale = win.scale_factor().ok().filter(|s| s.is_finite() && *s > 0.0).unwrap_or(1.0);
+        let monitors = win.available_monitors().unwrap_or_default();
+        if geometry_visible_on_monitors(geom, scale, &monitors) {
+            let phys_x = (geom.x * scale).round() as i32;
+            let phys_y = (geom.y * scale).round() as i32;
+            let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(phys_x, phys_y)));
+        } else {
+            log::warn!(
+                "Skipping off-screen saved position for '{}' at ({}, {}) {}x{}",
+                label, geom.x, geom.y, geom.width, geom.height
+            );
+        }
     }
 
     Ok(())
@@ -1158,5 +1279,70 @@ mod clone_ids_tests {
         // conversation) builds its tab from these constructors and copies named fields, so this
         // is what keeps a duplicate from inheriting them.
         assert!(Tab::new("t".to_string()).follow_ups.is_empty());
+    }
+
+    #[test]
+    fn window_geometry_rejects_windows_minimized_sentinels_and_collapsed_sizes() {
+        use crate::state::WindowGeometry;
+        let g = |x, y, width, height| WindowGeometry { x, y, width, height };
+
+        // Normal primary and negative multi-monitor placements.
+        assert!(g(100.0, 100.0, 1200.0, 800.0).is_valid());
+        assert!(g(-1920.0, 0.0, 1200.0, 800.0).is_valid());
+        assert!(g(-2560.0, -1080.0, 1400.0, 900.0).is_valid());
+
+        // Win32 minimized sentinel (-32000, -32000) across 100%, 125%, 150%, 200% DPI.
+        assert!(!g(-32000.0, -32000.0, 0.0, 0.0).is_valid());
+        assert!(!g(-25600.0, -25600.0, 160.0, 28.0).is_valid());
+        assert!(!g(-21333.33, -21333.33, 1200.0, 800.0).is_valid());
+        assert!(!g(-16000.0, -16000.0, 1200.0, 800.0).is_valid());
+
+        // Collapsed / iconic / non-finite rects.
+        assert!(!g(100.0, 100.0, 0.0, 0.0).is_valid());
+        assert!(!g(100.0, 100.0, 160.0, 28.0).is_valid());
+        assert!(!g(f64::NAN, 100.0, 1200.0, 800.0).is_valid());
+        assert!(!g(100.0, f64::INFINITY, 1200.0, 800.0).is_valid());
+    }
+
+    #[test]
+    fn physical_rect_guard_catches_win32_sentinel_at_any_dpi_and_zero_size() {
+        assert!(!super::is_valid_physical_rect(-32000, -32000, 1200, 800));
+        assert!(!super::is_valid_physical_rect(100, 100, 0, 800));
+        assert!(!super::is_valid_physical_rect(100, 100, 1200, 0));
+        assert!(super::is_valid_physical_rect(-1920, 0, 1200, 800));
+        assert!(super::is_valid_physical_rect(0, 0, 1920, 1080));
+    }
+
+    #[test]
+    fn rect_visibility_check_accepts_on_screen_and_rejects_off_screen_rects() {
+        let monitors = [(0, 0, 1920, 1080), (-1920, 0, 1920, 1080)];
+        assert!(super::rect_visible_on_monitors(100, 100, 1200, 800, &monitors));
+        assert!(super::rect_visible_on_monitors(-1800, 50, 1200, 800, &monitors));
+        // Partially off-screen right edge, still 100x800 visible.
+        assert!(super::rect_visible_on_monitors(1820, 100, 1200, 800, &monitors));
+        // Minimized / completely off-screen rects (including 400% scaled -8000).
+        assert!(!super::rect_visible_on_monitors(-32000, -32000, 1200, 800, &monitors));
+        assert!(!super::rect_visible_on_monitors(-8000, -8000, 1200, 800, &monitors));
+        assert!(!super::rect_visible_on_monitors(5000, 0, 1200, 800, &monitors));
+        // Extreme i32 bounds must not overflow.
+        assert!(!super::rect_visible_on_monitors(i32::MIN, i32::MIN, 1200, 800, &monitors));
+        assert!(!super::rect_visible_on_monitors(i32::MAX, i32::MAX, 1200, 800, &monitors));
+        // Unreadable/empty monitor list does not spuriously reject.
+        assert!(super::rect_visible_on_monitors(100, 100, 1200, 800, &[]));
+    }
+
+    #[test]
+    fn window_data_geometry_readers_filter_out_invalid_entries() {
+        use crate::state::{WindowData, WindowGeometry};
+        let mut win = WindowData::new("main".into());
+        win.window_geometry.insert("1".into(), WindowGeometry { x: -32000.0, y: -32000.0, width: 0.0, height: 0.0 });
+        win.last_geometry_monitors = Some(1);
+        assert!(win.geometry_for(1).is_none());
+        assert!(win.last_geometry().is_none());
+
+        win.window_geometry.insert("2".into(), WindowGeometry { x: 100.0, y: 100.0, width: 1200.0, height: 800.0 });
+        assert!(win.geometry_for(2).is_some());
+        // Sole valid entry serves as fallback when last_geometry_monitors points to an invalid one.
+        assert_eq!(win.last_geometry().map(|g| (g.width, g.height)), Some((1200.0, 800.0)));
     }
 }

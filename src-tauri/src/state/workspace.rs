@@ -1030,6 +1030,39 @@ pub struct WindowGeometry {
     pub height: f64,
 }
 
+impl WindowGeometry {
+    /// Whether this geometry represents a real, restorable window rect.
+    ///
+    /// On Windows, minimizing a window moves it to the Win32 off-screen sentinel
+    /// `(-32000, -32000)` and collapses its inner size to `0x0` (or the iconic `160x28`
+    /// bar). Depending on DPI scaling (100%–300%), the scaled logical coordinates land
+    /// around `-32000` to `-10667` on BOTH axes. Normal multi-monitor setups legitimately
+    /// use negative coordinates (e.g. a secondary display at `x = -2560, y = 0`), so a
+    /// negative coordinate alone is valid; tiny sizes and sentinel-range coordinates are not.
+    pub fn is_valid(&self) -> bool {
+        if !self.x.is_finite()
+            || !self.y.is_finite()
+            || !self.width.is_finite()
+            || !self.height.is_finite()
+        {
+            return false;
+        }
+        // App windows enforce min_inner_size(800, 600); anything below 200x150 is a
+        // minimized/collapsed rect (0x0 or Win32 iconic 160x28).
+        if self.width < 200.0 || self.height < 150.0 {
+            return false;
+        }
+        // Win32 minimized sentinel (-32000, -32000) divided by DPI scale (up to 300% = -10667).
+        if self.x <= -10_000.0 && self.y <= -10_000.0 {
+            return false;
+        }
+        if self.x.abs() > 30_000.0 || self.y.abs() > 30_000.0 {
+            return false;
+        }
+        true
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowData {
     pub id: String,
@@ -1106,9 +1139,11 @@ impl WindowData {
         }
     }
 
-    /// Get geometry for a given monitor count, falling back to legacy fields.
+    /// Get geometry for a given monitor count, ignoring any invalid/minimized entry.
     pub fn geometry_for(&self, monitor_count: usize) -> Option<&WindowGeometry> {
-        self.window_geometry.get(&monitor_count.to_string())
+        self.window_geometry
+            .get(&monitor_count.to_string())
+            .filter(|g| g.is_valid())
     }
 
     /// The last geometry this window was known to have, whatever the display setup was
@@ -1121,19 +1156,21 @@ impl WindowData {
         self.last_geometry_monitors
             .and_then(|count| self.geometry_for(count))
             // Windows saved before that was recorded still have entries. With exactly one
-            // configuration on file there is no ambiguity about which describes them.
-            .or_else(|| match self.window_geometry.len() {
-                1 => self.window_geometry.values().next(),
-                _ => None,
+            // valid configuration on file there is no ambiguity about which describes them.
+            .or_else(|| {
+                let mut valid = self.window_geometry.values().filter(|g| g.is_valid());
+                let first = valid.next()?;
+                valid.next().is_none().then_some(first)
             })
     }
 
     /// Migrate legacy flat fields into the geometry map (called on first save).
     pub fn migrate_legacy_geometry(&mut self, monitor_count: usize) {
         if let (Some(x), Some(y), Some(w), Some(h)) = (self.window_x, self.window_y, self.window_width, self.window_height) {
-            self.window_geometry.entry(monitor_count.to_string()).or_insert(WindowGeometry {
-                x, y, width: w, height: h,
-            });
+            let geom = WindowGeometry { x, y, width: w, height: h };
+            if geom.is_valid() {
+                self.window_geometry.entry(monitor_count.to_string()).or_insert(geom);
+            }
             self.window_x = None;
             self.window_y = None;
             self.window_width = None;

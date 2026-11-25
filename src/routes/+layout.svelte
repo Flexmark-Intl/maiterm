@@ -406,6 +406,9 @@
           displaysAsleep = true;
           return;
         }
+        // Minimizing on Windows fires Move/Resize with (-32000, -32000) / 0x0; never treat
+        // that as a user-arranged layout or overwrite saved geometry.
+        if (await appWindow.isMinimized().catch(() => false)) return;
         // A rect the user arranged under a real count describes that layout, whatever put
         // the window there originally.
         placedFor = currentMonitorCount;
