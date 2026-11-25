@@ -1134,6 +1134,79 @@ pub fn list_live_ptys(state: &Arc<AppState>) -> Vec<String> {
     state.pty_registry.read().keys().cloned().collect()
 }
 
+/// True while `pid` is still a live (non-zombie) process. Closes the up-to-100 ms window
+/// between a shell exiting on its own and the writer thread polling `child.try_wait()` and
+/// removing the PTY from `pty_registry`: a zombie shell still sits in the registry, so without
+/// checking process state, an off-thread probe in that window would see no foreground ssh and
+/// answer "local shell, no ssh", letting the autosave tick overwrite the tab's saved ssh command.
+#[cfg(target_os = "macos")]
+fn shell_pid_alive(pid: u32) -> bool {
+    // XNU `<sys/proc.h>`: `SZOMB = 5` (exited, awaiting `waitpid`).
+    const SZOMB: u32 = 5;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: `info` is a zeroed `proc_bsdinfo` of `size` bytes; `PROC_PIDTBSDINFO` writes at
+    // most `size` bytes into it.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if written != size {
+        return false;
+    }
+    // SAFETY: the kernel filled the full struct.
+    let info = unsafe { info.assume_init() };
+    info.pbi_status != SZOMB
+}
+
+#[cfg(target_os = "linux")]
+fn shell_pid_alive(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // Process state is the first token after the last ')' (comm can contain spaces/parens).
+    let Some(rest) = stat.rsplit_once(')').map(|(_, r)| r.trim_start()) else {
+        return false;
+    };
+    !matches!(rest.as_bytes().first(), None | Some(b'Z') | Some(b'X') | Some(b'x'))
+}
+
+#[cfg(windows)]
+fn shell_pid_alive(pid: u32) -> bool {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    sys.process(Pid::from_u32(pid)).is_some()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn shell_pid_alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+/// True when `pty_id` is still registered with `pid` AND that shell process has not exited.
+/// Checked AFTER off-thread process scans (`get_pty_info`, `get_pty_foreground`,
+/// `get_pty_foreground_job`, `get_pty_foreground_ssh`, `get_agent_liveness`) so a lookup that
+/// straddles `kill_pty`, a PTY replacement, or a self-exited shell fails cleanly instead of
+/// reporting "at a local prompt, no ssh".
+fn pty_still_alive(state: &AppState, pty_id: &str, pid: u32) -> bool {
+    let registered = state
+        .pty_registry
+        .read()
+        .get(pty_id)
+        .is_some_and(|h| h.child_pid == Some(pid));
+    registered && shell_pid_alive(pid)
+}
+
 pub fn get_pty_info(state: &Arc<AppState>, pty_id: &str) -> Result<PtyInfo, String> {
     let registry = state.pty_registry.read();
     let handle = registry.get(pty_id).ok_or("PTY not found")?;
@@ -1148,20 +1221,12 @@ pub fn get_pty_info(state: &Arc<AppState>, pty_id: &str) -> Result<PtyInfo, Stri
     };
 
     // The probes above ran without the registry lock, and this runs off the main thread, so a
-    // `kill_pty` can land between reading the pid and the sweep. The sweep then finds no shell
-    // and would answer "at a local prompt, no ssh" for a terminal that was an ssh session a
-    // moment ago; the autosave tick writes that answer over the tab's restore context.
-    // maiTerm takes a PTY out of the registry BEFORE it kills the shell (`kill_pty`, and the
-    // replace in `spawn_pty`), so a PTY still registered here was not killed by maiTerm when
-    // the sweep ran. Gone means the answer may describe a dead shell: the caller gets the
-    // error it always got for a killed PTY. A shell that exits by itself is not covered: the
-    // writer thread drops its entry up to 100 ms later.
-    let still_ours = state
-        .pty_registry
-        .read()
-        .get(pty_id)
-        .is_some_and(|h| h.child_pid == Some(pid));
-    if !still_ours {
+    // `kill_pty`, a `spawn_pty` replace, or a self-exited shell (still registered for up to
+    // 100 ms until the writer thread's `try_wait` poll) can land before/during the sweep. The
+    // sweep then finds no ssh and would answer "at a local prompt, no ssh" for a terminal that
+    // was an ssh session a moment ago; the autosave tick writes that over the tab's saved ssh
+    // command. Verify both registry ownership and live (non-zombie) shell state before returning.
+    if !pty_still_alive(state, pty_id, pid) {
         return Err("PTY not found".to_string());
     }
     note_live_ssh(state, pty_id, &foreground_command);
@@ -1222,6 +1287,9 @@ pub fn get_pty_foreground(
         let _ = fresh;
     }
     let foreground = get_foreground_command(pid);
+    if !pty_still_alive(state, pty_id, pid) {
+        return Err("PTY not found".to_string());
+    }
     note_live_ssh(state, pty_id, &foreground);
     Ok(foreground)
 }
@@ -1237,7 +1305,11 @@ pub fn get_pty_foreground_ssh(state: &AppState, pty_id: &str, fresh: bool) -> Op
         let registry = state.pty_registry.read();
         registry.get(pty_id)?.child_pid?
     };
-    foreground_ssh(pid, fresh)
+    let ssh = foreground_ssh(pid, fresh);
+    if !pty_still_alive(state, pty_id, pid) {
+        return None;
+    }
+    ssh
 }
 
 #[cfg(unix)]
@@ -1385,7 +1457,11 @@ pub fn get_pty_foreground_job(
     {
         let _ = fresh;
     }
-    Ok(foreground_job(pid))
+    let fg = foreground_job(pid);
+    if !pty_still_alive(state, pty_id, pid) {
+        return Err("PTY not found".to_string());
+    }
+    Ok(fg)
 }
 
 /// Kill a PTY's foreground job — but only if it is still the job the caller thinks it is.
@@ -1514,6 +1590,9 @@ pub fn get_agent_liveness(state: &Arc<AppState>, pty_id: &str) -> Result<AgentLi
     // remote session (the remote agent isn't in the local tree — this stands in for it).
     let ssh_foreground = get_foreground_command(pid).is_some();
     let agent_running = agent_process_alive(pid, AGENT_PROCESS_NAMES);
+    if !pty_still_alive(state, pty_id, pid) {
+        return Err("PTY not found".to_string());
+    }
     Ok(AgentLiveness { agent_running, ssh_foreground })
 }
 
@@ -2382,5 +2461,48 @@ mod fixed_size_tests {
         spawn_size(&app, "p-worker", "worker", 120, 40);
         kill_pty(&app, "p-worker").unwrap();
         assert!(!app.fixed_size_ptys.read().contains("p-worker"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pty_still_alive_rejects_removed_replaced_and_zombie_shells() {
+        use std::process::Command;
+        use std::sync::mpsc;
+
+        let app = state();
+        let live_pid = std::process::id();
+        assert!(shell_pid_alive(live_pid));
+
+        let (tx, _rx) = mpsc::channel();
+        app.pty_registry.write().insert(
+            "p-live".into(),
+            PtyHandle { sender: tx, child_pid: Some(live_pid) },
+        );
+        assert!(pty_still_alive(&app, "p-live", live_pid));
+        assert!(!pty_still_alive(&app, "p-live", live_pid + 1), "replaced PID must fail");
+
+        // Removing from registry (kill_pty) immediately invalidates the probe.
+        app.pty_registry.write().remove("p-live");
+        assert!(!pty_still_alive(&app, "p-live", live_pid));
+
+        // Self-exited child that has not been reaped yet (zombie) must report dead even while
+        // still sitting in pty_registry (the up-to-100 ms window before try_wait()).
+        let mut child = Command::new("/usr/bin/true").spawn().expect("spawn /usr/bin/true");
+        let zpid = child.id();
+        let (tx2, _rx2) = mpsc::channel();
+        app.pty_registry.write().insert(
+            "p-zombie".into(),
+            PtyHandle { sender: tx2, child_pid: Some(zpid) },
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while shell_pid_alive(zpid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!shell_pid_alive(zpid), "exited zombie child must report not alive before wait()");
+        assert!(!pty_still_alive(&app, "p-zombie", zpid));
+
+        let _ = child.wait();
+        assert!(!shell_pid_alive(zpid), "reaped child must stay not alive");
     }
 }

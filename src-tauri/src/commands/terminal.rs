@@ -490,7 +490,7 @@ pub async fn get_agent_liveness(
     state: State<'_, Arc<AppState>>,
     pty_id: String,
 ) -> Result<pty::AgentLiveness, String> {
-    // The probe spawns `ps -x` (full process list) plus lsof/sysinfo scans — all blocking.
+    // The probe runs `ps -x` (Unix) or sysinfo scans — all blocking.
     // A synchronous command runs on Tauri's main event-loop thread, so the mesh readiness
     // modal's 1s poll loop over every tab would peg the main thread and freeze the whole UI
     // (pinwheel). Offload the blocking work to the blocking pool so the event loop stays free.

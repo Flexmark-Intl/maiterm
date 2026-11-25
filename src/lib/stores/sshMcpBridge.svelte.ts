@@ -339,7 +339,7 @@ export function isInteractiveSshSession(cmd: string): boolean {
  */
 export async function isRemoteShellForeground(ptyId: string): Promise<boolean> {
   try {
-    // Foreground-only probe (no lsof cwd) — this runs right before the env-var
+    // Foreground-only probe (no cwd lookup) — this runs right before the env-var
     // injection, which races the user's first keystrokes at the remote prompt.
     // ALWAYS fresh: this is the guard that keeps the export out of the LOCAL
     // shell, and the failure it prevents is caused by a *stale positive* — a
@@ -984,7 +984,7 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
     // tunnel setup is async (~1-2s), and the ssh process may have exited in the
     // meantime (quick user disconnect, one-shot command that slipped past the
     // filter, etc.). Writing to a PTY whose foreground is no longer ssh dumps the
-    // export into the local shell. The probe is foreground-only (no lsof) to keep
+    // export into the local shell. The probe is foreground-only (no cwd lookup) to keep
     // this last gate as thin as possible.
     // A maiTerm-initiated session baked the port into its own ssh command, and that value is
     // a GUESS — this maiTerm's usual port on the host, read before the tunnel existed. When

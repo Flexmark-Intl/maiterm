@@ -740,7 +740,7 @@
         // from a snapshot taken before the ssh existed loses the bridge for the whole
         // session: no further title fires until the user redraws the prompt by typing,
         // which is exactly why the export felt random (fast reconnects land inside the
-        // stale window; cold ones don't). Also drops the lsof cwd lookup getPtyInfo
+        // stale window; cold ones don't). Also skips the cwd lookup getPtyInfo
         // was doing on every single prompt, in every tab.
         getPtyForeground(ptyId, true).then(cmd => {
           const isInteractiveSsh = cmd

@@ -174,7 +174,7 @@ OSC 133 (FinalTerm protocol) detects command start/finish for tab indicators. Co
 `splitPaneWithContext()` in `workspaces.svelte.ts` handles pane duplication:
 
 1. Serializes scrollback via `serializeTerminal()` (Rust command)
-2. Gets PTY info via `getPtyInfo()` — returns local cwd (via lsof) and foreground SSH command
+2. Gets PTY info via `getPtyInfo()` — returns local cwd (`proc_pidinfo` on macOS, `/proc` on Linux, sysinfo on Windows) and foreground SSH command
 3. Creates new pane with scrollback pre-populated
 4. Copies shell history (`copyTabHistory`)
 5. Stores split context for the new TerminalPane to consume on mount
@@ -237,7 +237,7 @@ quoted, a Windows path too: bare, Git Bash and WSL eat it. Split on whitespace, 
 
 Priority: OSC 7 (if not stale) → prompt pattern heuristic.
 
-**Stale OSC 7 detection**: Compare OSC 7 cwd with lsof-reported local cwd. If equal, OSC 7 is stale.
+**Stale OSC 7 detection**: Compare OSC 7 cwd with OS-reported local cwd. If equal, OSC 7 is stale.
 
 **Prompt patterns**: User-configurable in Preferences > Shell. See `src/lib/utils/promptPattern.ts`.
 

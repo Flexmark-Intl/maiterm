@@ -448,7 +448,8 @@ export async function getPtyInfo(ptyId: string): Promise<PtyInfo> {
   return info;
 }
 
-/** Foreground command only — skips the lsof cwd lookup `getPtyInfo` also does.
+/** Foreground command only — skips the cwd lookup (`proc_pidinfo` on macOS, `/proc` on Linux,
+ *  sysinfo on Windows) that `getPtyInfo` also does.
  *  Used on the SSH-bridge env-injection hot path where cwd is irrelevant and the
  *  export races the user's first keystrokes.
  *
