@@ -174,39 +174,67 @@ impl Probe {
     /// The hub has processed the event for a new file written now, `ft-barrier-<uuid>` in
     /// `dir` (a folder the hub's watcher covers). Returns the names of the files written: they
     /// are real files, and a listing shows them. If a batch says events were lost (an
-    /// overflowing channel) or if no event arrives within 2 s (macOS FSEvents can silently drop
-    /// a single create under parallel disk load without setting `lost`, docs/file-tree.md §6.1),
-    /// a fresh probe file is written until any of them is observed or `HANG` expires.
+    /// overflowing channel) before the file's own event came, a fresh file is written.
     ///
     /// **Not a barrier.** It says nothing about changes made before it: the OS doesn't report
-    /// in order. Use it only where OS event delivery is the test's subject (the watcher reporting
-    /// a change at all), never to wait for "everything before" in a test about something else.
+    /// in order. FSEvents under load can deliver an earlier change after this one, up to 20 s
+    /// late, or never, and this then hangs. Use it only where event delivery is the test's
+    /// subject (the watcher reporting a change at all), never to wait for "everything before"
+    /// in a test about something else.
     pub fn barrier(&self, dir: &Path) -> Vec<String> {
-        const RETRY: Duration = Duration::from_secs(2);
-        let deadline = Instant::now() + HANG;
         let mut written = Vec::new();
         loop {
             let name = format!("ft-barrier-{}", uuid::Uuid::new_v4());
             std::fs::write(dir.join(&name), "").unwrap();
-            written.push(name);
+            written.push(name.clone());
             loop {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    panic!(
-                        "the hub reported nothing while waiting for the barrier file's event (after {} attempts)",
-                        written.len()
-                    );
+                if let HubReport::Batch { paths, lost } = self.next("the barrier file's event") {
+                    if paths.iter().any(|p| p.file_name().is_some_and(|n| n.to_string_lossy() == name)) {
+                        return written;
+                    }
+                    if lost {
+                        break;
+                    }
                 }
-                match self.rx.recv_timeout(RETRY.min(remaining)) {
+            }
+        }
+    }
+
+    /// Write a probe file into `dir` and wait until the OS watcher reports a batch containing
+    /// one of the probe files written, returning only the exact observed filename. Retries with
+    /// a fresh file every 2 s (using a fixed per-attempt deadline, never reset by unrelated
+    /// reports) bounded by `HANG`, so a silent macOS FSEvents single-create drop under parallel
+    /// test load recovers without failing on dropped siblings or leaving `barrier` altered for
+    /// idle tests.
+    pub fn observe_create(&self, dir: &Path) -> String {
+        const RETRY: Duration = Duration::from_secs(2);
+        let deadline = Instant::now() + HANG;
+        let mut written: Vec<String> = Vec::new();
+        loop {
+            if Instant::now() >= deadline {
+                panic!(
+                    "the hub reported nothing while waiting for a native watcher create event (after {} attempts)",
+                    written.len()
+                );
+            }
+            let name = format!("ft-probe-{}", uuid::Uuid::new_v4());
+            std::fs::write(dir.join(&name), "").unwrap();
+            written.push(name);
+            let retry_at = (Instant::now() + RETRY).min(deadline);
+            loop {
+                let wait = retry_at.saturating_duration_since(Instant::now());
+                if wait.is_zero() {
+                    break;
+                }
+                match self.rx.recv_timeout(wait) {
                     Ok(r) => {
                         self.note(&r);
                         if let HubReport::Batch { paths, lost } = r {
-                            if paths.iter().any(|p| {
-                                p.file_name()
-                                    .and_then(|n| n.to_str())
-                                    .is_some_and(|n| written.iter().any(|w| w == n))
+                            if let Some(matched) = paths.iter().find_map(|p| {
+                                let n = p.file_name()?.to_str()?;
+                                written.iter().find(|w| w.as_str() == n).cloned()
                             }) {
-                                return written;
+                                return matched;
                             }
                             if lost {
                                 break;
@@ -215,7 +243,7 @@ impl Probe {
                     }
                     Err(RecvTimeoutError::Timeout) => break,
                     Err(RecvTimeoutError::Disconnected) => {
-                        panic!("the hub reported nothing while waiting for the barrier file's event (Disconnected)");
+                        panic!("the hub reported nothing while waiting for a native watcher create event (Disconnected)");
                     }
                 }
             }

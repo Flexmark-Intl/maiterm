@@ -1163,16 +1163,15 @@ fn the_native_watcher_starts_and_reports_a_change() {
     let hub = ft.hub_of(ack.sub_id).unwrap();
     probe.watching(&hub);
     probe.idle(&hub);
-    let names = probe.settle(&hub, &root);
+    let observed = probe.observe_create(&root);
+    probe.idle(&hub);
     let entries: BTreeSet<String> = hub
         .dirs
         .lock()
         .get("")
         .map(|d| d.entries.iter().map(|e| e.n.clone()).collect())
         .unwrap_or_default();
-    for name in &names {
-        assert!(entries.contains(name), "native watcher missed {name:?} in {entries:?}");
-    }
+    assert!(entries.contains(&observed), "native watcher missed {observed:?} in {entries:?}");
     ft.close(ack.sub_id);
     std::fs::remove_dir_all(&root).unwrap();
 }
