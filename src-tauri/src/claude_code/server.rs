@@ -27,7 +27,74 @@ use crate::state::AppState;
 
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Task-board MCP calls (`listTasks`, `createTasks`, `updateTasks`, `deleteTasks`) run
+/// in-memory in the window's page and must time out BEFORE Claude Code's 60 s client timeout
+/// so the agent gets a clear maiTerm error instead of a silent "operation timed out".
+/// Blocking tools (`openDiff`, `waitForService`) keep the full 120 s `RESPONSE_TIMEOUT`.
+const TASK_TOOL_TIMEOUT: Duration = Duration::from_secs(45);
 const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+
+fn is_task_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "listTasks" | "createTasks" | "updateTasks" | "deleteTasks")
+}
+
+fn frontend_tool_timeout(tool_name: &str) -> Duration {
+    if is_task_tool(tool_name) {
+        TASK_TOOL_TIMEOUT
+    } else {
+        RESPONSE_TIMEOUT
+    }
+}
+
+/// Prefix of up to `max_chars` Unicode scalar values, never slicing mid-codepoint.
+fn short_id(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
+    }
+}
+
+/// Ensures an entry in `AppState::ide_pending` is removed if the caller disconnects mid-await
+/// (dropping the handler future), and logs caller-side cancellation for task-board calls.
+struct PendingRequestGuard<'a> {
+    state: &'a Arc<AppState>,
+    request_id: String,
+    tool_name: &'a str,
+    tab_short: &'a str,
+    window: &'a str,
+    started_at: std::time::Instant,
+    trace_task: bool,
+    completed: bool,
+}
+
+impl PendingRequestGuard<'_> {
+    fn disarm(&mut self) {
+        self.completed = true;
+    }
+
+    fn finish_and_remove(&mut self) {
+        self.completed = true;
+        self.state.ide_pending.write().remove(&self.request_id);
+    }
+}
+
+impl Drop for PendingRequestGuard<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.state.ide_pending.write().remove(&self.request_id);
+            if self.trace_task {
+                log::warn!(
+                    "task-tool cancelled (caller disconnected): {} req={} tab={} window={} elapsed={}ms",
+                    self.tool_name,
+                    short_id(&self.request_id, 8),
+                    self.tab_short,
+                    self.window,
+                    self.started_at.elapsed().as_millis()
+                );
+            }
+        }
+    }
+}
 /// How often to re-assert our `mcpServers.aiterm` entry in `~/.claude.json`.
 /// The file is co-owned by the `claude` CLI, which can clobber our entry; this
 /// heals any drift within one tick. Idempotent — only writes when it differs.
@@ -93,8 +160,12 @@ fn emit_dual(app: &AppHandle, agent_event: &str, legacy_event: &str, payload: Va
     let _ = app.emit(legacy_event, payload);
 }
 fn emit_dual_to(app: &AppHandle, label: &str, agent_event: &str, legacy_event: &str, payload: Value) {
-    let _ = app.emit_to(label, agent_event, payload.clone());
-    let _ = app.emit_to(label, legacy_event, payload);
+    if let Err(e) = app.emit_to(label, agent_event, payload.clone()) {
+        log::warn!("emit_to({}, {}) failed: {}", label, agent_event, e);
+    }
+    if let Err(e) = app.emit_to(label, legacy_event, payload) {
+        log::warn!("emit_to({}, {}) failed: {}", label, legacy_event, e);
+    }
 }
 
 /// Sessions with a [`watch_unattributed_prompt`] running, so a repeated Notification for the
@@ -4159,6 +4230,21 @@ async fn process_message(
                     .get("arguments")
                     .cloned()
                     .unwrap_or(Value::Object(serde_json::Map::new()));
+                let call_started_at = std::time::Instant::now();
+                let trace_task = is_task_tool(&tool_name);
+                if trace_task {
+                    let arg_tab = arguments
+                        .get("tabId")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .or(declared_tab);
+                    log::info!(
+                        "task-tool arrived: {} conn={} tab={}",
+                        tool_name,
+                        short_id(connection_id, 11),
+                        arg_tab.map(|t| short_id(t, 8)).unwrap_or("-")
+                    );
+                }
 
                 // ── initSession: register connection → tab affinity ──
                 if tool_name == "initSession" {
@@ -4703,6 +4789,13 @@ async fn process_message(
                     if !global_tools.contains(&tool_name.as_str())
                         && arguments.get("tabId").and_then(|v| v.as_str()).map_or(true, |s| s.is_empty())
                     {
+                        if trace_task {
+                            log::warn!(
+                                "task-tool rejected (session not initialized): {} conn={}",
+                                tool_name,
+                                short_id(connection_id, 11)
+                            );
+                        }
                         let resp = JsonRpcResponse::success(
                             id,
                             serde_json::json!({
@@ -4787,16 +4880,57 @@ async fn process_message(
 
                     // Emit to the specific window that owns the tab (avoids race
                     // when preferences/help windows also listen for the event)
-                    if let Some(label) = target_owner_window(state, &tool_name, &arguments)
-                        .or_else(|| resolve_target_window(state, &arguments))
-                    {
-                        emit_dual_to(app_handle, &label, "agent-ide-tool", "claude-code-tool", payload);
+                    let target_window = target_owner_window(state, &tool_name, &arguments)
+                        .or_else(|| resolve_target_window(state, &arguments));
+                    let window_display = target_window.as_deref().unwrap_or("<broadcast>");
+                    let resolved_tab = arguments
+                        .get("tabId")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("-");
+                    let req_short = short_id(&request_id, 8);
+                    let tab_short = short_id(resolved_tab, 8);
+                    if trace_task {
+                        log::info!(
+                            "task-tool dispatched to window: {} req={} tab={} window={} after={}ms",
+                            tool_name,
+                            req_short,
+                            tab_short,
+                            window_display,
+                            call_started_at.elapsed().as_millis()
+                        );
+                    }
+                    if let Some(ref label) = target_window {
+                        emit_dual_to(app_handle, label, "agent-ide-tool", "claude-code-tool", payload);
                     } else {
                         emit_dual(app_handle, "agent-ide-tool", "claude-code-tool", payload);
                     }
 
-                    match tokio::time::timeout(RESPONSE_TIMEOUT, rx).await {
+                    let timeout = frontend_tool_timeout(&tool_name);
+                    let mut guard = PendingRequestGuard {
+                        state,
+                        request_id: request_id.clone(),
+                        tool_name: &tool_name,
+                        tab_short,
+                        window: window_display,
+                        started_at: call_started_at,
+                        trace_task,
+                        completed: false,
+                    };
+
+                    match tokio::time::timeout(timeout, rx).await {
                         Ok(Ok(result)) => {
+                            guard.disarm();
+                            if trace_task {
+                                log::info!(
+                                    "task-tool replied: {} req={} tab={} window={} elapsed={}ms",
+                                    tool_name,
+                                    req_short,
+                                    tab_short,
+                                    window_display,
+                                    call_started_at.elapsed().as_millis()
+                                );
+                            }
                             let content_text = serde_json::to_string(&result).unwrap_or_default();
                             let resp = JsonRpcResponse::success(
                                 id,
@@ -4807,7 +4941,15 @@ async fn process_message(
                             Some(serde_json::to_string(&resp).unwrap())
                         }
                         Ok(Err(_)) => {
-                            state.ide_pending.write().remove(&request_id);
+                            guard.finish_and_remove();
+                            log::warn!(
+                                "Tool handler disconnected: {} req={} tab={} window={} elapsed={}ms",
+                                tool_name,
+                                req_short,
+                                tab_short,
+                                window_display,
+                                call_started_at.elapsed().as_millis()
+                            );
                             let resp = JsonRpcResponse::error(
                                 id,
                                 -32603,
@@ -4816,12 +4958,28 @@ async fn process_message(
                             Some(serde_json::to_string(&resp).unwrap())
                         }
                         Err(_) => {
-                            state.ide_pending.write().remove(&request_id);
-                            let resp = JsonRpcResponse::error(
-                                id,
-                                -32603,
-                                "Tool response timeout".to_string(),
+                            guard.finish_and_remove();
+                            log::warn!(
+                                "Tool response timeout: {} req={} tab={} window={} waited={}s elapsed={}ms",
+                                tool_name,
+                                req_short,
+                                tab_short,
+                                window_display,
+                                timeout.as_secs(),
+                                call_started_at.elapsed().as_millis()
                             );
+                            let err_msg = if trace_task {
+                                format!(
+                                    "Tool response timeout: maiTerm waited {}s for window '{}' to answer {} \
+                                     (the window may be busy, reloading, or throttled while asleep)",
+                                    timeout.as_secs(),
+                                    window_display,
+                                    tool_name
+                                )
+                            } else {
+                                "Tool response timeout".to_string()
+                            };
+                            let resp = JsonRpcResponse::error(id, -32603, err_msg);
                             Some(serde_json::to_string(&resp).unwrap())
                         }
                     }
@@ -8070,5 +8228,63 @@ mod tests {
         assert_eq!(extracted, "async-sub-42");
         super::remember_agy_subagent(&extracted);
         assert!(super::is_agy_subagent_hook(&sessions, "tab-1", "async-sub-42"));
+    }
+
+    #[test]
+    fn task_tools_use_shorter_timeout_while_blocking_tools_keep_full_timeout() {
+        for tool in ["listTasks", "createTasks", "updateTasks", "deleteTasks"] {
+            assert!(super::is_task_tool(tool), "{tool} should be classified as a task tool");
+            let t = super::frontend_tool_timeout(tool);
+            assert_eq!(t, super::TASK_TOOL_TIMEOUT);
+            assert!(
+                t < std::time::Duration::from_secs(60),
+                "task tool timeout must sit below Claude Code's 60 s timeout"
+            );
+        }
+        for tool in ["openDiff", "waitForService", "openFile", "getOpenEditors"] {
+            assert!(!super::is_task_tool(tool));
+            assert_eq!(super::frontend_tool_timeout(tool), super::RESPONSE_TIMEOUT);
+        }
+    }
+
+    #[test]
+    fn short_id_is_utf8_safe_and_pending_guard_cleans_up_on_drop() {
+        assert_eq!(super::short_id("abcdefghij", 8), "abcdefgh");
+        assert_eq!(super::short_id("short", 8), "short");
+        assert_eq!(super::short_id("ééééééééé", 8), "éééééééé");
+
+        let state = std::sync::Arc::new(crate::state::AppState::new());
+        let (tx1, _rx1) = tokio::sync::oneshot::channel();
+        let (tx2, _rx2) = tokio::sync::oneshot::channel();
+        state.ide_pending.write().insert("req-drop".to_string(), tx1);
+        state.ide_pending.write().insert("req-keep".to_string(), tx2);
+
+        {
+            let _uncompleted = super::PendingRequestGuard {
+                state: &state,
+                request_id: "req-drop".to_string(),
+                tool_name: "listTasks",
+                tab_short: "tab-1",
+                window: "main",
+                started_at: std::time::Instant::now(),
+                trace_task: true,
+                completed: false,
+            };
+            let mut disarmed = super::PendingRequestGuard {
+                state: &state,
+                request_id: "req-keep".to_string(),
+                tool_name: "listTasks",
+                tab_short: "tab-1",
+                window: "main",
+                started_at: std::time::Instant::now(),
+                trace_task: true,
+                completed: false,
+            };
+            disarmed.disarm();
+        }
+
+        let pending = state.ide_pending.read();
+        assert!(!pending.contains_key("req-drop"), "uncompleted guard must remove pending entry on drop");
+        assert!(pending.contains_key("req-keep"), "disarmed guard must leave pending entry alone");
     }
 }
