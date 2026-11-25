@@ -17,7 +17,6 @@ import {
 } from '$lib/tauri/commands';
 import type { RemoteTokenPrep } from '$lib/tauri/commands';
 import { dispatch } from '$lib/stores/notificationDispatch';
-import { claudeStateStore } from '$lib/stores/agentState.svelte';
 
 /** Say that this host is about to be somebody else. Shared so the wording cannot drift. */
 async function announceMiss(
@@ -110,8 +109,9 @@ export function beginRemoteAccount(
       // Only a `ready` prep put a file on the host, and only an untaken one is unused.
       if (!p || p.status !== 'ready' || taken || abandoned) return;
       abandoned = true;
-      if (p.handle) await discardRemoteAccountToken(tabId, sshArgs, p.handle).catch(() => {});
-      claudeStateStore.setRemoteAccountError(tabId, p.account_label, why);
+      // Passing `why` lets Rust emit the tab error badge only when `p.handle` is still current
+      // and SSH is still foreground (never clobbering a newer handoff or a local shell prompt).
+      if (p.handle) await discardRemoteAccountToken(tabId, sshArgs, p.handle, why).catch(() => {});
       await announceMiss(tabId, p.account_label, p.host, why);
     },
 

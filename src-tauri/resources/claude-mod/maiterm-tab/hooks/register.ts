@@ -237,25 +237,28 @@ async function reportAppended($: EngineInterface, to: Link): Promise<void> {
 // `{ maiterm_auth_env: { oauth_token, shadowed_by } }` — presence only, never values (§6.1, §9.1).
 // Lets maiTerm verify on remote tabs that an injected `CLAUDE_CODE_OAUTH_TOKEN` survived shell
 // startup and was not outranked by a higher-precedence env var on the remote host (§2.2).
-const SHADOW_BOOL_VARS = ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'] as const
-const SHADOW_VALUE_VARS = ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY'] as const
-
+// Every `$.env.get` call MUST take a string literal (claude_code/CLAUDE.md): Claude Code's mod
+// loader statically rejects dynamic names at load time and refuses the whole mod.
 async function authEnvCheck($: EngineInterface): Promise<Record<string, unknown>> {
   try {
-    const [tok, ...rest] = await Promise.all([
+    const [tok, bedrock, vertex, foundry, authToken, apiKey] = await Promise.all([
       $.env.get('CLAUDE_CODE_OAUTH_TOKEN'),
-      ...SHADOW_BOOL_VARS.map(k => $.env.get(k)),
-      ...SHADOW_VALUE_VARS.map(k => $.env.get(k)),
+      $.env.get('CLAUDE_CODE_USE_BEDROCK'),
+      $.env.get('CLAUDE_CODE_USE_VERTEX'),
+      $.env.get('CLAUDE_CODE_USE_FOUNDRY'),
+      $.env.get('ANTHROPIC_AUTH_TOKEN'),
+      $.env.get('ANTHROPIC_API_KEY'),
     ])
+    const isTruthy = (v: string | undefined) => {
+      const s = v?.trim().toLowerCase()
+      return s === '1' || s === 'true'
+    }
     const shadowed_by: string[] = []
-    SHADOW_BOOL_VARS.forEach((name, i) => {
-      const v = rest[i]?.trim().toLowerCase()
-      if (v === '1' || v === 'true') shadowed_by.push(name)
-    })
-    SHADOW_VALUE_VARS.forEach((name, i) => {
-      const v = rest[SHADOW_BOOL_VARS.length + i]
-      if (v && v.length > 0) shadowed_by.push(name)
-    })
+    if (isTruthy(bedrock)) shadowed_by.push('CLAUDE_CODE_USE_BEDROCK')
+    if (isTruthy(vertex)) shadowed_by.push('CLAUDE_CODE_USE_VERTEX')
+    if (isTruthy(foundry)) shadowed_by.push('CLAUDE_CODE_USE_FOUNDRY')
+    if (authToken && authToken.length > 0) shadowed_by.push('ANTHROPIC_AUTH_TOKEN')
+    if (apiKey && apiKey.length > 0) shadowed_by.push('ANTHROPIC_API_KEY')
     return { maiterm_auth_env: { oauth_token: Boolean(tok && tok.length > 0), shadowed_by } }
   } catch {
     return {}

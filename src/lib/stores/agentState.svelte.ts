@@ -389,12 +389,7 @@ function createAgentStateStore() {
       return remoteAccountErrors.get(tabId) ?? undefined;
     },
 
-    /** Set a remote account error badge on `tabId` (e.g. when a handoff is abandoned). */
-    setRemoteAccountError(tabId: string, accountLabel: string | null, reason: string) {
-      remoteAccountErrors.set(tabId, { accountLabel, reason });
-    },
-
-    /** Clear any remote account error badge on `tabId` (e.g. on PTY respawn). */
+    /** Clear any remote account error badge on `tabId` (e.g. when SSH exits to local shell). */
     clearRemoteAccountError(tabId: string) {
       if (remoteAccountErrors.get(tabId) != null) remoteAccountErrors.set(tabId, null);
     },
@@ -525,7 +520,7 @@ function createAgentStateStore() {
           untrack(() => {
             sessions.seed(ids);
             for (const id of ids) if (!remoteAccountErrors.has(id)) remoteAccountErrors.set(id, null);
-            const goneErr = [...remoteAccountErrors].filter(([id, v]) => v === null && !ids.has(id)).map(([id]) => id);
+            const goneErr = [...remoteAccountErrors.keys()].filter((id) => !ids.has(id));
             for (const id of goneErr) remoteAccountErrors.delete(id);
             backfill(ids);
           });
@@ -805,11 +800,17 @@ function createAgentStateStore() {
       }>('remote-account-status', (e) => {
         const { tab_id, status, account_label, reason, source } = e.payload;
         if (!tab_id) return;
+        // Broadcast reaches every window; only track badges for tabs owned by THIS window so
+        // foreign-window tabs never leak entries into `remoteAccountErrors`.
+        const ownedHere = workspacesStore.workspaces.some((ws) =>
+          ws.panes.some((p) => p.tabs.some((t) => t.id === tab_id)),
+        );
+        if (!ownedHere) return;
         if (status === 'not_applied' && reason) {
           const prev = remoteAccountErrors.get(tab_id);
           remoteAccountErrors.set(tab_id, { accountLabel: account_label ?? null, reason });
-          // `source === 'prepare'` already announced via `remoteAccountToken.ts` (`announceMiss`);
-          // `source === 'hook'` comes from remote SessionStart precedence verification (§6.1).
+          // `source === 'prepare'` / `'discard'` already announced via `remoteAccountToken.ts`
+          // (`announceMiss`); `source === 'hook'` comes from remote SessionStart verification (§6.1).
           if (source === 'hook' && prev?.reason !== reason) {
             const who = account_label ?? 'the active account';
             void dispatch(

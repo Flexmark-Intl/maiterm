@@ -43,6 +43,16 @@ pub(crate) fn tab_runs_remote(app: &AppState, tab_id: &str) -> bool {
     matches!(place(app, tab_id), tab_record::Place::Remote { .. })
 }
 
+/// Fresh foreground-process check for whether `tab_id` is currently running a remote SSH session
+/// (used on one-shot edges like `discard_remote_account_token`, never on periodic ticks).
+pub(crate) fn tab_runs_remote_fresh(app: &AppState, tab_id: &str) -> bool {
+    let pty = app.tab_pty_map.read().get(tab_id).cloned();
+    let fg = pty
+        .as_deref()
+        .and_then(|p| crate::pty::get_pty_foreground(app, p, true).ok().flatten());
+    fg.is_some()
+}
+
 /// The wire `account` for one chat. `Value::Null` = known unmanaged (§14.1 rule 1).
 ///
 /// **The process probe is skipped only when nothing CAN be managed**: the record is empty and no
@@ -330,6 +340,12 @@ fn apply_remote_auth_env(
         if remote.state != RemoteState::SentUnverified && !remote.env_mismatch {
             return None;
         }
+        // A clean SessionStart on a healthy (`!env_mismatch`) record has nothing to change —
+        // return BEFORE `try_bind` so we never lazily bind an unobserved history re-run to
+        // `SentUnverified` (preserving `tab_record`'s Up+Enter re-run guard).
+        if mismatch.is_none() && !remote.env_mismatch {
+            return None;
+        }
         // Only act when this SessionStart belongs to the exact SSH process this handoff owns.
         // A different ssh (or an unbound handoff whose argv doesn't match) must not be mutated.
         match (remote.ssh_pid, ssh) {
@@ -390,18 +406,32 @@ fn apply_remote_auth_env(
 ///
 /// **Only if the record is still THAT handoff's.** A newer prep for the same tab may have replaced
 /// it in the meantime, and downgrading the newer one would mark a session that did get its token
-/// as `not_applied`.
-pub(crate) fn downgrade_remote(app: &AppState, tab_id: &str, handle: &str, reason: &str) {
+/// as `not_applied`. Returns the desktop status event when the handle matched and the record was
+/// downgraded.
+pub(crate) fn downgrade_remote(
+    app: &AppState,
+    tab_id: &str,
+    handle: &str,
+    reason: &str,
+) -> Option<RemoteAccountStatusEvent> {
     let current = app.tab_accounts.read().get(tab_id).and_then(|r| r.remote.clone());
     if current.as_ref().and_then(|r| r.handle.as_deref()) != Some(handle) {
-        return;
+        return None;
     }
     let account = current.and_then(|r| r.account);
+    let account_label = account.as_ref().map(|a| a.label.clone());
     note_remote(
         app,
         tab_id,
         RemoteRecord::new(account, RemoteState::NotApplied, Some(reason.to_string())),
     );
+    Some(RemoteAccountStatusEvent {
+        tab_id: tab_id.to_string(),
+        status: "not_applied",
+        account_label,
+        reason: Some(reason.to_string()),
+        source: "discard",
+    })
 }
 
 /// Content-light by construction (§14.5): the queue carries the tab id and its NAME, and the
@@ -579,6 +609,12 @@ mod tests {
         let matching_ssh = tab_record::Place::Remote {
             ssh: Some((300, "ssh -t nova '[ -r ~/.maiterm/tokens/tok-t1-abcd ] && . x'".into())),
         };
+        let clean = tab_record::RemoteAuthEnv { oauth_token: true, shadowed_by: vec![] };
+        // A clean SessionStart must NEVER lazily bind an unbound handoff — otherwise an unobserved
+        // history Up+Enter re-run on a host exporting its own token gets served as `sent_unverified`.
+        assert!(apply_remote_auth_env(&app, &tab, matching_ssh.clone(), &clean, UP_LONG).is_none());
+        assert_eq!(app.tab_accounts.read()[&tab].remote.as_ref().unwrap().ssh_pid, None);
+
         let missing = tab_record::RemoteAuthEnv { oauth_token: false, shadowed_by: vec![] };
         let ev = apply_remote_auth_env(&app, &tab, matching_ssh, &missing, UP_LONG).unwrap();
         assert_eq!(ev.status, "not_applied");
@@ -589,7 +625,6 @@ mod tests {
         let mut refused = RemoteRecord::new(account, RemoteState::NotApplied, Some("token expired".into()));
         refused.ssh_pid = Some(400);
         note_remote_at_uptime(&app, &tab, refused, UP_LONG);
-        let clean = tab_record::RemoteAuthEnv { oauth_token: true, shadowed_by: vec![] };
         let place400 = tab_record::Place::Remote { ssh: Some((400, "ssh nova".into())) };
         assert!(apply_remote_auth_env(&app, &tab, place400, &clean, UP_LONG).is_none());
         assert_eq!(app.tab_accounts.read()[&tab].remote.as_ref().unwrap().state, RemoteState::NotApplied);

@@ -2945,8 +2945,11 @@ export async function discardRemoteAccountToken(
   tabId: string,
   sshArgs: string,
   handle: string,
+  /** Provided by `abandon()` so Rust can surface the tab error badge when this handle is still
+   *  current and SSH is still foreground. Omitted by `retract()`. */
+  reason?: string,
 ): Promise<void> {
-  return invoke('discard_remote_account_token', { tabId, sshArgs, handle });
+  return invoke('discard_remote_account_token', { tabId, sshArgs, handle, reason });
 }
 
 /** The ssh maiTerm typed for this tab has come up: bind its account handoff to that process

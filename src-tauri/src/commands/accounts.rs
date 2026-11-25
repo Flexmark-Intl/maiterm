@@ -614,31 +614,39 @@ mod tests {
         use std::ffi::OsStr;
         use std::path::Path;
 
-        let npm_cmd = Path::new(r"C:\Users\ann\AppData\Roaming\npm\claude.cmd");
-        let win_cmd = super::pty_command_for_cli_impl(npm_cmd, &["setup-token"], true);
+        // Directory with spaces + cmd.exe parens: parent goes to `cwd`, argv uses `.\claude.cmd`
+        // so `portable_pty`'s MSVC quoting never collides with `cmd.exe /c` quote stripping.
+        let tricky = Path::new("/Program Files (x86)/nodejs/claude.cmd");
+        let win_cmd = super::pty_command_for_cli_impl(tricky, &["setup-token"], true).unwrap();
         assert_eq!(
             win_cmd.get_argv(),
             &[
                 OsStr::new("cmd.exe"),
                 OsStr::new("/d"),
                 OsStr::new("/c"),
-                npm_cmd.as_os_str(),
+                OsStr::new(r".\claude.cmd"),
                 OsStr::new("setup-token"),
             ]
         );
+        assert_eq!(win_cmd.get_cwd().map(OsStr::new), Some(OsStr::new("/Program Files (x86)/nodejs")));
 
-        let bat_upper = Path::new(r"C:\bin\claude.BAT");
-        let win_bat = super::pty_command_for_cli_impl(bat_upper, &["setup-token"], true);
+        let bat_upper = Path::new("/Users/a&b/bin/claude.BAT");
+        let win_bat = super::pty_command_for_cli_impl(bat_upper, &["setup-token"], true).unwrap();
         assert_eq!(win_bat.get_argv()[0], OsStr::new("cmd.exe"));
-        assert_eq!(win_bat.get_argv()[3], bat_upper.as_os_str());
+        assert_eq!(win_bat.get_argv()[3], OsStr::new(r".\claude.BAT"));
+        assert_eq!(win_bat.get_cwd().map(OsStr::new), Some(OsStr::new("/Users/a&b/bin")));
 
-        let native_exe = Path::new(r"C:\Users\ann\.local\bin\claude.exe");
-        let win_exe = super::pty_command_for_cli_impl(native_exe, &["setup-token"], true);
+        // An unsafe batch basename is refused rather than passed to cmd.exe.
+        assert!(super::pty_command_for_cli_impl(Path::new("/bin/a&b.cmd"), &["setup-token"], true).is_err());
+
+        let native_exe = Path::new("/Users/ann/.local/bin/claude.exe");
+        let win_exe = super::pty_command_for_cli_impl(native_exe, &["setup-token"], true).unwrap();
         assert_eq!(win_exe.get_argv(), &[native_exe.as_os_str(), OsStr::new("setup-token")]);
+        assert!(win_exe.get_cwd().is_none());
 
         // On Unix, a `.cmd` path is never wrapped in `cmd.exe`.
-        let unix_cmd = super::pty_command_for_cli_impl(npm_cmd, &["setup-token"], false);
-        assert_eq!(unix_cmd.get_argv(), &[npm_cmd.as_os_str(), OsStr::new("setup-token")]);
+        let unix_cmd = super::pty_command_for_cli_impl(tricky, &["setup-token"], false).unwrap();
+        assert_eq!(unix_cmd.get_argv(), &[tricky.as_os_str(), OsStr::new("setup-token")]);
     }
 }
 
@@ -1419,20 +1427,45 @@ fn is_windows_batch_shim(cli: &std::path::Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
 }
 
+/// Safe basename for invoking `.\<name>` through `cmd.exe /d /c` without any shell quoting or
+/// metacharacter interpretation (`&<>()@^|%!"` or whitespace). Every runtime profile's CLI name
+/// (`claude.cmd`, `codex.cmd`, `gemini.cmd`) satisfies this.
+fn is_safe_cmd_filename(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
 /// Build a `portable_pty::CommandBuilder` for `cli` and `args`.
 ///
 /// Unlike `std::process::Command`, `portable_pty::CommandBuilder` passes `exe` directly to
-/// `CreateProcessW` on Windows without `.cmd`/`.bat` translation, so an npm shim like
-/// `claude.cmd` fails with `ERROR_BAD_EXE_FORMAT` (193) unless launched via `cmd.exe /d /c`.
+/// `CreateProcessW` on Windows (so `.cmd`/`.bat` shims fail with `ERROR_BAD_EXE_FORMAT`) AND
+/// quotes arguments using MSVC C-runtime rules, which break `cmd.exe /c` whenever a directory
+/// path contains spaces plus `cmd.exe` special characters like `(` `)` (`C:\Program Files (x86)`)
+/// or unquoted `&`/`^` (`C:\Users\a&b`).
+///
+/// Running `cmd.exe /d /c .\<basename> <args>` with `cmd.cwd(parent)` avoids `cmd.exe` path
+/// quoting altogether: `lpCurrentDirectory` takes the parent directory verbatim (spaces, parens,
+/// `&`, Unicode all work natively), `.\<basename>` contains no spaces or metacharacters, and the
+/// leading `.\` resolves directly in `cwd` regardless of `PATH` or `NoDefaultCurrentDirectoryInExePath`.
 fn pty_command_for_cli_impl(
     cli: &std::path::Path,
     args: &[&str],
     windows: bool,
-) -> portable_pty::CommandBuilder {
+) -> Result<portable_pty::CommandBuilder, String> {
     let mut cmd = if windows && is_windows_batch_shim(cli) {
+        let name = cli
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|n| is_safe_cmd_filename(n))
+            .ok_or_else(|| format!("cannot safely launch batch shim `{}` in a PTY", cli.display()))?;
         let mut c = portable_pty::CommandBuilder::new("cmd.exe");
         c.args(["/d", "/c"]);
-        c.arg(cli.as_os_str());
+        c.arg(format!(r".\{name}"));
+        if let Some(parent) = cli.parent().filter(|p| !p.as_os_str().is_empty()) {
+            c.cwd(parent);
+        }
         c
     } else {
         portable_pty::CommandBuilder::new(cli)
@@ -1440,10 +1473,13 @@ fn pty_command_for_cli_impl(
     for arg in args {
         cmd.arg(arg);
     }
-    cmd
+    Ok(cmd)
 }
 
-fn pty_command_for_cli(cli: &std::path::Path, args: &[&str]) -> portable_pty::CommandBuilder {
+fn pty_command_for_cli(
+    cli: &std::path::Path,
+    args: &[&str],
+) -> Result<portable_pty::CommandBuilder, String> {
     pty_command_for_cli_impl(cli, args, cfg!(windows))
 }
 
@@ -1475,7 +1511,7 @@ async fn run_mint_on_pty(
             .openpty(PtySize { rows: 50, cols: MINT_PTY_COLS, pixel_width: 0, pixel_height: 0 })
             .map_err(|e| format!("could not open a terminal for the mint: {e}"))?;
 
-        let mut cmd = pty_command_for_cli(&cli, &["setup-token"]);
+        let mut cmd = pty_command_for_cli(&cli, &["setup-token"])?;
         cmd.env(&config_env, root.to_string_lossy().to_string());
         for var in &scrub {
             cmd.env_remove(var);
@@ -2296,10 +2332,12 @@ async fn prepare_inner(
 /// swept eventually. Only the path is on the command line.
 #[tauri::command]
 pub async fn discard_remote_account_token(
+    app: tauri::AppHandle,
     state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
     tab_id: String,
     ssh_args: String,
     handle: String,
+    reason: Option<String>,
 ) -> Result<(), String> {
     // Prepared and never used: that session is NOT running as the account. Downgraded before the
     // best-effort cleanup, which can fail without changing that.
@@ -2307,12 +2345,30 @@ pub async fn discard_remote_account_token(
     // **Named by the caller's OWN prep**, not read off the tab's current record: a newer prep may
     // already have replaced that, and this must take back the file THIS prep staged — never the
     // newer one, which a live session may be about to read. The downgrade is scoped the same way.
-    crate::mailink::accounts::downgrade_remote(
-        state.inner(),
-        &tab_id,
-        &handle,
-        "the token was prepared but the session did not use it",
-    );
+    let why = reason
+        .as_deref()
+        .unwrap_or("the token was prepared but the session did not use it");
+    let downgraded = crate::mailink::accounts::downgrade_remote(state.inner(), &tab_id, &handle, why);
+    // Surface the tab error badge ONLY when:
+    //  1. the caller abandoned a live session (`reason.is_some()`, never `retract()`),
+    //  2. `downgrade_remote` confirmed this handle is still the tab's current handoff (so a
+    //     superseded abandon cannot clobber a newer healthy SSH session), and
+    //  3. an SSH session is still actually foreground (so an ssh-exit abandon never stamps a
+    //     permanent badge onto the local shell prompt).
+    if reason.is_some() {
+        if let Some(ev) = downgraded {
+            let st = state.inner().clone();
+            let tid = tab_id.clone();
+            let still_remote = tauri::async_runtime::spawn_blocking(move || {
+                crate::mailink::accounts::tab_runs_remote_fresh(&st, &tid)
+            })
+            .await
+            .unwrap_or(false);
+            if still_remote {
+                crate::mailink::accounts::emit_remote_account_status(&app, &ev);
+            }
+        }
+    }
     // A handle is always `<tab id>-<nonce>`; anything else is not this tab's to delete.
     if !handle.starts_with(&format!("{tab_id}-")) {
         return Ok(());

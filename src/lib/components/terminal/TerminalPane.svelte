@@ -846,7 +846,7 @@
         // before clearing Claude state or tearing down the bridge. Whether the ssh
         // DROPPED is not judged here: Rust does that for every terminal, mounted or
         // not (`pty/ssh_watch.rs`), and reports it through `handleDropEvent`.
-        if (claudeStateStore.getState(tabId) || hasBridge(tabId) || sshForeground) {
+        if (claudeStateStore.getState(tabId) || hasBridge(tabId) || sshForeground || claudeStateStore.getRemoteAccountError(tabId)) {
           // Fresh probe: this is the ssh-EXIT edge. A stale positive (the cache still
           // showing the ssh that just exited) leaves the old host's bridge registered
           // on the tab, and that stale 'connected' is what then blocks bridging the
@@ -865,6 +865,7 @@
               if (hasBridge(tabId)) {
                 disableBridge(tabId).catch(() => {});
               }
+              claudeStateStore.clearRemoteAccountError(tabId);
               sshForeground = null;
             }
           }).catch(() => {});
