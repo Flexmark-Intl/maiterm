@@ -258,12 +258,17 @@
     listen('quit-requested', async () => {
       logInfo('quit-requested — saving scrollback before exit');
       // Save window geometry before exit (don't wait for debounce). Skipped while the
-      // displays are asleep or a deferred restore from a minimized state is still pending —
-      // the geometry then isn't the one the user arranged for this monitor count.
+      // displays are asleep, a deferred restore from a minimized state is still pending,
+      // or the live monitor count no longer matches `currentMonitorCount` (e.g. quitting
+      // right after a dock/undock or during a pre-poll display-sleep transition) —
+      // the rect then isn't the one the user arranged for this monitor count.
       clearTimeout(geometryTimer);
       await runGeometryOp(async () => {
         if (currentMonitorCount !== null && !displaysAsleep && deferredRestoreCount === null) {
-          await commands.saveWindowGeometry(currentMonitorCount).catch(() => {});
+          const actualCount = await readMonitorCount();
+          if (actualCount === currentMonitorCount) {
+            await commands.saveWindowGeometry(currentMonitorCount).catch(() => {});
+          }
         }
       });
       await terminalsStore.saveAllScrollback();
@@ -306,13 +311,6 @@
     // by macOS can't overwrite the layout we want back on wake.
     let currentMonitorCount: number | null = null;
     let displaysAsleep = false;
-    // The monitor count this window's current rect actually describes — set when we place
-    // the window for a count, and when the user's own move/resize is persisted under one.
-    // A count we merely READ is not that: the displays can come back one at a time, and
-    // between those ticks the window is still sitting wherever a dark launch or macOS left
-    // it. Saving that rect under the count we happened to read would file a layout the
-    // user never arranged.
-    let placedFor: number | null = null;
     // Monitor count whose restore was skipped because the window was minimized (e.g. dock/undock
     // or display wake while minimized). Applied on un-minimize instead of overwriting the saved
     // layout with the un-restored rect.
@@ -348,9 +346,7 @@
       const restored = await commands.restoreWindowGeometry(count).catch(() => false);
       restoreSeq++;
       clearTimeout(geometryTimer);
-      if (restored) {
-        placedFor = count;
-      } else if (await appWindow.isMinimized().catch(() => false)) {
+      if (!restored && await appWindow.isMinimized().catch(() => false)) {
         deferredRestoreCount = count;
       }
     }
@@ -368,9 +364,7 @@
         // just applied on a lit start, and repairs a dark one. It is also the only thing
         // that ever gives "main" its per-monitor-count geometry — its launch position
         // comes from tauri-plugin-window-state, which is monitor-blind.
-        // `false` means this monitor count has no saved layout yet (a first run, a new
-        // display setup) — the window is wherever the OS put it, which is nothing we
-        // placed, so leave `placedFor` unset until the user arranges it.
+        // If this monitor count has no saved layout yet, leave the window where the OS put it.
         await restoreOrDefer(count);
       } else {
         displaysAsleep = true;
@@ -419,20 +413,11 @@
           const oldCount = currentMonitorCount;
           currentMonitorCount = count;
           logInfo(`Monitor count changed: ${oldCount} → ${count}, repositioning window`);
-          // Save current position under the old monitor count before repositioning —
-          // but only when we watched the change happen. If the displays changed while
-          // they were asleep (unplugged the external overnight), macOS has already
-          // relocated this window onto what's left, so its position now describes the
-          // NEW configuration; saving it under the old count would overwrite the
-          // arrangement we want back when those displays return.
-          // The same applies to a count we only read: macOS brings the displays back one at
-          // a time, so an intermediate tick can adopt a count while the window still sits
-          // where a dark launch left it. `placedFor` is what makes the difference visible —
-          // only a rect we placed, or one the user arranged and we saved, describes a layout
-          // worth keeping.
-          if (!wasAsleep && placedFor === oldCount && deferredRestoreCount === null) {
-            await commands.saveWindowGeometry(oldCount).catch(() => {});
-          }
+          // Do not save the current rect under `oldCount` here: by the time `available_monitors()`
+          // reports a new count (dock, undock, or wake with different displays), the OS has
+          // already evacuated or re-origined windows onto the new screen topology, so saving
+          // here would overwrite `oldCount`'s layout with a relocated rect. `oldCount`'s layout
+          // was already persisted by `saveGeometryDebounced` while `oldCount` was active.
           // Restore saved geometry for the new monitor count (if any), or defer until un-minimized.
           await restoreOrDefer(count);
         }).finally(() => {
@@ -479,9 +464,6 @@
             await restoreOrDefer(currentMonitorCount);
             return;
           }
-          // A rect the user arranged under a real count describes that layout, whatever put
-          // the window there originally.
-          placedFor = currentMonitorCount;
           await commands.saveWindowGeometry(currentMonitorCount).catch(() => {});
         });
       }, 500);
