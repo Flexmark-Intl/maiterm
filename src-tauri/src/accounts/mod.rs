@@ -153,12 +153,11 @@ pub struct RuntimeProfile {
     /// the shape of bug this module keeps finding.
     ///
     /// 1. **The runtime has not had the §5.4 verification Claude has had** (Codex, Gemini, Grok).
-    /// 2. **The platform cannot run it yet.** Windows: `resolve_cli` is Unix-shaped — it joins a
-    ///    bare `claude` and `is_executable` says so itself ("Windows would need the PATHEXT
-    ///    dance") — while an npm install puts `claude.cmd` on PATH, which `Command::new` never
-    ///    finds because it only ever appends `.exe`. So no sign-in, no verify, no sign-out. On
-    ///    top of that `reconcile`'s symlink farm needs Developer Mode or elevation there, and
-    ///    `browser::suppress_default_browser` cannot shim a PowerShell launch.
+    /// 2. **The platform cannot run it yet.** Windows: `reconcile`'s symlink farm needs Developer
+    ///    Mode or elevation on a normal user account, `browser::suppress_default_browser` cannot
+    ///    shim a PowerShell launch, and the full flow has not been verified on a real Windows box
+    ///    (`resolve_cli` / `find_executables` now handle Windows `PATHEXT` and `.cmd` shims, so
+    ///    that part is ready when the rest lands).
     ///
     /// An unsupported runtime is shown in the UI as not yet available, never silently
     /// half-wired. That is the whole point: until 2026-09-20 the env injection sat inside the
@@ -219,7 +218,7 @@ static CLAUDE: RuntimeProfile = RuntimeProfile {
         "CLAUDE_SECURESTORAGE_CONFIG_DIR",
     ],
     // Verified on macOS; Linux is written but unrun. NOT Windows — see `supported`'s docs for
-    // the three things that have to land first. `cfg!` is const-evaluable, so the gate lives
+    // the remaining things that have to land first. `cfg!` is const-evaluable, so the gate lives
     // here beside the profile rather than in every caller.
     supported: cfg!(unix),
 };
@@ -417,36 +416,176 @@ pub fn cli_candidates(profile: &RuntimeProfile) -> Vec<PathBuf> {
     find_executables(profile.cli)
 }
 
-/// Every executable named `cli` on PATH or in the usual install locations, PATH first. The
-/// GUI app's own PATH is launchd's, so the per-user and Homebrew bins are searched too.
-pub fn find_executables(cli: &str) -> Vec<PathBuf> {
-    if cli.is_empty() {
-        return Vec::new();
+/// Extensions that `std::process::Command::new` can spawn on Windows: `CreateProcessW` launches
+/// `.exe`/`.com` directly and Rust's `Command` invokes `%COMSPEC%` for `.bat`/`.cmd`. Other
+/// default `PATHEXT` entries (`.vbs`, `.js`, `.msc`, …) fail with `ERROR_BAD_EXE_FORMAT`.
+const WINDOWS_LAUNCHABLE_EXTS: &[&str] = &[".com", ".exe", ".bat", ".cmd"];
+
+/// Parse a Windows `PATHEXT` value into normalized lowercase launchable extensions in priority
+/// order. Falls back to `WINDOWS_LAUNCHABLE_EXTS` when `PATHEXT` is unset, empty, or contains
+/// no launchable extensions.
+#[cfg(any(windows, test))]
+fn parse_pathext(raw: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(raw) = raw {
+        for part in raw.split(';') {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let lower = trimmed.to_ascii_lowercase();
+            if WINDOWS_LAUNCHABLE_EXTS.contains(&lower.as_str()) && !out.contains(&lower) {
+                out.push(lower);
+            }
+        }
     }
-    let mut candidates: Vec<PathBuf> = Vec::new();
+    if out.is_empty() {
+        WINDOWS_LAUNCHABLE_EXTS.iter().map(|s| (*s).to_string()).collect()
+    } else {
+        out
+    }
+}
+
+/// Whether `cli` already carries a launchable Windows executable extension (e.g. `claude.exe` or
+/// `claude.cmd`), as opposed to a bare name (`claude`) or a dot that is part of the name
+/// (`python3.12`).
+fn has_windows_exe_ext(cli: &str) -> bool {
+    Path::new(cli)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| {
+            let dot_ext = format!(".{}", e.to_ascii_lowercase());
+            WINDOWS_LAUNCHABLE_EXTS.contains(&dot_ext.as_str())
+        })
+}
+
+fn search_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
     if let Some(path) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path) {
-            candidates.push(dir.join(cli));
+            if !dir.as_os_str().is_empty() {
+                dirs.push(dir);
+            }
         }
     }
     if let Some(h) = dirs::home_dir() {
         // Claude Code's native install location, then the usual per-user bins.
-        for d in [".local/bin", "bin", ".bun/bin", ".volta/bin", ".npm-global/bin"] {
-            candidates.push(h.join(d).join(cli));
+        for parts in [
+            &[".local", "bin"][..],
+            &["bin"][..],
+            &[".bun", "bin"][..],
+            &[".volta", "bin"][..],
+            &[".npm-global", "bin"][..],
+        ] {
+            let mut p = h.clone();
+            for part in parts {
+                p.push(part);
+            }
+            dirs.push(p);
+        }
+        #[cfg(windows)]
+        dirs.push(h.join("scoop").join("shims"));
+    }
+    #[cfg(windows)]
+    {
+        if let Some(ad) = std::env::var_os("APPDATA") {
+            if !ad.is_empty() {
+                dirs.push(PathBuf::from(ad).join("npm"));
+            }
+        }
+        if let Some(lad) = std::env::var_os("LOCALAPPDATA") {
+            if !lad.is_empty() {
+                dirs.push(PathBuf::from(lad).join("Microsoft").join("WinGet").join("Links"));
+            }
         }
     }
+    #[cfg(unix)]
     for d in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
-        candidates.push(Path::new(d).join(cli));
+        dirs.push(PathBuf::from(d));
+    }
+    dirs
+}
+
+/// Core of `find_executables`, factored out so both Unix and Windows `PATHEXT` resolution can be
+/// unit-tested on any host OS.
+///
+/// When `pathext` is `Some(exts)` (Windows mode), bare names are probed ONLY with those
+/// extensions in order — never bare — so an npm-installed extensionless POSIX shim (`claude`)
+/// sitting beside `claude.cmd` is skipped rather than handed to `Command::new`.
+fn find_executables_in(
+    cli: &str,
+    dirs: &[PathBuf],
+    pathext: Option<&[String]>,
+    is_exec: impl Fn(&Path) -> bool,
+) -> Vec<PathBuf> {
+    if cli.is_empty() {
+        return Vec::new();
     }
     let mut out: Vec<PathBuf> = Vec::new();
-    for c in candidates {
-        if is_executable(&c) && !out.contains(&c) {
-            out.push(c);
+    let mut seen_ci: Vec<String> = Vec::new();
+
+    let mut consider = |candidate: PathBuf| {
+        if !is_exec(&candidate) {
+            return;
+        }
+        if pathext.is_some() {
+            // Windows paths are case-insensitive and may mix `/` and `\`.
+            let key = candidate.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
+            if seen_ci.contains(&key) {
+                return;
+            }
+            seen_ci.push(key);
+        } else if out.contains(&candidate) {
+            return;
+        }
+        out.push(candidate);
+    };
+
+    for dir in dirs {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        match pathext {
+            Some(exts) => {
+                if has_windows_exe_ext(cli) {
+                    consider(dir.join(cli));
+                } else {
+                    for ext in exts {
+                        consider(dir.join(format!("{cli}{ext}")));
+                    }
+                }
+            }
+            None => {
+                consider(dir.join(cli));
+            }
         }
     }
     out
 }
 
+/// Every executable named `cli` on PATH or in the usual install locations, PATH first. The
+/// GUI app's own PATH is launchd's on macOS, so the per-user and system bins are searched too.
+///
+/// On Windows, bare names are resolved via `PATHEXT` (`.com`, `.exe`, `.bat`, `.cmd`) so npm's
+/// `claude.cmd` is found while the extensionless POSIX shim beside it is ignored.
+pub fn find_executables(cli: &str) -> Vec<PathBuf> {
+    if cli.is_empty() {
+        return Vec::new();
+    }
+    let dirs = search_dirs();
+    #[cfg(windows)]
+    {
+        let pathext_raw = std::env::var("PATHEXT").ok();
+        let exts = parse_pathext(pathext_raw.as_deref());
+        find_executables_in(cli, &dirs, Some(&exts), |p| p.is_file())
+    }
+    #[cfg(not(windows))]
+    {
+        find_executables_in(cli, &dirs, None, is_executable)
+    }
+}
+
+#[cfg(not(windows))]
 fn is_executable(p: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -457,7 +596,6 @@ fn is_executable(p: &Path) -> bool {
     }
     #[cfg(not(unix))]
     {
-        // Windows would need the PATHEXT dance; no runtime is supported there yet.
         p.is_file()
     }
 }
@@ -1472,10 +1610,11 @@ mod tests {
     #[test]
     fn claude_spawn_env_sets_the_root_and_scrubs_every_shadowing_var() {
         let Some((set, scrub)) = spawn_env(Runtime::Claude, "acct-1") else {
-            // Windows: `CLAUDE.supported` is `cfg!(unix)` until `resolve_cli` learns PATHEXT and
-            // the symlink farm stops needing elevation, so "no env at all" is the CORRECT answer
-            // — it is what stops the pane promising a tab an account it cannot deliver. Assert
-            // the gate rather than skipping, so this test still means something on Windows CI.
+            // Windows: `CLAUDE.supported` is `cfg!(unix)` until the symlink farm stops needing
+            // elevation and the Windows flow is verified on a real box, so "no env at all" is the
+            // CORRECT answer — it is what stops the pane promising a tab an account it cannot
+            // deliver. Assert the gate rather than skipping, so this test still means something on
+            // Windows CI.
             assert!(!cfg!(unix), "Claude spawn env is missing on a platform that supports it");
             assert!(!CLAUDE.supported);
             return;
@@ -1790,5 +1929,148 @@ mod tests {
         incoming_reminted.managed_accounts[0].token_minted_at = Some(1800);
         preserve_remote_seen_hosts(&mut incoming_reminted, &existing);
         assert!(incoming_reminted.managed_accounts[0].remote_seen_hosts.is_empty());
+    }
+
+    #[test]
+    fn parse_pathext_respects_order_filters_non_launchable_and_falls_back() {
+        // Default Windows PATHEXT drops script-host entries Command::new cannot spawn.
+        assert_eq!(
+            parse_pathext(Some(".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC")),
+            vec![".com", ".exe", ".bat", ".cmd"]
+        );
+        // Custom order, mixed case, whitespace, blanks and duplicates are normalized in order.
+        assert_eq!(
+            parse_pathext(Some(" .CMD ; ; .exe ; .CMD ; EXE ; .bat ")),
+            vec![".cmd", ".exe", ".bat"]
+        );
+        // Unset, blank, or non-launchable-only PATHEXT falls back to the standard four.
+        assert_eq!(parse_pathext(None), vec![".com", ".exe", ".bat", ".cmd"]);
+        assert_eq!(parse_pathext(Some("  ;  ")), vec![".com", ".exe", ".bat", ".cmd"]);
+        assert_eq!(parse_pathext(Some(".VBS;.JS")), vec![".com", ".exe", ".bat", ".cmd"]);
+    }
+
+    #[test]
+    fn windows_pathext_finds_npm_cmd_and_ignores_extensionless_posix_shim() {
+        // `npm i -g @anthropic-ai/claude-code` lays down `claude` (POSIX sh), `claude.cmd`, and
+        // `claude.ps1` side by side. The old code probed bare `claude`, matched the POSIX shim,
+        // and handed an unrunnable script to `Command::new`.
+        let base = tmp();
+        let npm_dir = base.join("npm");
+        fs::create_dir_all(&npm_dir).unwrap();
+        fs::write(npm_dir.join("claude"), "#!/bin/sh\n").unwrap();
+        fs::write(npm_dir.join("claude.cmd"), "@ECHO off\r\n").unwrap();
+        fs::write(npm_dir.join("claude.ps1"), "# ps1\n").unwrap();
+
+        let exts = parse_pathext(Some(".COM;.EXE;.BAT;.CMD;.VBS;.JS"));
+        let found = find_executables_in("claude", &[npm_dir.clone()], Some(&exts), |p| p.is_file());
+        assert_eq!(found, vec![npm_dir.join("claude.cmd")]);
+
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn windows_pathext_respects_ext_order_dir_order_explicit_ext_and_dots() {
+        let base = tmp();
+        let first = base.join("first");
+        let second = base.join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(first.join("claude.exe"), "pe").unwrap();
+        fs::write(first.join("claude.cmd"), "bat").unwrap();
+        fs::write(second.join("claude.cmd"), "bat2").unwrap();
+        fs::write(first.join("python3.12.exe"), "py").unwrap();
+        // A directory with an executable extension must not match as a file.
+        fs::create_dir_all(second.join("python3.12.exe")).unwrap();
+
+        // Default PATHEXT puts .exe ahead of .cmd inside the same directory, then moves to next dir.
+        let default_exts = parse_pathext(None);
+        let found = find_executables_in(
+            "claude",
+            &[PathBuf::new(), first.clone(), second.clone()],
+            Some(&default_exts),
+            |p| p.is_file(),
+        );
+        assert_eq!(
+            found,
+            vec![first.join("claude.exe"), first.join("claude.cmd"), second.join("claude.cmd")]
+        );
+
+        // Custom PATHEXT putting .cmd before .exe flips precedence within a directory.
+        let cmd_first = parse_pathext(Some(".CMD;.EXE"));
+        let found = find_executables_in("claude", &[first.clone()], Some(&cmd_first), |p| p.is_file());
+        assert_eq!(found, vec![first.join("claude.cmd"), first.join("claude.exe")]);
+
+        // Explicit executable extension probes directly without double-appending (.cmd.exe).
+        let explicit = find_executables_in("claude.cmd", &[first.clone()], Some(&default_exts), |p| p.is_file());
+        assert_eq!(explicit, vec![first.join("claude.cmd")]);
+        // Case-insensitive explicit extension check (in-memory predicate works on case-sensitive FS).
+        let explicit_upper = find_executables_in(
+            "claude.CMD",
+            &[PathBuf::from("C:/bin")],
+            Some(&default_exts),
+            |p| p == Path::new("C:/bin/claude.CMD"),
+        );
+        assert_eq!(explicit_upper, vec![PathBuf::from("C:/bin/claude.CMD")]);
+
+        // A dot that is not a launchable extension (versioned binary) still gets PATHEXT appended,
+        // and a directory bearing the same name in `second` is skipped.
+        let versioned = find_executables_in(
+            "python3.12",
+            &[first.clone(), second.clone()],
+            Some(&default_exts),
+            |p| p.is_file(),
+        );
+        assert_eq!(versioned, vec![first.join("python3.12.exe")]);
+
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn windows_pathext_dedups_case_and_separator_variants() {
+        let exts = parse_pathext(Some(".EXE;.CMD"));
+        let dirs = vec![
+            PathBuf::from(r"C:\Users\Ann\AppData\Roaming\npm"),
+            PathBuf::from("c:/users/ann/appdata/roaming/npm"),
+        ];
+        let found = find_executables_in("claude", &dirs, Some(&exts), |p| {
+            p.to_string_lossy().to_ascii_lowercase().ends_with("claude.cmd")
+        });
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0], dirs[0].join("claude.cmd"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_find_executables_checks_exec_bit_and_skips_non_executable_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = tmp();
+        let a = base.join("a");
+        let b = base.join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+
+        let non_exec = a.join("claude");
+        fs::write(&non_exec, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&non_exec, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let exec = b.join("claude");
+        fs::write(&exec, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&exec, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let found = find_executables_in("claude", &[a, b.clone(), b.clone()], None, is_executable);
+        assert_eq!(found, vec![exec]);
+
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_find_executables_locates_cmd_via_pathext() {
+        let found = find_executables("cmd");
+        assert!(
+            found.iter().any(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"))),
+            "expected cmd.exe on Windows PATH, got {found:?}"
+        );
     }
 }
