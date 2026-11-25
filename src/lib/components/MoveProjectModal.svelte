@@ -116,6 +116,8 @@
     if (a.codex_sessions) out.push(`Codex: ${a.codex_sessions} session${a.codex_sessions === 1 ? '' : 's'}`);
     if (a.codex_trust) out.push('Codex: folder trust');
     if (a.gemini_projects) out.push(`Gemini: ${a.gemini_projects} project${a.gemini_projects === 1 ? '' : 's'}`);
+    if (a.agy_sessions) out.push(`Antigravity: ${a.agy_sessions} session${a.agy_sessions === 1 ? '' : 's'}`);
+    if (a.agy_trust) out.push('Antigravity: folder trust');
     return out;
   });
 </script>

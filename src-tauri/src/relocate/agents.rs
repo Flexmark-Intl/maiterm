@@ -10,6 +10,7 @@
 //! shared files edited here (`.claude.json`, `history.jsonl`): `update_file` redoes an edit the
 //! file changed under.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -63,6 +64,8 @@ pub struct AgentPlan {
     pub codex_sessions: usize,
     pub codex_trust: bool,
     pub gemini_projects: usize,
+    pub agy_sessions: usize,
+    pub agy_trust: bool,
 }
 
 /// What a move did, in sentences for the result toast and the log.
@@ -87,6 +90,7 @@ pub fn apply(old: &Path, new: &Path, known: &[String]) -> AgentReport {
 
 pub fn plan_in(h: &Homes, old: &Path, new: &Path) -> AgentPlan {
     let c = claude_plan(&h.claude_projects, old, new);
+    let agy_dir = h.gemini.join("antigravity-cli");
     AgentPlan {
         claude_sessions: c.sessions.len(),
         claude_memory: c.dirs.iter().any(|(from, _)| from.join("memory").is_dir()),
@@ -94,6 +98,8 @@ pub fn plan_in(h: &Homes, old: &Path, new: &Path) -> AgentPlan {
         codex_sessions: codex_threads(&h.codex, old, new).len(),
         codex_trust: fs::read_to_string(h.codex.join("config.toml")).is_ok_and(|t| codex_trust_keys(&t, old, new) > 0),
         gemini_projects: read_json(&h.gemini.join("projects.json")).map_or(0, |v| keys_under(&v["projects"], old, new)),
+        agy_sessions: agy_session_ids(&agy_dir, old, new).len(),
+        agy_trust: read_json(&agy_dir.join("settings.json")).is_some_and(|v| agy_trusted_count(&v, old, new) > 0),
     }
 }
 
@@ -102,6 +108,7 @@ pub fn apply_in(h: &Homes, old: &Path, new: &Path, known: &[String]) -> AgentRep
     claude(h, old, new, &mut r);
     codex(h, old, new, &mut r);
     gemini(h, old, new, known, &mut r);
+    antigravity(h, old, new, &mut r);
     r
 }
 
@@ -672,6 +679,288 @@ fn gemini(h: &Homes, old: &Path, new: &Path, known: &[String], r: &mut AgentRepo
     }
 }
 
+// ── Antigravity (agy) ───────────────────────────────────────────────────────────────────────
+
+/// Rebase a `file://` workspace URI from `old` onto `new` (percent-decoding the path, matching
+/// component boundaries via `rebase`, and re-encoding as a `file://` URI). Non-`file://` URIs,
+/// remote `file://host/...` URIs, URIs with query/fragment, and paths outside `old` return `None`.
+fn rebase_file_uri(uri: &str, old: &Path, new: &Path) -> Option<String> {
+    let u = reqwest::Url::parse(uri).ok()?;
+    if u.scheme() != "file" || u.query().is_some() || u.fragment().is_some() {
+        return None;
+    }
+    let path = u.to_file_path().ok()?;
+    let rebased = rebase(path.to_str()?, old, new)?;
+    reqwest::Url::from_file_path(&rebased).ok().map(String::from)
+}
+
+fn dedup_values(list: &mut Vec<Value>) {
+    let mut seen = Vec::with_capacity(list.len());
+    list.retain(|v| {
+        let keep = !seen.contains(v);
+        if keep {
+            seen.push(v.clone());
+        }
+        keep
+    });
+}
+
+fn rebase_path_array(list: &mut Vec<Value>, old: &Path, new: &Path) -> bool {
+    let mut changed = false;
+    for item in list.iter_mut() {
+        if let Some(orig) = item.as_str() {
+            if let Some(rb) = rebase(orig, old, new) {
+                if rb != orig {
+                    *item = Value::String(rb);
+                    changed = true;
+                }
+            }
+        }
+    }
+    if changed {
+        dedup_values(list);
+    }
+    changed
+}
+
+fn rebase_uri_array(list: &mut Vec<Value>, old: &Path, new: &Path) -> bool {
+    let mut changed = false;
+    for item in list.iter_mut() {
+        if let Some(orig) = item.as_str() {
+            if let Some(rb) = rebase_file_uri(orig, old, new) {
+                if rb != orig {
+                    *item = Value::String(rb);
+                    changed = true;
+                }
+            }
+        }
+    }
+    if changed {
+        dedup_values(list);
+    }
+    changed
+}
+
+fn rebase_workspace_uris_json(raw: &str, old: &Path, new: &Path) -> Option<String> {
+    let mut v: Value = serde_json::from_str(raw).ok()?;
+    let list = v.as_array_mut()?;
+    if !rebase_uri_array(list, old, new) {
+        return None;
+    }
+    serde_json::to_string(&v).ok()
+}
+
+fn agy_trusted_count(v: &Value, old: &Path, new: &Path) -> usize {
+    v.get("trustedWorkspaces")
+        .and_then(Value::as_array)
+        .map_or(0, |list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .filter(|s| rebase(s, old, new).is_some_and(|rb| rb != *s))
+                .count()
+        })
+}
+
+fn is_missing_table_err(e: &rusqlite::Error) -> bool {
+    matches!(e, rusqlite::Error::SqliteFailure(_, Some(msg)) if msg.contains("no such table"))
+}
+
+/// Conversation IDs in `conversation_summaries.db` whose `workspace_uris` array has an entry under `old`.
+fn agy_summary_ids(db_path: &Path, old: &Path, new: &Path) -> rusqlite::Result<Vec<String>> {
+    if !db_path.is_file() {
+        return Ok(vec![]);
+    }
+    let db = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    db.busy_timeout(std::time::Duration::from_secs(2))?;
+    let mut st = match db.prepare("SELECT conversation_id, workspace_uris FROM conversation_summaries") {
+        Ok(st) => st,
+        Err(e) if is_missing_table_err(&e) => return Ok(vec![]),
+        Err(e) => return Err(e),
+    };
+    let rows = st.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+    let mut ids = vec![];
+    for row in rows {
+        let (id, raw) = row?;
+        if rebase_workspace_uris_json(&raw, old, new).is_some() {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
+/// Unique Antigravity conversation IDs associated with `old` across `conversation_summaries.db`,
+/// `cache/conversation_metadata.json`, and `cache/last_conversations.json`.
+fn agy_session_ids(agy: &Path, old: &Path, new: &Path) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    if let Ok(db_ids) = agy_summary_ids(&agy.join("conversation_summaries.db"), old, new) {
+        ids.extend(db_ids);
+    }
+    if let Some(meta) = read_json(&agy.join("cache/conversation_metadata.json")) {
+        if let Some(convs) = meta.get("conversations").and_then(Value::as_object) {
+            for (id, entry) in convs {
+                let hit = entry
+                    .get("summary")
+                    .and_then(|s| s.get("WorkspaceURIs"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|uris| {
+                        uris.iter()
+                            .filter_map(Value::as_str)
+                            .any(|u| rebase_file_uri(u, old, new).is_some_and(|rb| rb != u))
+                    });
+                if hit {
+                    ids.insert(id.clone());
+                }
+            }
+        }
+    }
+    if let Some(last) = read_json(&agy.join("cache/last_conversations.json")) {
+        if let Some(m) = last.as_object() {
+            for (k, v) in m {
+                if rebase(k, old, new).is_some_and(|rb| rb != *k) {
+                    let id = v.as_str().filter(|s| !s.is_empty()).unwrap_or(k);
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+    }
+    ids
+}
+
+fn update_agy_summary_db(db_path: &Path, old: &Path, new: &Path) -> rusqlite::Result<Vec<String>> {
+    let mut db = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    db.busy_timeout(std::time::Duration::from_secs(5))?;
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let updates: Vec<(String, String)> = {
+        let mut st = match tx.prepare("SELECT conversation_id, workspace_uris FROM conversation_summaries") {
+            Ok(st) => st,
+            Err(e) if is_missing_table_err(&e) => return Ok(vec![]),
+            Err(e) => return Err(e),
+        };
+        let rows = st.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        let mut out = vec![];
+        for row in rows {
+            let (id, raw) = row?;
+            if let Some(updated) = rebase_workspace_uris_json(&raw, old, new) {
+                out.push((id, updated));
+            }
+        }
+        out
+    };
+    if !updates.is_empty() {
+        let mut upd = tx.prepare("UPDATE conversation_summaries SET workspace_uris = ?1 WHERE conversation_id = ?2")?;
+        for (id, updated) in &updates {
+            upd.execute(rusqlite::params![updated, id])?;
+        }
+    }
+    tx.commit()?;
+    Ok(updates.into_iter().map(|(id, _)| id).collect())
+}
+
+fn antigravity(h: &Homes, old: &Path, new: &Path, r: &mut AgentReport) {
+    let agy = h.gemini.join("antigravity-cli");
+    if !agy.is_dir() {
+        return;
+    }
+
+    // 1. Folder trust: `settings.json` `trustedWorkspaces: string[]`.
+    let settings = agy.join("settings.json");
+    let res = update_json(&settings, |v| {
+        v.get_mut("trustedWorkspaces")
+            .and_then(Value::as_array_mut)
+            .is_some_and(|list| rebase_path_array(list, old, new))
+    });
+    match res {
+        Ok(true) => r.done.push("Antigravity: folder trust moved".into()),
+        Ok(false) => {}
+        Err(e) => r.warnings.push(format!("Antigravity: couldn't update {}: {e}", settings.display())),
+    }
+
+    // 2. Prompt history: `history.jsonl` `"workspace"` field.
+    let hist = agy.join("history.jsonl");
+    if let Err(e) = update_jsonl(&hist, old, |v| {
+        let Some(orig) = v.get("workspace").and_then(Value::as_str) else { return false };
+        let Some(rb) = rebase(orig, old, new).filter(|n| n != orig) else { return false };
+        v["workspace"] = Value::String(rb);
+        true
+    }) {
+        r.warnings.push(format!("Antigravity: couldn't update prompt history {}: {e}", hist.display()));
+    }
+
+    let mut moved_ids: HashSet<String> = HashSet::new();
+
+    // 3. `cache/last_conversations.json`: `{ "<abs_path>": "<conversation_id>" }` (used by `agy --continue`).
+    let last_conv = agy.join("cache/last_conversations.json");
+    let mut lc_ids: Vec<String> = vec![];
+    let res = update_json(&last_conv, |v| {
+        lc_ids.clear();
+        let Some(m) = v.as_object_mut() else { return false };
+        for (k, val) in m.iter() {
+            if rebase(k, old, new).is_some_and(|rb| rb != *k) {
+                let id = val.as_str().filter(|s| !s.is_empty()).unwrap_or(k);
+                lc_ids.push(id.to_string());
+            }
+        }
+        rekey(m, old, new) > 0
+    });
+    match res {
+        Ok(true) => moved_ids.extend(lc_ids),
+        Ok(false) => {}
+        Err(e) => r.warnings.push(format!("Antigravity: couldn't update {}: {e}", last_conv.display())),
+    }
+
+    // 4. `cache/conversation_metadata.json`: `conversations.<id>.summary.WorkspaceURIs`.
+    let meta = agy.join("cache/conversation_metadata.json");
+    let mut meta_ids: Vec<String> = vec![];
+    let res = update_json(&meta, |v| {
+        meta_ids.clear();
+        let Some(convs) = v.get_mut("conversations").and_then(Value::as_object_mut) else { return false };
+        let mut changed = false;
+        for (id, entry) in convs.iter_mut() {
+            if let Some(uris) = entry
+                .get_mut("summary")
+                .and_then(|s| s.get_mut("WorkspaceURIs"))
+                .and_then(Value::as_array_mut)
+            {
+                if rebase_uri_array(uris, old, new) {
+                    meta_ids.push(id.clone());
+                    changed = true;
+                }
+            }
+        }
+        changed
+    });
+    match res {
+        Ok(true) => moved_ids.extend(meta_ids),
+        Ok(false) => {}
+        Err(e) => r.warnings.push(format!("Antigravity: couldn't update {}: {e}", meta.display())),
+    }
+
+    // 5. `conversation_summaries.db`: `conversation_summaries.workspace_uris` JSON array column.
+    //    Opaque protobuf blobs (`raw_summary`, `conversations/<id>.db`'s `trajectory_metadata_blob`)
+    //    and the derived FTS5 index (`conversations_fts`) are intentionally left untouched.
+    let db_path = agy.join("conversation_summaries.db");
+    if db_path.is_file() {
+        match agy_summary_ids(&db_path, old, new) {
+            Ok(ids) if ids.is_empty() => {}
+            Ok(_) => match update_agy_summary_db(&db_path, old, new) {
+                Ok(updated) => moved_ids.extend(updated),
+                Err(e) => r.warnings.push(format!("Antigravity: couldn't update {}: {e}", db_path.display())),
+            },
+            Err(e) => r.warnings.push(format!("Antigravity: couldn't read {}: {e}", db_path.display())),
+        }
+    }
+
+    if !moved_ids.is_empty() {
+        r.done.push(format!("Antigravity: {} session(s) moved", moved_ids.len()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -944,5 +1233,322 @@ mod tests {
         assert_eq!(fs::read_to_string(g.join("tmp/a/.project_root")).unwrap(), "/u/b");
         assert!(g.join("tmp").join(sha256_hex("/u/b/sub")).is_dir());
         assert_eq!(read_json(&g.join("trustedFolders.json")).unwrap()["/u/b"], "TRUST_FOLDER");
+    }
+
+    fn create_agy_summary_db(path: &Path, rows: &[(&str, &str, &[u8])]) {
+        let db = rusqlite::Connection::open(path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE conversation_summaries (
+                conversation_id TEXT PRIMARY KEY,
+                workspace_uris TEXT NOT NULL,
+                raw_summary BLOB
+            );",
+        )
+        .unwrap();
+        for (id, uris, blob) in rows {
+            db.execute(
+                "INSERT INTO conversation_summaries (conversation_id, workspace_uris, raw_summary) VALUES (?1, ?2, ?3)",
+                rusqlite::params![id, uris, blob],
+            )
+            .unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_trust_history_caches_and_summaries_follow_the_folder() {
+        let s = scratch();
+        let (old, new) = (Path::new("/u/IDE/aiTerm"), Path::new("/u/IDE/maiterm"));
+        let agy = s.h.gemini.join("antigravity-cli");
+        fs::create_dir_all(agy.join("cache")).unwrap();
+
+        // Symlinked settings.json: trust array has old, subfolder, already-present new (dedup),
+        // sibling sharing the prefix, and unrelated path; permissions must stay untouched.
+        let real_settings = s.base.join("dotfiles-agy-settings.json");
+        fs::write(
+            &real_settings,
+            json!({
+                "permissions": { "allow": ["mcp(maiterm/*)"] },
+                "trustedWorkspaces": [
+                    "/u/IDE/maiterm",
+                    "/u/IDE/aiTerm",
+                    "/u/IDE/aiTerm/src",
+                    "/u/IDE/aiTerm-backup",
+                    "/u/other"
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&real_settings, agy.join("settings.json")).unwrap();
+
+        // history.jsonl: root, subfolder, sibling, unrelated, and a non-JSON line kept verbatim.
+        fs::write(
+            agy.join("history.jsonl"),
+            concat!(
+                "{\"display\":\"root\",\"workspace\":\"/u/IDE/aiTerm\",\"conversationId\":\"c1\"}\n",
+                "{\"display\":\"sub\",\"workspace\":\"/u/IDE/aiTerm/src\"}\n",
+                "{\"display\":\"sib\",  \"workspace\":\"/u/IDE/aiTerm-backup\"}\r\n",
+                "{\"display\":\"other\",\"workspace\":\"/u/other\"}\n",
+                "not json /u/IDE/aiTerm\n",
+            ),
+        )
+        .unwrap();
+
+        // cache/last_conversations.json: root moves; subfolder collides with newer new/src (new wins); sibling stays.
+        fs::write(
+            agy.join("cache/last_conversations.json"),
+            json!({
+                "/u/IDE/aiTerm": "c1",
+                "/u/IDE/aiTerm/src": "c-old-sub",
+                "/u/IDE/maiterm/src": "c-new-sub",
+                "/u/IDE/aiTerm-backup": "c-sib"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // cache/conversation_metadata.json: root, multi-URI with duplicate after rebase + cloud URI,
+        // sibling, and internal entry with no summary.
+        fs::write(
+            agy.join("cache/conversation_metadata.json"),
+            json!({
+                "conversations": {
+                    "c1": {
+                        "summary": {
+                            "ID": "c1",
+                            "WorkspaceURIs": ["file:///u/IDE/aiTerm"]
+                        }
+                    },
+                    "c2": {
+                        "summary": {
+                            "ID": "c2",
+                            "WorkspaceURIs": [
+                                "file:///u/IDE/maiterm/src",
+                                "file:///u/IDE/aiTerm/src",
+                                "https://cloud.example/proj"
+                            ]
+                        }
+                    },
+                    "c-sib": {
+                        "summary": {
+                            "ID": "c-sib",
+                            "WorkspaceURIs": ["file:///u/IDE/aiTerm-backup"]
+                        }
+                    },
+                    "c-internal": {
+                        "is_internal": true
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // conversation_summaries.db: c1, c2 (with raw_summary blob that must remain untouched), and sibling.
+        let raw_blob: &[u8] = b"\x0a\x10opaque-protobuf-bytes";
+        create_agy_summary_db(
+            &agy.join("conversation_summaries.db"),
+            &[
+                ("c1", r#"["file:///u/IDE/aiTerm"]"#, raw_blob),
+                ("c2", r#"["file:///u/IDE/aiTerm/src","file:///u/other"]"#, raw_blob),
+                ("c-sib", r#"["file:///u/IDE/aiTerm-backup"]"#, raw_blob),
+            ],
+        );
+
+        let plan = plan_in(&s.h, old, new);
+        assert!(plan.agy_trust);
+        // Unique IDs across DB, metadata, and last_conversations: c1, c2, c-old-sub.
+        assert_eq!(plan.agy_sessions, 3);
+
+        let r = apply_in(&s.h, old, new, &[]);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert!(r.done.iter().any(|d| d.contains("Antigravity: folder trust moved")), "{:?}", r.done);
+        assert!(r.done.iter().any(|d| d.contains("Antigravity: 3 session(s) moved")), "{:?}", r.done);
+
+        // Symlink preserved and trustedWorkspaces deduplicated.
+        assert!(fs::symlink_metadata(agy.join("settings.json")).unwrap().file_type().is_symlink());
+        let st = read_json(&real_settings).unwrap();
+        assert_eq!(st["permissions"]["allow"], json!(["mcp(maiterm/*)"]));
+        assert_eq!(
+            st["trustedWorkspaces"],
+            json!(["/u/IDE/maiterm", "/u/IDE/maiterm/src", "/u/IDE/aiTerm-backup", "/u/other"])
+        );
+
+        // history.jsonl: matching lines rebased; untouched lines kept byte-for-byte.
+        let hist = fs::read_to_string(agy.join("history.jsonl")).unwrap();
+        assert!(hist.contains("\"workspace\":\"/u/IDE/maiterm\""));
+        assert!(hist.contains("\"workspace\":\"/u/IDE/maiterm/src\""));
+        assert!(hist.contains("{\"display\":\"sib\",  \"workspace\":\"/u/IDE/aiTerm-backup\"}\r\n"));
+        assert!(hist.contains("not json /u/IDE/aiTerm\n"));
+
+        // cache/last_conversations.json: root moved, existing new/src kept, sibling untouched.
+        let lc = read_json(&agy.join("cache/last_conversations.json")).unwrap();
+        assert_eq!(lc["/u/IDE/maiterm"], "c1");
+        assert!(lc.get("/u/IDE/aiTerm").is_none());
+        assert_eq!(lc["/u/IDE/maiterm/src"], "c-new-sub");
+        assert!(lc.get("/u/IDE/aiTerm/src").is_none());
+        assert_eq!(lc["/u/IDE/aiTerm-backup"], "c-sib");
+
+        // cache/conversation_metadata.json: URIs rebased & deduped, cloud & sibling untouched.
+        let meta = read_json(&agy.join("cache/conversation_metadata.json")).unwrap();
+        assert_eq!(meta["conversations"]["c1"]["summary"]["WorkspaceURIs"], json!(["file:///u/IDE/maiterm"]));
+        assert_eq!(
+            meta["conversations"]["c2"]["summary"]["WorkspaceURIs"],
+            json!(["file:///u/IDE/maiterm/src", "https://cloud.example/proj"])
+        );
+        assert_eq!(
+            meta["conversations"]["c-sib"]["summary"]["WorkspaceURIs"],
+            json!(["file:///u/IDE/aiTerm-backup"])
+        );
+        assert_eq!(meta["conversations"]["c-internal"]["is_internal"], true);
+
+        // conversation_summaries.db: workspace_uris updated, sibling untouched, raw_summary untouched.
+        let db = rusqlite::Connection::open(agy.join("conversation_summaries.db")).unwrap();
+        let (u1, b1): (String, Vec<u8>) = db
+            .query_row("SELECT workspace_uris, raw_summary FROM conversation_summaries WHERE conversation_id='c1'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(u1, r#"["file:///u/IDE/maiterm"]"#);
+        assert_eq!(b1, raw_blob);
+        let u2: String = db
+            .query_row("SELECT workspace_uris FROM conversation_summaries WHERE conversation_id='c2'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(u2, r#"["file:///u/IDE/maiterm/src","file:///u/other"]"#);
+        let usib: String = db
+            .query_row("SELECT workspace_uris FROM conversation_summaries WHERE conversation_id='c-sib'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(usib, r#"["file:///u/IDE/aiTerm-backup"]"#);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_percent_encoded_spaces_in_file_uris_roundtrip() {
+        let s = scratch();
+        let (old, new) = (Path::new("/u/IDE/website 2025"), Path::new("/u/IDE/website 2026"));
+        let agy = s.h.gemini.join("antigravity-cli");
+        fs::create_dir_all(agy.join("cache")).unwrap();
+
+        fs::write(
+            agy.join("settings.json"),
+            json!({ "trustedWorkspaces": ["/u/IDE/website 2025/static/images"] }).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            agy.join("history.jsonl"),
+            "{\"display\":\"img\",\"workspace\":\"/u/IDE/website 2025/static/images\"}\n",
+        )
+        .unwrap();
+        fs::write(
+            agy.join("cache/last_conversations.json"),
+            json!({ "/u/IDE/website 2025/static/images": "c-img" }).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            agy.join("cache/conversation_metadata.json"),
+            json!({
+                "conversations": {
+                    "c-img": {
+                        "summary": {
+                            "WorkspaceURIs": ["file:///u/IDE/website%202025/static/images"]
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        create_agy_summary_db(
+            &agy.join("conversation_summaries.db"),
+            &[("c-img", r#"["file:///u/IDE/website%202025/static/images"]"#, b"")],
+        );
+
+        let plan = plan_in(&s.h, old, new);
+        assert!(plan.agy_trust);
+        assert_eq!(plan.agy_sessions, 1);
+
+        let r = apply_in(&s.h, old, new, &[]);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+
+        assert_eq!(
+            read_json(&agy.join("settings.json")).unwrap()["trustedWorkspaces"],
+            json!(["/u/IDE/website 2026/static/images"])
+        );
+        assert!(fs::read_to_string(agy.join("history.jsonl"))
+            .unwrap()
+            .contains("\"workspace\":\"/u/IDE/website 2026/static/images\""));
+        assert_eq!(
+            read_json(&agy.join("cache/last_conversations.json")).unwrap()["/u/IDE/website 2026/static/images"],
+            "c-img"
+        );
+        assert_eq!(
+            read_json(&agy.join("cache/conversation_metadata.json")).unwrap()["conversations"]["c-img"]["summary"]["WorkspaceURIs"],
+            json!(["file:///u/IDE/website%202026/static/images"])
+        );
+        let db = rusqlite::Connection::open(agy.join("conversation_summaries.db")).unwrap();
+        let uris: String = db
+            .query_row("SELECT workspace_uris FROM conversation_summaries WHERE conversation_id='c-img'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(uris, r#"["file:///u/IDE/website%202026/static/images"]"#);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_missing_empty_or_corrupt_db_handled_cleanly() {
+        let s = scratch();
+        let (old, new) = (Path::new("/u/a"), Path::new("/u/b"));
+        let agy = s.h.gemini.join("antigravity-cli");
+        fs::create_dir_all(&agy).unwrap();
+        fs::write(agy.join("settings.json"), json!({ "trustedWorkspaces": ["/u/a"] }).to_string()).unwrap();
+
+        // Missing DB must not be created.
+        let r = apply_in(&s.h, old, new, &[]);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert!(!agy.join("conversation_summaries.db").exists());
+
+        // Empty SQLite DB with no conversation_summaries table produces no warning.
+        let empty_db = rusqlite::Connection::open(agy.join("conversation_summaries.db")).unwrap();
+        empty_db.execute_batch("CREATE TABLE unrelated (id TEXT);").unwrap();
+        drop(empty_db);
+        let r = apply_in(&s.h, Path::new("/u/b"), Path::new("/u/c"), &[]);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert_eq!(read_json(&agy.join("settings.json")).unwrap()["trustedWorkspaces"], json!(["/u/c"]));
+
+        // Corrupt DB warns without blocking settings.json update.
+        fs::write(agy.join("conversation_summaries.db"), b"not a sqlite database").unwrap();
+        let r = apply_in(&s.h, Path::new("/u/c"), Path::new("/u/d"), &[]);
+        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+        assert!(r.warnings[0].contains("conversation_summaries.db"));
+        assert_eq!(read_json(&agy.join("settings.json")).unwrap()["trustedWorkspaces"], json!(["/u/d"]));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_antigravity_paths_and_file_uris_follow_the_folder() {
+        let s = scratch();
+        let (old, new) = (Path::new(r"C:\u\a"), Path::new(r"C:\u\b"));
+        let agy = s.h.gemini.join("antigravity-cli");
+        fs::create_dir_all(agy.join("cache")).unwrap();
+        fs::write(agy.join("settings.json"), json!({ "trustedWorkspaces": [r"C:\u\a"] }).to_string()).unwrap();
+        fs::write(agy.join("history.jsonl"), format!("{}\n", json!({ "display": "hi", "workspace": r"C:\u\a\src" }))).unwrap();
+        fs::write(agy.join("cache/last_conversations.json"), json!({ r"C:\u\a": "c1" }).to_string()).unwrap();
+        create_agy_summary_db(&agy.join("conversation_summaries.db"), &[("c1", r#"["file:///C:/u/a"]"#, b"")]);
+
+        let plan = plan_in(&s.h, old, new);
+        assert!(plan.agy_trust);
+        assert_eq!(plan.agy_sessions, 1);
+
+        let r = apply_in(&s.h, old, new, &[]);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert_eq!(read_json(&agy.join("settings.json")).unwrap()["trustedWorkspaces"], json!([r"C:\u\b"]));
+        let hist: Value = serde_json::from_str(fs::read_to_string(agy.join("history.jsonl")).unwrap().trim()).unwrap();
+        assert_eq!(hist["workspace"], r"C:\u\b\src");
+        assert_eq!(read_json(&agy.join("cache/last_conversations.json")).unwrap()[r"C:\u\b"], "c1");
+        let db = rusqlite::Connection::open(agy.join("conversation_summaries.db")).unwrap();
+        let uris: String = db
+            .query_row("SELECT workspace_uris FROM conversation_summaries WHERE conversation_id='c1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(uris, r#"["file:///C:/u/b"]"#);
     }
 }

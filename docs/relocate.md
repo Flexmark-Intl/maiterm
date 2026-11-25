@@ -102,6 +102,14 @@ markers — they must agree, or Gemini claims a fresh slug and the history looks
 installs: `tmp|history/<sha256(path)>`, one-way, so only paths maiTerm's state knows are found.
 `trustedFolders.json` keys.
 
+**Antigravity (`agy`).** Lives under `~/.gemini/antigravity-cli/`:
+- `settings.json` `trustedWorkspaces` array entries (rebased and deduplicated, through symlinks).
+- `history.jsonl` `"workspace"` fields on matching lines (other lines copied byte for byte).
+- `cache/last_conversations.json` path keys (used by `agy --continue`; an entry already at the new path wins).
+- `cache/conversation_metadata.json` `conversations.<id>.summary.WorkspaceURIs` (`file://` URIs, percent-decoded/re-encoded).
+- `conversation_summaries.db` `conversation_summaries.workspace_uris` JSON array column (updated inside an `IMMEDIATE` transaction).
+- Intentionally untouched: opaque protobuf blobs (`conversation_summaries.raw_summary`, `jetbox_summaries_proto.pb`, and `conversations/<id>.db`'s `trajectory_metadata_blob`) and the derived FTS5 index (`conversations_fts`), since modifying undocumented binary payloads without an `agy` schema guarantee risks corrupting conversation files.
+
 ## 4. A folder that is gone (`relocate/detect.rs`)
 
 `pty::spawn_pty` falls back to home when the cwd isn't a directory. That stays — a tab must

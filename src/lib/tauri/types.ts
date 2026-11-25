@@ -2244,6 +2244,8 @@ export interface AgentPlan {
   codex_sessions: number;
   codex_trust: boolean;
   gemini_projects: number;
+  agy_sessions: number;
+  agy_trust: boolean;
 }
 
 export interface RelocatePreview {
