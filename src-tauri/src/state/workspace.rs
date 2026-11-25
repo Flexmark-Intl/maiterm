@@ -1021,13 +1021,21 @@ pub struct Workspace {
     pub pane_sizes: Option<PaneSizes>,
 }
 
-/// Saved window geometry (logical pixels) for a specific monitor configuration.
+/// Saved window geometry for a specific monitor configuration.
+///
+/// `width` and `height` are always logical inner size (DIPs).
+/// `x` and `y` are global logical outer origin on macOS/Linux (`physical_position == false`),
+/// and unified physical virtual-desktop pixels on Windows (`physical_position == true`).
+/// Legacy Windows entries omit `physical_position` (defaulting to `false`) and fall back to
+/// `x * window_scale` on restore until overwritten on the next save.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowGeometry {
     pub x: f64,
     pub y: f64,
     pub width: f64,
     pub height: f64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub physical_position: bool,
 }
 
 impl WindowGeometry {
@@ -1035,10 +1043,11 @@ impl WindowGeometry {
     ///
     /// On Windows, minimizing a window moves it to the Win32 off-screen sentinel
     /// `(-32000, -32000)` and collapses its inner size to `0x0` (or the iconic `160x28`
-    /// bar). Depending on DPI scaling (100%–300%), the scaled logical coordinates land
-    /// around `-32000` to `-10667` on BOTH axes. Normal multi-monitor setups legitimately
-    /// use negative coordinates (e.g. a secondary display at `x = -2560, y = 0`), so a
-    /// negative coordinate alone is valid; tiny sizes and sentinel-range coordinates are not.
+    /// bar). New Windows saves store raw physical coordinates (`physical_position == true`,
+    /// sentinel at `-32000`), while legacy entries divided by DPI (100%–300% -> `-32000` to
+    /// `-10667` on BOTH axes). Normal multi-monitor setups legitimately use negative
+    /// coordinates (e.g. a secondary display at `x = -2560, y = 0`), so a negative coordinate
+    /// alone is valid; tiny sizes and sentinel-range coordinates are not.
     pub fn is_valid(&self) -> bool {
         if !self.x.is_finite()
             || !self.y.is_finite()
@@ -1052,8 +1061,10 @@ impl WindowGeometry {
         if self.width < 200.0 || self.height < 150.0 {
             return false;
         }
-        // Win32 minimized sentinel (-32000, -32000) divided by DPI scale (up to 300% = -10667).
-        if self.x <= -10_000.0 && self.y <= -10_000.0 {
+        // Win32 minimized sentinel (-32000, -32000): raw when physical_position is true,
+        // or divided by DPI scale (up to 300% = -10667) in legacy entries.
+        let sentinel = if self.physical_position { -30_000.0 } else { -10_000.0 };
+        if self.x <= sentinel && self.y <= sentinel {
             return false;
         }
         if self.x.abs() > 30_000.0 || self.y.abs() > 30_000.0 {
@@ -1167,7 +1178,7 @@ impl WindowData {
     /// Migrate legacy flat fields into the geometry map (called on first save).
     pub fn migrate_legacy_geometry(&mut self, monitor_count: usize) {
         if let (Some(x), Some(y), Some(w), Some(h)) = (self.window_x, self.window_y, self.window_width, self.window_height) {
-            let geom = WindowGeometry { x, y, width: w, height: h };
+            let geom = WindowGeometry { x, y, width: w, height: h, physical_position: false };
             if geom.is_valid() {
                 self.window_geometry.entry(monitor_count.to_string()).or_insert(geom);
             }

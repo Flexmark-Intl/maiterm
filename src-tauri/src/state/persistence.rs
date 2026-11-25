@@ -1243,11 +1243,12 @@ mod migration_tests {
         use crate::state::WindowGeometry;
         let mut data = window_with_legacy("ws-1", serde_json::json!([]));
         let win = &mut data.windows[0];
-        // Corrupted Windows minimized entries (100% and 150% DPI).
-        win.window_geometry.insert("1".into(), WindowGeometry { x: -32000.0, y: -32000.0, width: 0.0, height: 0.0 });
-        win.window_geometry.insert("2".into(), WindowGeometry { x: -21333.33, y: -21333.33, width: 1200.0, height: 800.0 });
-        // Valid secondary-monitor negative x coordinate.
-        win.window_geometry.insert("3".into(), WindowGeometry { x: -1920.0, y: 40.0, width: 1400.0, height: 900.0 });
+        // Corrupted Windows minimized entries (100% physical and legacy 150% scaled).
+        win.window_geometry.insert("1".into(), WindowGeometry { x: -32000.0, y: -32000.0, width: 0.0, height: 0.0, physical_position: true });
+        win.window_geometry.insert("2".into(), WindowGeometry { x: -21333.33, y: -21333.33, width: 1200.0, height: 800.0, physical_position: false });
+        // Valid secondary-monitor negative x coordinate and Windows physical multi-monitor coordinate.
+        win.window_geometry.insert("3".into(), WindowGeometry { x: -1920.0, y: 40.0, width: 1400.0, height: 900.0, physical_position: false });
+        win.window_geometry.insert("4".into(), WindowGeometry { x: 4000.0, y: 100.0, width: 1200.0, height: 800.0, physical_position: true });
         win.last_geometry_monitors = Some(1);
 
         migrate_app_data(&mut data);
@@ -1256,6 +1257,7 @@ mod migration_tests {
         assert!(!win.window_geometry.contains_key("1"), "0x0 minimized geometry dropped");
         assert!(!win.window_geometry.contains_key("2"), "-32000/scale minimized geometry dropped");
         assert!(win.window_geometry.contains_key("3"), "valid negative multi-monitor geometry kept");
+        assert!(win.window_geometry.contains_key("4"), "valid Windows physical multi-monitor geometry kept");
         assert_eq!(win.last_geometry_monitors, None, "dangling last_geometry_monitors cleared");
     }
 }

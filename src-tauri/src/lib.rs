@@ -602,21 +602,9 @@ pub fn run() {
                 match builder.build() {
                     Ok(win) => {
                         if let Some(ref geom) = geometry {
-                            let scale = win.scale_factor().ok().filter(|s| s.is_finite() && *s > 0.0).unwrap_or(1.0);
-                            let monitors = win.available_monitors().unwrap_or_default();
-                            if commands::window::geometry_visible_on_monitors(geom, scale, &monitors) {
+                            if commands::window::apply_restored_position(&win, geom, &label) {
                                 log::info!("Restoring window '{}' at ({}, {}) size {}x{} (monitors={})",
                                     label, geom.x, geom.y, w, h, monitor_count.unwrap_or(0));
-                                let phys_x = (geom.x * scale).round() as i32;
-                                let phys_y = (geom.y * scale).round() as i32;
-                                if let Err(e) = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(phys_x, phys_y))) {
-                                    log::warn!("Failed to set position for '{}': {}", label, e);
-                                }
-                            } else {
-                                log::warn!(
-                                    "Skipping off-screen saved position for '{}' at ({}, {}) {}x{} (monitors={})",
-                                    label, geom.x, geom.y, w, h, monitor_count.unwrap_or(0)
-                                );
                             }
                         }
                     }
