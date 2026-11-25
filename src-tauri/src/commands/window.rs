@@ -1061,6 +1061,7 @@ pub fn open_preferences_window(window: tauri::WebviewWindow, app: tauri::AppHand
 
         let title = if cfg!(debug_assertions) { "Preferences (Dev)" } else { "Preferences" };
 
+        #[cfg_attr(target_os = "windows", allow(unused_mut))]
         let mut builder = WebviewWindowBuilder::new(&app, "preferences", url)
             .title(title)
             .inner_size(pref_w, pref_h)
@@ -1137,6 +1138,7 @@ pub fn open_help_window(window: tauri::WebviewWindow, app: tauri::AppHandle, sec
 
         let title = if cfg!(debug_assertions) { "Help (Dev)" } else { "Help" };
 
+        #[cfg_attr(target_os = "windows", allow(unused_mut))]
         let mut builder = WebviewWindowBuilder::new(&app, "help", url)
             .title(title)
             .inner_size(help_w, help_h)
