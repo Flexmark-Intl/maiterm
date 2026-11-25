@@ -5698,6 +5698,20 @@ async fn hooks_handler(
         }
     }
 
+    // Which of a tab's session records is its running agent (mailink `current_session_id`).
+    // One lock at a time: `current_session_id` takes agent_sessions, then this.
+    if !session_id.is_empty() {
+        let crowded = {
+            let mut seen = srv.state.agent_session_seen.write();
+            seen.insert(session_id.clone(), std::time::Instant::now());
+            seen.len() > 1024
+        };
+        if crowded {
+            let live: std::collections::HashSet<String> = srv.state.agent_sessions.read().keys().cloned().collect();
+            srv.state.agent_session_seen.write().retain(|id, _| id == &session_id || live.contains(id));
+        }
+    }
+
     // tab_id comes from query param (set by the command hook script from $MAITERM_TAB_ID)
     // Validate it actually exists — it may be stale after HMR reload or tab recreation.
     let tab_id_from_param = params.get("tab_id").and_then(|raw_id| {

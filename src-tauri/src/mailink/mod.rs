@@ -5474,15 +5474,14 @@ pub(crate) fn pty_for_tab(app: &AppState, tab_id: &str) -> Option<String> {
 }
 
 /// The (runtime, session id) whose transcript we read for a tab: its CURRENT session
-/// (`current_session_id` — the one its agent last started as, when that has a record).
+/// (`current_session_id`).
 ///
 /// A tab can hold a second, stale record: a SessionEnd that never arrived (Git Bash on Windows
 /// can miss the hook's 5 s), a resume that minted a new id. This used to pick the most
 /// attention-worthy record, as `session_states` does for the status, with no tie-break. While
 /// the live agent worked it was `Active` and won; once it went idle the stale record tied or
 /// outranked it and won instead, so the phone's thread fell back to the pre-reload transcript
-/// whenever the agent rested (Darryl's Windows PC, 2026-11-22). Rank still picks among records
-/// when none is the saved session, with ties broken by id so every poll agrees.
+/// whenever the agent rested (Darryl's Windows PC, 2026-11-22).
 fn live_session_for_tab(app: &AppState, tab_id: &str) -> Option<(AgentRuntime, String)> {
     let id = current_session_id(app, tab_id)?;
     let runtime = app.agent_sessions.read().get(&id)?.runtime;
@@ -5634,22 +5633,61 @@ pub(crate) fn mod_ask_for_prompt(app: &AppState, tab_id: &str, kind: &str) -> Op
     }
 }
 
-/// The tab's current agent session: the one its agent last started as (the session id saved on
-/// the tab at SessionStart, which `--resume` uses), when that session has a record; else the
-/// highest-ranked record, ties broken by id so every poll agrees.
+/// The tab's current agent session. With more than one record on the tab, the one maiTerm last
+/// received a hook event for (`AppState::agent_session_seen`): the running agent sends them, a
+/// leftover record never does. Then the session id saved on the tab, then rank, then id, so
+/// every poll agrees.
+///
+/// The saved id alone is not enough. It reaches the tab through the webview (`agent-init-session`
+/// → the `claudeSessionId` variable), only from a SessionStart that arrived; when that event was
+/// lost it still names the OLD session, and following it showed the pre-reload conversation every
+/// time (Darryl's Windows PC on v3.18.0, 2026-11-24).
 pub(crate) fn current_session_id(app: &AppState, tab_id: &str) -> Option<String> {
-    let saved = persisted_session_for_tab(app, tab_id).map(|(_, id)| id);
-    let sessions = app.agent_sessions.read();
-    if let Some(id) = saved {
-        if sessions.get(&id).is_some_and(|s| s.tab_id == tab_id) {
-            return Some(id);
-        }
-    }
-    sessions
+    let mine: Vec<(String, AgentSessionState)> = app
+        .agent_sessions
+        .read()
         .iter()
         .filter(|(_, s)| s.tab_id == tab_id)
-        .max_by(|(a, x), (b, y)| rank(x.state).cmp(&rank(y.state)).then_with(|| a.cmp(b)))
-        .map(|(id, _)| id.clone())
+        .map(|(id, s)| (id.clone(), s.state))
+        .collect();
+    if mine.len() <= 1 {
+        return mine.into_iter().next().map(|(id, _)| id);
+    }
+    let seen: Vec<Option<std::time::Instant>> = {
+        let seen = app.agent_session_seen.read();
+        mine.iter().map(|(id, _)| seen.get(id).copied()).collect()
+    };
+    let saved = persisted_session_for_tab(app, tab_id).map(|(_, id)| id);
+    let chosen = mine
+        .iter()
+        .zip(&seen)
+        .max_by(|((a, x), at_a), ((b, y), at_b)| {
+            at_a.cmp(at_b)
+                .then_with(|| (saved.as_ref() == Some(a)).cmp(&(saved.as_ref() == Some(b))))
+                .then_with(|| rank(*x).cmp(&rank(*y)))
+                .then_with(|| a.cmp(b))
+        })
+        .map(|((id, _), _)| id.clone());
+    if let (Some(c), Some(s)) = (&chosen, &saved) {
+        if c != s && mine.iter().any(|(id, _)| id == s) {
+            log_once_saved_session_passed_over(tab_id, s, c);
+        }
+    }
+    chosen
+}
+
+/// Logged once per (tab, saved, chosen): the tab's saved session id lost to a record that sent a
+/// hook event more recently, i.e. the saved id was not updated when the agent started.
+fn log_once_saved_session_passed_over(tab_id: &str, saved: &str, chosen: &str) {
+    static LOGGED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    let key = format!("{tab_id}/{saved}/{chosen}");
+    let mut logged = LOGGED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    if logged.len() < 256 && logged.insert(key) {
+        log::info!(
+            "maiLink: tab {} holds two agent sessions; following {} (latest hook event), not the saved {}",
+            &tab_id[..tab_id.len().min(8)], &chosen[..chosen.len().min(8)], &saved[..saved.len().min(8)]
+        );
+    }
 }
 
 /// Unix-ms when the tab's open AskUserQuestion was captured. Display-only on the phone
@@ -8681,6 +8719,17 @@ mod tests {
         assert_eq!(live_session_for_tab(&app, &tab).unwrap().1, "stale", "the higher rank");
         app.agent_sessions.write().get_mut("live").unwrap().state = AgentSessionState::WaitingInput;
         assert_eq!(live_session_for_tab(&app, &tab).unwrap().1, "stale", "ties go to the larger id, on every poll");
+        // The saved id still names the old session (its successor's SessionStart was lost), but
+        // the live agent is the one sending events: it wins, idle or not.
+        app.app_data.write().windows[0].workspaces[0].panes[0].tabs[0]
+            .trigger_variables.insert("claudeSessionId".into(), "stale".into());
+        let now = std::time::Instant::now();
+        app.agent_session_seen.write().insert("stale".into(), now - std::time::Duration::from_secs(600));
+        app.agent_session_seen.write().insert("live".into(), now);
+        assert_eq!(live_session_for_tab(&app, &tab).unwrap().1, "live", "the latest hook event wins over the saved id");
+        // A record that has sent nothing since maiTerm started loses to one that has.
+        app.agent_session_seen.write().remove("stale");
+        assert_eq!(live_session_for_tab(&app, &tab).unwrap().1, "live");
     }
 
     #[test]

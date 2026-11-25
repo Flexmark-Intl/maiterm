@@ -287,6 +287,10 @@ pub struct AppState {
     // session (`/hooks?via=mod`). The settings.json hooks still fire beneath the mod, and their
     // copies of an event it sent moments ago are dropped (claude_code/server.rs hooks_handler).
     pub mod_agent_sessions: RwLock<HashMap<String, Instant>>,
+    // Agent session id → when maiTerm last received a hook event for it (claude_code/server.rs
+    // hooks_handler, after the mod dedup). Picks which of a tab's session records is the agent
+    // actually running (mailink `current_session_id`): a leftover record sends nothing.
+    pub agent_session_seen: RwLock<HashMap<String, Instant>>,
     // Permission dialogs and questions a maiterm-tab mod hook is waiting to be answered on
     // (claude_code/mod_asks.rs): the delivery path that replaces keystrokes for those tabs.
     pub mod_asks: crate::claude_code::mod_asks::ModAsks,
@@ -365,6 +369,7 @@ impl AppState {
             pending_agent_sessions: RwLock::new(Vec::new()),
             contested_agent_sessions: RwLock::new(HashMap::new()),
             mod_agent_sessions: RwLock::new(HashMap::new()),
+            agent_session_seen: RwLock::new(HashMap::new()),
             mod_asks: Default::default(),
             mod_inbox: Default::default(),
             mailink_pairing_codes: RwLock::new(HashMap::new()),
