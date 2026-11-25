@@ -161,7 +161,7 @@ fn fast_timing() -> GitTiming {
 #[test]
 fn decorations_follow_the_disk_and_a_commit_clears_them() {
     let r = repo("git-e2e");
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     ft.set_git_config(GitConfig { timing: fast_timing(), ..GitConfig::default() });
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
@@ -222,7 +222,7 @@ fn decorations_follow_the_disk_and_a_commit_clears_them() {
 fn an_agent_bash_end_runs_git_like_a_terminal_command() {
     let r = repo("git-agent");
     let (git_probe, rx) = GitProbe::new();
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     ft.set_git_config(GitConfig { timing: fast_timing(), probe: Some(git_probe), ..GitConfig::default() });
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
@@ -249,7 +249,7 @@ fn an_agent_bash_end_runs_git_like_a_terminal_command() {
 fn a_late_subscriber_gets_everything_and_a_paused_one_catches_up_whole() {
     let r = repo("git-subs");
     std::fs::write(r.join("README.md"), "changed\n").unwrap();
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     ft.set_git_config(GitConfig { timing: fast_timing(), ..GitConfig::default() });
     let a = Arc::new(Recorder::default());
     let ack_a = ft.open("w1", &r.to_string_lossy(), vec![], a.clone(), vec![]).unwrap();
@@ -285,7 +285,7 @@ fn a_late_subscriber_gets_everything_and_a_paused_one_catches_up_whole() {
 fn turning_decorations_off_clears_them_and_runs_nothing() {
     let r = repo("git-off");
     std::fs::write(r.join("README.md"), "changed\n").unwrap();
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     let (probe, rx) = GitProbe::new();
     ft.set_git_config(GitConfig { timing: fast_timing(), probe: Some(probe), ..GitConfig::default() });
     let rec = Arc::new(Recorder::default());
@@ -306,7 +306,7 @@ fn turning_decorations_off_clears_them_and_runs_nothing() {
 #[test]
 fn a_command_finishing_in_the_repo_schedules_a_run() {
     let r = repo("git-cmd");
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     ft.set_git_config(GitConfig { timing: fast_timing(), ..GitConfig::default() });
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &r.join("src").to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
@@ -332,7 +332,7 @@ fn slow_mode_trips_on_two_slow_runs_skips_worktree_edges_and_recovers() {
     let r = repo("git-slow");
     let (git_probe, rx) = GitProbe::new();
     let timing = fast_timing();
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     ft.set_git_config(GitConfig { timing, probe: Some(git_probe.clone()), ..GitConfig::default() });
     // Every run is measured as instant until the test says otherwise: the open's runs are
     // never timed by the clock.
@@ -441,7 +441,7 @@ fn signals_during_a_run_collapse_into_one_rerun() {
     let bin = temp_root("git-stub2");
     let stub = StubGit::new(&bin);
     let (git_probe, rx) = GitProbe::new();
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     ft.set_git_config(stub.config(git_probe));
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
@@ -596,7 +596,7 @@ fn find_never_lists_a_tracked_file_deleted_from_the_worktree() {
     std::fs::write(r.join("kept.txt"), "k").unwrap();
     std::fs::remove_file(r.join("README.md")).unwrap();
     std::fs::remove_dir_all(r.join("src")).unwrap();
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &r.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     let hub = ft.hub_of(ack.sub_id).unwrap();
@@ -648,7 +648,7 @@ fn find_builds_its_index_on_the_first_query_and_follows_the_disk() {
     std::fs::create_dir_all(r.join("dist")).unwrap();
     std::fs::write(r.join("dist/bundle.js"), "").unwrap();
     std::fs::write(r.join("src/untracked_helper.ts"), "").unwrap();
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     ft.set_git_config(GitConfig { timing: fast_timing(), ..GitConfig::default() });
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
@@ -703,7 +703,7 @@ fn find_builds_its_index_on_the_first_query_and_follows_the_disk() {
 #[test]
 fn a_rebuild_leaves_one_index_thread_not_one_per_build() {
     let r = repo("find-rebuild");
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &r.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     let hub = ft.hub_of(ack.sub_id).unwrap();

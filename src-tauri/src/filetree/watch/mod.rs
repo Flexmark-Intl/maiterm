@@ -127,12 +127,46 @@ pub enum HubWatch {
 pub struct WatchContext {
     #[cfg(target_os = "linux")]
     pub inotify: Option<Arc<inotify::SharedInotify>>,
+    /// Tests: stand-in watcher that starts immediately and emits nothing of its own, so tests
+    /// driven by `Probe::deliver` or `go_deaf` do not queue dozens of `FSEventStreamStart` RPCs
+    /// behind each other in `fseventsd` under parallel `cargo test --lib`.
+    #[cfg(test)]
+    pub synthetic: bool,
+}
+
+#[cfg(test)]
+impl WatchContext {
+    pub fn synthetic() -> Self {
+        Self { synthetic: true, ..Default::default() }
+    }
+}
+
+#[cfg(test)]
+struct NoopDirWatch;
+
+#[cfg(test)]
+impl DirWatch for NoopDirWatch {
+    fn add(&mut self, _dir: &Path) -> Result<(), WatchError> {
+        Ok(())
+    }
+
+    fn remove(&mut self, _dir: &Path) {}
 }
 
 /// The watcher for a new hub, and why it is degraded if it is.
 pub fn create(root: &Path, shallow: bool, network: bool, sender: RawSender, ctx: &WatchContext) -> (HubWatch, Option<String>) {
     if network {
         return (HubWatch::None, None);
+    }
+    #[cfg(test)]
+    if ctx.synthetic {
+        let _ = (root, sender);
+        let hw = if cfg!(target_os = "linux") || shallow {
+            HubWatch::PerDir(Box::new(NoopDirWatch))
+        } else {
+            HubWatch::Recursive(Box::new(()))
+        };
+        return (hw, None);
     }
     #[cfg(target_os = "linux")]
     {
@@ -174,6 +208,11 @@ pub fn create_git(git_dirs: &[PathBuf], sender: RawSender, ctx: &WatchContext) -
     }
     if dirs.is_empty() {
         return None;
+    }
+    #[cfg(test)]
+    if ctx.synthetic {
+        let _ = sender;
+        return Some(Box::new(()) as Box<dyn Send>);
     }
     #[cfg(target_os = "linux")]
     {

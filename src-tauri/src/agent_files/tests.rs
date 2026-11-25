@@ -445,7 +445,7 @@ fn wait_for(what: &str, timeout: Duration, mut f: impl FnMut() -> bool) {
 /// account, never a sleep. FSEvents may still report the setup's writes at any time, late or
 /// never (docs/file-tree.md §6.1); nothing below depends on whether it does.
 fn open_tree(root: &Path, excludes: Vec<String>) -> (Arc<FileTreeState>, Arc<Recorder>, u64, Probe, Arc<RootHub>) {
-    let ft = FileTreeState::with(Duration::from_secs(30), crate::filetree::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), crate::filetree::watch::RAW_CAPACITY);
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), excludes).unwrap();

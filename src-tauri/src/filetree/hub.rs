@@ -2269,7 +2269,7 @@ mod stall_tests {
         const CHUNKS: usize = 3;
         let root = std::env::temp_dir().join(format!("ft-early-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let ft = super::super::FileTreeState::with(Duration::from_secs(30), super::super::watch::RAW_CAPACITY, None);
+        let ft = super::super::FileTreeState::for_test(Duration::from_secs(30), super::super::watch::RAW_CAPACITY);
         let probe = super::super::test_support::Probe::new(&ft);
         let rec = Arc::new(Recorder::default());
         let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
@@ -2330,7 +2330,7 @@ mod stall_tests {
         }
         let root = crate::share::canon(&root);
         assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&root).status().unwrap().success());
-        let ft = super::super::FileTreeState::with(Duration::from_secs(30), super::super::watch::RAW_CAPACITY, None);
+        let ft = super::super::FileTreeState::for_test(Duration::from_secs(30), super::super::watch::RAW_CAPACITY);
         let probe = super::super::test_support::Probe::new(&ft);
         let rec = Arc::new(Recorder::default());
         let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();

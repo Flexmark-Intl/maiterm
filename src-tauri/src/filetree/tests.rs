@@ -276,7 +276,7 @@ fn converge(variant: Variant, seed: u64) {
     let extra = if matches!(variant, Variant::WithheldAcks) { 320 } else { 30 };
     seed_tree(&root, extra, &mut rng);
     let cap = if matches!(variant, Variant::Overflow) { 4 } else { super::watch::RAW_CAPACITY };
-    let ft = FileTreeState::with(Duration::from_millis(200), cap, None);
+    let ft = FileTreeState::for_test(Duration::from_millis(200), cap);
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
@@ -460,7 +460,7 @@ fn converges_across_many_seeds() {
 #[test]
 fn a_change_arrives_as_a_delta_from_the_held_generation() {
     let root = temp_root("delta");
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
@@ -507,7 +507,7 @@ fn a_known_generation_is_answered_not_modified() {
     let root = temp_root("notmod");
     std::fs::create_dir_all(root.join("a")).unwrap();
     std::fs::write(root.join("a/x"), "").unwrap();
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![DirReq { rel: "a".into(), known_gen: None }], rec.clone(), vec![]).unwrap();
@@ -540,7 +540,7 @@ fn a_known_generation_is_answered_not_modified() {
 #[test]
 fn a_deleted_root_says_root_gone() {
     let root = temp_root("rootgone");
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
@@ -582,7 +582,7 @@ fn git_init_in_an_open_root_reopens_it_with_its_repository() {
     // decorations for good, and a reopen within the grace period got the same hub back.
     let root = temp_root("gitinit");
     std::fs::write(root.join("a.ts"), "x").unwrap();
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     ft.hold_graces();
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
@@ -634,7 +634,7 @@ fn an_edge_relists_what_the_watcher_never_reported() {
         std::fs::write(root.join(d).join("one.txt"), "").unwrap();
     }
     age(&[&root, &root.join("a"), &root.join("b")]);
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let open = vec![DirReq { rel: "a".into(), known_gen: None }, DirReq { rel: "b".into(), known_gen: None }];
@@ -734,7 +734,7 @@ fn an_edge_relists_what_the_watcher_never_reported() {
 fn a_lost_git_init_reopens_on_an_edge() {
     let root = temp_root("gitedge");
     std::fs::write(root.join("a.ts"), "x").unwrap();
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
@@ -762,7 +762,7 @@ fn a_lost_ignore_rule_change_shows_after_an_edge() {
     std::fs::write(root.join("dist/bundle.js"), "").unwrap();
     git_init(&root);
     std::fs::create_dir_all(root.join(".git/info")).unwrap();
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
@@ -804,7 +804,7 @@ fn idle_edges_over_a_future_dated_gitignore_do_nothing() {
     let future = std::time::UNIX_EPOCH + Duration::from_secs(1_900_000_000);
     std::fs::File::options().write(true).open(root.join(".gitignore")).unwrap().set_modified(future).unwrap();
     age(&[&root, &root.join("a"), &root.join("a/b")]);
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let open = vec![DirReq { rel: "a".into(), known_gen: None }, DirReq { rel: "a/b".into(), known_gen: None }];
@@ -837,7 +837,7 @@ fn a_lost_gitignore_in_a_closed_folder_shows_when_reopened() {
     std::fs::create_dir_all(root.join("other")).unwrap();
     std::fs::write(root.join("pkg/gen/x.js"), "").unwrap();
     age(&[&root, &root.join("pkg"), &root.join("pkg/gen"), &root.join("other")]);
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
@@ -881,7 +881,7 @@ fn a_folder_loaded_for_git_or_find_opens_with_the_rules_on_disk() {
         git_init(&root);
         std::fs::create_dir_all(root.join("pkg/gen")).unwrap();
         std::fs::write(root.join("pkg/x.ts"), "").unwrap();
-        let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+        let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
         let probe = Probe::new(&ft);
         let rec = Arc::new(Recorder::default());
         let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
@@ -919,7 +919,7 @@ fn a_lost_gitignore_shows_when_reopened_within_the_grace() {
         if in_place {
             std::fs::write(root.join("pkg/.gitignore"), "# nothing yet\n").unwrap();
         }
-        let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+        let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
         ft.hold_graces();
         let probe = Probe::new(&ft);
         let rec = Arc::new(Recorder::default());
@@ -956,7 +956,7 @@ fn refresh_lists_an_open_folder_with_the_rules_on_disk() {
         git_init(&root);
         std::fs::create_dir_all(root.join("pkg/gen")).unwrap();
         std::fs::write(root.join("pkg/gen/x.js"), "").unwrap();
-        let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+        let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
         let probe = Probe::new(&ft);
         let rec = Arc::new(Recorder::default());
         let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
@@ -987,7 +987,7 @@ fn rules_files_are_read_without_the_ignore_lock() {
     std::fs::create_dir_all(root.join("pkg/gen")).unwrap();
     std::fs::create_dir_all(root.join("other")).unwrap();
     std::fs::write(root.join("pkg/.gitignore"), "gen/\n").unwrap();
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let restore = vec![DirReq { rel: "".into(), known_gen: None }, DirReq { rel: "pkg".into(), known_gen: None }];
@@ -1029,7 +1029,7 @@ fn rules_files_are_read_without_the_ignore_lock() {
 #[test]
 fn a_hub_is_reaped_after_its_grace() {
     let root = temp_root("reap");
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     ft.hold_graces();
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
@@ -1050,7 +1050,7 @@ fn locate_spells_names_as_the_disk_does() {
     let root = temp_root("locate");
     let nfd: String = "café".nfd().collect();
     std::fs::create_dir_all(root.join(&nfd).join("Src")).unwrap();
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::for_test(Duration::from_secs(30), super::watch::RAW_CAPACITY);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec, vec![]).unwrap();
     let hub = ft.hub_of(ack.sub_id).unwrap();
@@ -1145,6 +1145,34 @@ fn the_repository_is_found_on_disk_worktrees_included() {
     std::fs::remove_dir_all(&t).unwrap();
 }
 
+/// Smoke test of the real OS watcher (FSEvents on macOS, inotify on Linux, RDCW on Windows):
+/// starts cleanly and reports a real filesystem write to the hub. Kept as the sole always-on
+/// real-watcher delivery test so dozens of synthetic-event tests do not queue `FSEventStreamStart`
+/// RPCs behind each other in `fseventsd` under parallel `cargo test --lib`.
+#[test]
+fn the_native_watcher_starts_and_reports_a_change() {
+    let root = temp_root("nativewatch");
+    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let probe = Probe::new(&ft);
+    let rec = Arc::new(Recorder::default());
+    let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
+    let hub = ft.hub_of(ack.sub_id).unwrap();
+    probe.watching(&hub);
+    probe.idle(&hub);
+    let names = probe.settle(&hub, &root);
+    let entries: BTreeSet<String> = hub
+        .dirs
+        .lock()
+        .get("")
+        .map(|d| d.entries.iter().map(|e| e.n.clone()).collect())
+        .unwrap_or_default();
+    for name in &names {
+        assert!(entries.contains(name), "native watcher missed {name:?} in {entries:?}");
+    }
+    ft.close(ack.sub_id);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 #[test]
 #[ignore = "waits 10 s; run with --ignored"]
 fn idle_costs_no_coalescer_wakeups() {
@@ -1177,7 +1205,7 @@ fn linux_state(budget: Option<usize>) -> (Arc<FileTreeState>, Arc<super::watch::
         Some(b) => super::watch::inotify::SharedInotify::with_budget(b),
         None => super::watch::inotify::SharedInotify::new(),
     };
-    let ctx = super::watch::WatchContext { inotify: Some(shared.clone()) };
+    let ctx = super::watch::WatchContext { inotify: Some(shared.clone()), ..Default::default() };
     (FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, Some(ctx)), shared)
 }
 

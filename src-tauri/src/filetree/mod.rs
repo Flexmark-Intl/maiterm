@@ -183,7 +183,9 @@ impl FileTreeState {
     }
 
     /// Test seam: a shorter grace, a smaller raw channel (to force overflow), an injected
-    /// watch context (a low inotify budget).
+    /// watch context (a low inotify budget, or `WatchContext::synthetic()`). Passing `None`
+    /// starts the real OS watcher — reserve that for tests whose subject is the OS watcher
+    /// itself, since macOS queues `FSEventStreamStart` RPCs across parallel tests.
     pub(crate) fn with(grace: Duration, raw_capacity: usize, ctx: Option<watch::WatchContext>) -> Arc<Self> {
         let watch_ctx = OnceLock::new();
         if let Some(c) = ctx {
@@ -211,6 +213,14 @@ impl FileTreeState {
             #[cfg(test)]
             held_reaps: Mutex::new(None),
         })
+    }
+
+    /// Test seam: like `with`, using the synthetic watcher (`WatchContext::synthetic`) so
+    /// tests that deliver events via `Probe::deliver` or silence the watcher via `go_deaf`
+    /// start instantly without saturating macOS `fseventsd` under parallel `cargo test`.
+    #[cfg(test)]
+    pub(crate) fn for_test(grace: Duration, raw_capacity: usize) -> Arc<Self> {
+        Self::with(grace, raw_capacity, Some(watch::WatchContext::synthetic()))
     }
 
     /// Test seam: every hub made from now on reports what it does (`hub::HubReport`) here.
