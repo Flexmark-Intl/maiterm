@@ -8723,9 +8723,10 @@ mod tests {
         // the live agent is the one sending events: it wins, idle or not.
         app.app_data.write().windows[0].workspaces[0].panes[0].tabs[0]
             .trigger_variables.insert("claudeSessionId".into(), "stale".into());
-        let now = std::time::Instant::now();
-        app.agent_session_seen.write().insert("stale".into(), now - std::time::Duration::from_secs(600));
-        app.agent_session_seen.write().insert("live".into(), now);
+        // Later by addition: `now - 10 min` panics on a machine up for less than that.
+        let then = std::time::Instant::now();
+        app.agent_session_seen.write().insert("stale".into(), then);
+        app.agent_session_seen.write().insert("live".into(), then + std::time::Duration::from_secs(600));
         assert_eq!(live_session_for_tab(&app, &tab).unwrap().1, "live", "the latest hook event wins over the saved id");
         // A record that has sent nothing since maiTerm started loses to one that has.
         app.agent_session_seen.write().remove("stale");
