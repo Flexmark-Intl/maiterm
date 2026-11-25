@@ -447,13 +447,27 @@
         const seq = restoreSeq;
         runGeometryOp(async () => {
           if (currentMonitorCount === null || restoreSeq !== seq) return;
+          // While displays are marked asleep, hold off saving until `monitorPollTimer` runs the
+          // wake transition (which restores the saved layout instead of persisting a wake-shuffled rect).
+          if (displaysAsleep) return;
           // Ask for the count here rather than trusting `displaysAsleep`: the events
           // that bring us here are macOS shuffling the window around the screens it is
           // putting to sleep, and they fire up to a full poll interval before the flag
           // flips — so most of them would slip past a flag check and persist a
           // sleep-time rect as the layout to restore on wake.
-          if (await readMonitorCount() === 0) {
+          const actualCount = await readMonitorCount();
+          if (actualCount === 0) {
             displaysAsleep = true;
+            return;
+          }
+          // If the monitor count already changed (e.g. dock/undock relocated the window ahead of
+          // the 2s monitor poll), do not overwrite the old monitor count's saved geometry with the
+          // OS-relocated rect — transition to the new count and restore (or defer if minimized).
+          if (actualCount !== currentMonitorCount) {
+            const oldCount = currentMonitorCount;
+            currentMonitorCount = actualCount;
+            logInfo(`Monitor count changed (${oldCount} → ${actualCount}) during move/resize — restoring saved geometry`);
+            await restoreOrDefer(actualCount);
             return;
           }
           // Minimizing on Windows fires Move/Resize with (-32000, -32000) / 0x0; never treat
