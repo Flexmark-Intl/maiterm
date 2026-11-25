@@ -981,14 +981,30 @@ mod tests {
         fs::write(&agy_paths.cli_settings, r#"{"colorScheme":"dark"}"#).unwrap();
         install_into(&agy_paths, "/bin/true", false, false).unwrap();
 
+        // Build a hermetic PATH containing only the standard utilities the scripts use,
+        // guaranteeing neither `claude` nor `agy` can leak in from Homebrew or /usr/local/bin.
+        let bin_dir = agy_only.join("test-bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let host_path = std::env::var_os("PATH").unwrap_or_default();
+        for tool in [
+            "awk", "bash", "cat", "dirname", "git", "hostname", "install", "jq", "mkdir",
+            "mktemp", "mv", "python3", "readlink", "rm", "sed", "sh", "tac", "tail", "tr",
+            "whoami",
+        ] {
+            for dir in std::env::split_paths(&host_path) {
+                let candidate = dir.join(tool);
+                if candidate.is_file() {
+                    let _ = std::os::unix::fs::symlink(&candidate, bin_dir.join(tool));
+                    break;
+                }
+            }
+        }
+        let clean_path = bin_dir.to_string_lossy().into_owned();
         let setup = agy_paths.plugin_dir.join("skills/maiterm-statusline/bin/setup-statusline.sh");
-        // Use a PATH with system tools (bash, jq, install, hostname, whoami, mktemp, mv)
-        // excluding any user-installed `claude` or `agy` binaries in ~/.local/bin etc.
-        let clean_path = "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin";
         let out = Command::new("bash")
             .arg(&setup)
             .env("HOME", &agy_only)
-            .env("PATH", clean_path)
+            .env("PATH", &clean_path)
             .output()
             .unwrap();
         assert!(out.status.success(), "agy-only setup failed: {}", String::from_utf8_lossy(&out.stderr));
@@ -1002,13 +1018,32 @@ mod tests {
         assert_eq!(agy_settings["statusLine"]["enabled"], true);
         assert_eq!(agy_settings["statusLine"]["stack_with_default"], false);
 
-        // 2. Both Claude Code and agy present: configures both cleanly.
+        // 2. Cross-runtime resilience: malformed/empty ~/.claude/settings.json must NOT block
+        //    installing agy when launched from agy's skill directory, and must not copy ~/.claude/statusline-command.sh.
         fs::create_dir_all(agy_only.join(".claude")).unwrap();
+        fs::write(agy_only.join(".claude/settings.json"), "").unwrap();
+        let out_resilient = Command::new("bash")
+            .arg(&setup)
+            .env("HOME", &agy_only)
+            .env("PATH", &clean_path)
+            .output()
+            .unwrap();
+        assert!(
+            out_resilient.status.success(),
+            "agy install should still succeed when ~/.claude/settings.json is empty: {}",
+            String::from_utf8_lossy(&out_resilient.stderr)
+        );
+        assert!(
+            !agy_only.join(".claude/statusline-command.sh").exists(),
+            "must not copy statusline script for a runtime whose settings.json failed validation"
+        );
+
+        // 3. Both Claude Code and agy present with valid settings: configures both cleanly.
         fs::write(agy_only.join(".claude/settings.json"), r#"{"theme":"dark"}"#).unwrap();
         let out_both = Command::new("bash")
             .arg(&setup)
             .env("HOME", &agy_only)
-            .env("PATH", clean_path)
+            .env("PATH", &clean_path)
             .output()
             .unwrap();
         assert!(out_both.status.success(), "both setup failed: {}", String::from_utf8_lossy(&out_both.stderr));
@@ -1021,13 +1056,89 @@ mod tests {
         assert_eq!(claude_settings["statusLine"]["type"], "command");
         assert_eq!(claude_settings["statusLine"]["command"], format!("bash {}", claude_dest.display()));
 
-        // 3. statusline-command.sh renders Claude (.effort.level), agy (.model.effort + models/ prefix),
+        // 4. Symlink handling: valid symlink updates target in-place while preserving symlink;
+        //    dangling symlink fails without clobbering or creating garbage directories.
+        let dotfiles = agy_only.join("dotfiles");
+        fs::create_dir_all(&dotfiles).unwrap();
+        let real_settings = dotfiles.join("agy-settings.json");
+        fs::write(&real_settings, r#"{"linked":true}"#).unwrap();
+        fs::remove_file(&agy_paths.cli_settings).unwrap();
+        std::os::unix::fs::symlink(&real_settings, &agy_paths.cli_settings).unwrap();
+        let out_sym = Command::new("bash")
+            .arg(&setup)
+            .env("HOME", &agy_only)
+            .env("PATH", &clean_path)
+            .output()
+            .unwrap();
+        assert!(out_sym.status.success(), "valid symlink setup failed: {}", String::from_utf8_lossy(&out_sym.stderr));
+        assert!(fs::symlink_metadata(&agy_paths.cli_settings).unwrap().file_type().is_symlink());
+        let linked_val: Value = serde_json::from_str(&fs::read_to_string(&real_settings).unwrap()).unwrap();
+        assert_eq!(linked_val["linked"], true);
+        assert_eq!(linked_val["statusLine"]["enabled"], true);
+
+        fs::remove_file(&agy_paths.cli_settings).unwrap();
+        let missing_target = dotfiles.join("missing.json");
+        std::os::unix::fs::symlink(&missing_target, &agy_paths.cli_settings).unwrap();
+        let out_dangling = Command::new("bash")
+            .arg(&setup)
+            .env("HOME", &agy_only)
+            .env("PATH", &clean_path)
+            .output()
+            .unwrap();
+        assert!(!out_dangling.status.success(), "dangling symlink on invoking runtime must fail");
+        assert!(fs::symlink_metadata(&agy_paths.cli_settings).unwrap().file_type().is_symlink());
+        assert!(!missing_target.exists());
+        assert_eq!(fs::read_dir(&dotfiles).unwrap().count(), 1, "must not create garbage entries next to dangling target");
+
+        // 5. Quoting safety: HOME with apostrophe, spaces, parentheses, and `$` produces a command
+        //    that runs cleanly via `/bin/sh -c` without syntax errors or variable expansion.
+        let tricky_root = temp_home();
+        let tricky_home = tricky_root.join("o'brien (1) $HOME");
+        let tricky_paths = AgyPaths::under(&tricky_home);
+        fs::create_dir_all(tricky_paths.cli_settings.parent().unwrap()).unwrap();
+        fs::write(&tricky_paths.cli_settings, r#"{}"#).unwrap();
+        install_into(&tricky_paths, "/bin/true", false, false).unwrap();
+        let tricky_setup = tricky_paths.plugin_dir.join("skills/maiterm-statusline/bin/setup-statusline.sh");
+        let out_tricky = Command::new("bash")
+            .arg(&tricky_setup)
+            .env("HOME", &tricky_home)
+            .env("PATH", &clean_path)
+            .output()
+            .unwrap();
+        assert!(out_tricky.status.success(), "tricky HOME setup failed: {}", String::from_utf8_lossy(&out_tricky.stderr));
+        let tricky_settings: Value = serde_json::from_str(&fs::read_to_string(&tricky_paths.cli_settings).unwrap()).unwrap();
+        let tricky_cmd = tricky_settings["statusLine"]["command"].as_str().unwrap();
+        let mut sh_child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(tricky_cmd)
+            .env("HOME", &tricky_home)
+            .env("PATH", &clean_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        sh_child.stdin.take().unwrap().write_all(
+            br#"{"cwd":"/tmp/proj","model":{"id":"models/gemini-3-pro","effort":"high"},"context_window":{"context_window_size":1000000,"used_percentage":10.0}}"#
+        ).unwrap();
+        let sh_out = sh_child.wait_with_output().unwrap();
+        assert!(
+            sh_out.status.success() && sh_out.stderr.is_empty(),
+            "quoted command `{tricky_cmd}` failed under /bin/sh -c (code {:?}): {}",
+            sh_out.status.code(),
+            String::from_utf8_lossy(&sh_out.stderr)
+        );
+        let sh_stdout = String::from_utf8(sh_out.stdout).unwrap();
+        assert!(sh_stdout.contains("gemini-3-pro") && sh_stdout.contains("high"), "tricky output: {sh_stdout}");
+        let _ = fs::remove_dir_all(&tricky_root);
+
+        // 6. statusline-command.sh renders Claude (.effort.level), agy (.model.effort + models/ prefix),
         //    string .effort, and current_usage fallback without jq errors.
         let run_statusline = |payload: &str| {
             let mut child = Command::new("bash")
                 .arg(&agy_dest)
                 .env("HOME", &agy_only)
-                .env("PATH", clean_path)
+                .env("PATH", &clean_path)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
