@@ -1516,7 +1516,7 @@ pub fn build_agy_setup_script(hooks: bool) -> String {
     lines.push(AGY_REMOTE_PATH_LINE.to_string());
     lines.push("if command -v agy >/dev/null 2>&1; then".to_string());
     lines.push("__agy_plugin=\"$HOME/.gemini/config/plugins/maiterm\"".to_string());
-    lines.push("mkdir -p \"$__agy_plugin/rules\" \"$__agy_plugin/skills/maiterm\"".to_string());
+    lines.push("mkdir -p \"$__agy_plugin/rules\" \"$__agy_plugin/skills/maiterm\" \"$__agy_plugin/skills/maiterm-statusline/bin\"".to_string());
     lines.push("cat > \"$__agy_plugin/plugin.json\" <<'MAITERM_AGY_PLUGIN_EOF'".to_string());
     lines.push(art.plugin_json.trim_end().to_string());
     lines.push("MAITERM_AGY_PLUGIN_EOF".to_string());
@@ -1526,6 +1526,16 @@ pub fn build_agy_setup_script(hooks: bool) -> String {
     lines.push("cat > \"$__agy_plugin/skills/maiterm/SKILL.md\" <<'MAITERM_AGY_SKILL_EOF'".to_string());
     lines.push(art.skill_md.trim_end().to_string());
     lines.push("MAITERM_AGY_SKILL_EOF".to_string());
+    lines.push("cat > \"$__agy_plugin/skills/maiterm-statusline/SKILL.md\" <<'MAITERM_AGY_SL_SKILL_EOF'".to_string());
+    lines.push(art.statusline_skill_md.trim_end().to_string());
+    lines.push("MAITERM_AGY_SL_SKILL_EOF".to_string());
+    lines.push("cat > \"$__agy_plugin/skills/maiterm-statusline/bin/setup-statusline.sh\" <<'MAITERM_AGY_SL_SETUP_EOF'".to_string());
+    lines.push(art.statusline_setup_sh.trim_end().to_string());
+    lines.push("MAITERM_AGY_SL_SETUP_EOF".to_string());
+    lines.push("cat > \"$__agy_plugin/skills/maiterm-statusline/bin/statusline-command.sh\" <<'MAITERM_AGY_SL_CMD_EOF'".to_string());
+    lines.push(art.statusline_command_sh.trim_end().to_string());
+    lines.push("MAITERM_AGY_SL_CMD_EOF".to_string());
+    lines.push("chmod 755 \"$__agy_plugin/skills/maiterm-statusline/bin/setup-statusline.sh\" \"$__agy_plugin/skills/maiterm-statusline/bin/statusline-command.sh\"".to_string());
     lines.push("cat > \"$__agy_plugin/mcp-stdio.py\" <<'MAITERM_AGY_BRIDGE_EOF'".to_string());
     lines.push(art.mcp_stdio_py.trim_end().to_string());
     lines.push("MAITERM_AGY_BRIDGE_EOF".to_string());
@@ -2441,6 +2451,9 @@ mod tests {
         assert!(on.contains("MAITERM_AGY_SHIM_EOF"));
         assert!(on.contains("MAITERM_AGY_HOOKS_EOF"));
         assert!(on.contains("MAITERM_AGY_BRIDGE_EOF"));
+        assert!(on.contains("MAITERM_AGY_SL_SKILL_EOF"));
+        assert!(on.contains("MAITERM_AGY_SL_SETUP_EOF"));
+        assert!(on.contains("MAITERM_AGY_SL_CMD_EOF"));
 
         let refresh = build_agy_proxy_refresh_script();
         let (ok_ref, stderr_ref) = pipe_ok("bash", &["-n"], &refresh);

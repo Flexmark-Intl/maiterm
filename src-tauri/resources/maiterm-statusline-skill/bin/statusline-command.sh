@@ -26,16 +26,32 @@ fi
 
 model=$(echo "$input" | jq -r '.model.display_name // empty')
 model_id=$(echo "$input" | jq -r '.model.id // empty')
-effort=$(echo "$input" | jq -r '.effort.level // empty')
+# Effort location differs across runtimes: Claude Code sends `.effort.level`,
+# Antigravity CLI (`agy`) sends `.model.effort` (or a string `.effort` / `.effort_level`).
+# Guard `.effort` by type so a string `.effort` never triggers a jq indexing error.
+effort=$(echo "$input" | jq -r '
+  [
+    (if (.effort | type) == "object" then .effort.level
+     elif (.effort | type) == "string" then .effort
+     else null end),
+    .model.effort,
+    .effort_level
+  ] | map(select(type == "string" and length > 0)) | first // empty
+')
 
-# Prefer the official model id (e.g. opus-5-5) over the friendly display name,
-# falling back to the display name if the id isn't present.
-model_label="${model_id#claude-}"
+# Prefer the official model id (e.g. opus-5-5, gemini-3-pro) over the friendly
+# display name, stripping any leading `models/` or `claude-` prefix.
+model_label="${model_id#models/}"
+model_label="${model_label#claude-}"
 [ -z "$model_label" ] && model_label="$model"
 transcript=$(echo "$input" | jq -r '.transcript_path // empty')
 
-ctx_tokens=0
-if [ -n "$transcript" ] && [ -f "$transcript" ]; then
+ctx_tokens=$(echo "$input" | jq -r '
+  .context_window.current_usage // empty |
+  ((.input_tokens // 0) + (.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0))
+' 2>/dev/null)
+[ -z "$ctx_tokens" ] && ctx_tokens=0
+if [ "$ctx_tokens" = "0" ] && [ -n "$transcript" ] && [ -f "$transcript" ]; then
   ctx_tokens=$(tac "$transcript" 2>/dev/null | awk '
     /"usage"/ {
       print
@@ -74,7 +90,7 @@ ctx_limit=$(echo "$input" | jq -r '.context_window.context_window_size // empty'
 if [ -z "$ctx_limit" ] || [ "$ctx_limit" = "0" ]; then
   case "$model_id" in
     *"[1m]"*|*"-1m"*) ctx_limit=1000000 ;;
-    *"opus-4-8"*|*"opus-5"*|*"fable-5"*|*"sonnet-5-5"*|*"haiku-5-5"*) ctx_limit=1000000 ;;
+    *"opus-4-8"*|*"opus-5"*|*"fable-5"*|*"sonnet-5-5"*|*"haiku-5-5"*|*"gemini-"*) ctx_limit=1000000 ;;
     *) ctx_limit=200000 ;;
   esac
   # Compared through awk, not `[ -gt ]`, so a non-integer token count can never make this

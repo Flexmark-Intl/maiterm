@@ -11,6 +11,8 @@
 //!      - `hooks/agy-hook.sh` + `hooks.json` — lifecycle hooks (`SessionStart`, `PreInvocation`,
 //!        `PostInvocation`, `PreToolUse`, `PostToolUse`, `Stop`), gated on `prefs.gemini_hooks`.
 //!      - `skills/maiterm/SKILL.md` — full maiTerm `/maiterm` & Mattermost resolve skill.
+//!      - `skills/maiterm-statusline/` — `/maiterm-statusline` skill (`SKILL.md` +
+//!        `bin/setup-statusline.sh` + `bin/statusline-command.sh`).
 //!   2. `~/.gemini/config/mcp_config.json` — `mcpServers.maiterm` stdio entry pointing at
 //!      `mcp-stdio.sh` (Unix) or `<exe> --mcp-stdio` (Windows). Keeping the MCP server in
 //!      `~/.gemini/config/mcp_config.json` rather than inside the plugin gives clean
@@ -171,6 +173,9 @@ pub struct AgyRemoteArtifacts {
     pub plugin_json: String,
     pub agents_md: &'static str,
     pub skill_md: &'static str,
+    pub statusline_skill_md: &'static str,
+    pub statusline_setup_sh: &'static str,
+    pub statusline_command_sh: &'static str,
     pub hook_shim: &'static str,
     pub hooks_json: String,
     pub mcp_stdio_py: &'static str,
@@ -304,6 +309,9 @@ pub fn render_agy_remote_artifacts() -> AgyRemoteArtifacts {
         plugin_json,
         agents_md: AGY_AGENTS_MD,
         skill_md: MAITERM_SKILL_MD,
+        statusline_skill_md: super::lockfile::STATUSLINE_SKILL_MD,
+        statusline_setup_sh: super::lockfile::STATUSLINE_SETUP_SCRIPT,
+        statusline_command_sh: super::lockfile::STATUSLINE_PAYLOAD_SCRIPT,
         hook_shim: AGY_HOOK_SHIM,
         hooks_json,
         mcp_stdio_py: REMOTE_MCP_STDIO_PY,
@@ -530,6 +538,23 @@ fn install_into(
     let skill_path = paths.plugin_dir.join("skills").join("maiterm").join("SKILL.md");
     changed |= write_if_changed(&skill_path, MAITERM_SKILL_MD, false)?;
 
+    let sl_dir = paths.plugin_dir.join("skills").join("maiterm-statusline");
+    changed |= write_if_changed(
+        &sl_dir.join("SKILL.md"),
+        super::lockfile::STATUSLINE_SKILL_MD,
+        false,
+    )?;
+    changed |= write_if_changed(
+        &sl_dir.join("bin").join("setup-statusline.sh"),
+        super::lockfile::STATUSLINE_SETUP_SCRIPT,
+        true,
+    )?;
+    changed |= write_if_changed(
+        &sl_dir.join("bin").join("statusline-command.sh"),
+        super::lockfile::STATUSLINE_PAYLOAD_SCRIPT,
+        true,
+    )?;
+
     let hooks_json_path = paths.plugin_dir.join("hooks.json");
     let shim_path = paths.plugin_dir.join("hooks").join("agy-hook.sh");
     if hooks_enabled {
@@ -656,6 +681,9 @@ mod tests {
         assert!(paths.plugin_dir.join("hooks.json").exists());
         assert!(paths.plugin_dir.join("hooks/agy-hook.sh").exists());
         assert!(paths.plugin_dir.join("skills/maiterm/SKILL.md").exists());
+        assert!(paths.plugin_dir.join("skills/maiterm-statusline/SKILL.md").exists());
+        assert!(paths.plugin_dir.join("skills/maiterm-statusline/bin/setup-statusline.sh").exists());
+        assert!(paths.plugin_dir.join("skills/maiterm-statusline/bin/statusline-command.sh").exists());
 
         // Global mcp_config.json has both user-db and maiterm.
         let mcp: Value = serde_json::from_str(&fs::read_to_string(&paths.mcp_config).unwrap()).unwrap();
@@ -930,5 +958,113 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 40, "expected to verify >=40 tool signatures in AGY_AGENTS_MD, checked {checked}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn statusline_setup_and_command_support_agy_and_claude_code() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        // Skip only if jq isn't available on the test host.
+        if !Command::new("jq").arg("--version").output().is_ok_and(|o| o.status.success()) {
+            return;
+        }
+
+        // 1. agy-only machine (no ~/.claude, no claude binary in PATH):
+        //    installs ~/.gemini/antigravity-cli/statusline-command.sh and merges statusLine
+        //    with enabled:true + stack_with_default:false while preserving other keys,
+        //    without creating ~/.claude.
+        let agy_only = temp_home();
+        let agy_paths = AgyPaths::under(&agy_only);
+        fs::create_dir_all(agy_paths.cli_settings.parent().unwrap()).unwrap();
+        fs::write(&agy_paths.cli_settings, r#"{"colorScheme":"dark"}"#).unwrap();
+        install_into(&agy_paths, "/bin/true", false, false).unwrap();
+
+        let setup = agy_paths.plugin_dir.join("skills/maiterm-statusline/bin/setup-statusline.sh");
+        // Use a PATH with system tools (bash, jq, install, hostname, whoami, mktemp, mv)
+        // excluding any user-installed `claude` or `agy` binaries in ~/.local/bin etc.
+        let clean_path = "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin";
+        let out = Command::new("bash")
+            .arg(&setup)
+            .env("HOME", &agy_only)
+            .env("PATH", clean_path)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "agy-only setup failed: {}", String::from_utf8_lossy(&out.stderr));
+        let agy_dest = agy_only.join(".gemini/antigravity-cli/statusline-command.sh");
+        assert!(agy_dest.exists());
+        assert!(!agy_only.join(".claude").exists(), "agy-only setup must not create ~/.claude when claude isn't present");
+        let agy_settings: Value = serde_json::from_str(&fs::read_to_string(&agy_paths.cli_settings).unwrap()).unwrap();
+        assert_eq!(agy_settings["colorScheme"], "dark");
+        assert_eq!(agy_settings["statusLine"]["type"], "command");
+        assert_eq!(agy_settings["statusLine"]["command"], format!("bash {}", agy_dest.display()));
+        assert_eq!(agy_settings["statusLine"]["enabled"], true);
+        assert_eq!(agy_settings["statusLine"]["stack_with_default"], false);
+
+        // 2. Both Claude Code and agy present: configures both cleanly.
+        fs::create_dir_all(agy_only.join(".claude")).unwrap();
+        fs::write(agy_only.join(".claude/settings.json"), r#"{"theme":"dark"}"#).unwrap();
+        let out_both = Command::new("bash")
+            .arg(&setup)
+            .env("HOME", &agy_only)
+            .env("PATH", clean_path)
+            .output()
+            .unwrap();
+        assert!(out_both.status.success(), "both setup failed: {}", String::from_utf8_lossy(&out_both.stderr));
+        let claude_dest = agy_only.join(".claude/statusline-command.sh");
+        assert!(claude_dest.exists());
+        let claude_settings: Value = serde_json::from_str(
+            &fs::read_to_string(agy_only.join(".claude/settings.json")).unwrap()
+        ).unwrap();
+        assert_eq!(claude_settings["theme"], "dark");
+        assert_eq!(claude_settings["statusLine"]["type"], "command");
+        assert_eq!(claude_settings["statusLine"]["command"], format!("bash {}", claude_dest.display()));
+
+        // 3. statusline-command.sh renders Claude (.effort.level), agy (.model.effort + models/ prefix),
+        //    string .effort, and current_usage fallback without jq errors.
+        let run_statusline = |payload: &str| {
+            let mut child = Command::new("bash")
+                .arg(&agy_dest)
+                .env("HOME", &agy_only)
+                .env("PATH", clean_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(payload.as_bytes()).unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(
+                out.status.success() && out.stderr.is_empty(),
+                "statusline failed (code {:?}): {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap()
+        };
+
+        let claude_out = run_statusline(
+            r#"{"workspace":{"project_dir":"/tmp/proj"},"model":{"id":"claude-opus-5-5","display_name":"Opus"},"effort":{"level":"high"},"context_window":{"context_window_size":1000000,"used_percentage":12.34}}"#,
+        );
+        assert!(claude_out.contains("opus-5-5"), "claude model: {claude_out}");
+        assert!(claude_out.contains("high"), "claude effort: {claude_out}");
+        assert!(claude_out.contains("12.3%"), "claude pct: {claude_out}");
+
+        let agy_out = run_statusline(
+            r#"{"workspace":{"project_dir":"/tmp/proj"},"model":{"id":"models/gemini-3-pro","display_name":"Gemini 3 Pro","effort":"medium"},"context_window":{"context_window_size":1000000,"used_percentage":42.5}}"#,
+        );
+        assert!(agy_out.contains("gemini-3-pro") && !agy_out.contains("models/"), "agy model prefix stripped: {agy_out}");
+        assert!(agy_out.contains("medium"), "agy .model.effort: {agy_out}");
+        assert!(agy_out.contains("42.5%"), "agy pct: {agy_out}");
+
+        let str_effort_out = run_statusline(
+            r#"{"cwd":"/tmp/proj","model":{"id":"gemini-3-flash"},"effort":"low","context_window":{"context_window_size":1000000,"current_usage":{"input_tokens":150000,"cache_read_input_tokens":50000}}}"#,
+        );
+        assert!(str_effort_out.contains("gemini-3-flash"), "flash model: {str_effort_out}");
+        assert!(str_effort_out.contains("low"), "string .effort: {str_effort_out}");
+        assert!(str_effort_out.contains("20.0%"), "current_usage pct: {str_effort_out}");
+
+        let _ = fs::remove_dir_all(&agy_only);
     }
 }

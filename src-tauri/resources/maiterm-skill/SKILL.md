@@ -56,7 +56,7 @@ For `init`: read tabId from $MAITERM_TAB_ID env var and sessionId from your Sess
 
 ## statusline — install the maiTerm status line
 
-`statusline` is NOT an MCP tool: it is the `/maiterm-statusline` skill. Read `~/.claude/skills/maiterm-statusline/SKILL.md` and follow it exactly.
+`statusline` is NOT an MCP tool: it is the `/maiterm-statusline` skill. Read `~/.gemini/config/plugins/maiterm/skills/maiterm-statusline/SKILL.md` (Antigravity `agy`) or `~/.claude/skills/maiterm-statusline/SKILL.md` (Claude Code) and follow it exactly.
 
 ## resolve — work a Mattermost thread as a bug report
 
