@@ -22,6 +22,8 @@ use crate::state::{AgentRuntime, Preferences};
 use super::lockfile::AGENT_HOOK_SHIM;
 use super::registrar::Registrar;
 
+pub(crate) const CODEX_LAUNCH_SH: &str = include_str!("../../resources/codex/launch.sh");
+
 /// The Codex lifecycle events we register a forwarding command hook for.
 const CODEX_HOOK_EVENTS: &[&str] = &[
     "SessionStart",
@@ -71,6 +73,13 @@ impl Registrar for CodexRegistrar {
         if let Err(e) = fs::create_dir_all(&codex_dir) {
             log::warn!("Codex install: failed to create {:?}: {}", codex_dir, e);
             return;
+        }
+
+        #[cfg(unix)]
+        if let Some(dir) = crate::state::persistence::app_data_dir() {
+            if let Err(e) = atomic_write(&dir.join("codex-launch.sh"), CODEX_LAUNCH_SH) {
+                log::warn!("Codex launch helper: {e}");
+            }
         }
 
         let name = mcp_name();

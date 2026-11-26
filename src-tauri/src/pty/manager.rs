@@ -225,6 +225,17 @@ pub fn spawn_pty(
         let shell_title_integration = prefs.shell_title_integration;
         let shell_integration = prefs.shell_integration;
 
+        // Local Codex TUIs must inherit THIS tab's hook and MCP environment.
+        // Keep the helper out of PATH and leave the user's login files alone.
+        let codex_launcher = app_data_dir()
+            .map(|d| d.join("codex-launch.sh"))
+            .filter(|p| prefs.codex_ide && state.mcp_port.read().is_some() && p.is_file());
+        cmd.env_remove("MAITERM_CODEX_LAUNCHER");
+        cmd.env_remove("BASH_FUNC_codex%%");
+        if let Some(path) = &codex_launcher {
+            cmd.env("MAITERM_CODEX_LAUNCHER", path);
+        }
+
         // Guarded one-time source of l() function (ls with OSC 8 file links)
         let l_fn_prefix = match write_ls_function() {
             Ok(path) => format!(
@@ -236,6 +247,10 @@ pub fn spawn_pty(
 
         match shell_name {
             "bash" => {
+                // Import before login initialization so a user's own function can override it.
+                if codex_launcher.is_some() {
+                    cmd.env("BASH_FUNC_codex%%", r#"() { /bin/sh "$MAITERM_CODEX_LAUNCHER" "$@"; }"#);
+                }
                 if shell_integration {
                     let title_part = if shell_title_integration {
                         r#" printf "\033]0;%s@%s:%s\007" "${USER}" "${HOSTNAME%%.*}" "${PWD/#$HOME/~}";"#
@@ -280,7 +295,7 @@ pub fn spawn_pty(
                 }
             }
             "zsh" => {
-                if shell_title_integration || shell_integration {
+                if shell_title_integration || shell_integration || codex_launcher.is_some() {
                     if let Ok(integration_dir) = setup_zsh_integration(shell_title_integration, shell_integration) {
                         let real_zdotdir = std::env::var("ZDOTDIR")
                             .unwrap_or_else(|_| {
@@ -288,14 +303,18 @@ pub fn spawn_pty(
                                     .map(|h| h.to_string_lossy().to_string())
                                     .unwrap_or_default()
                             });
+                        cmd.env("MAITERM_ZSH_CODEX_ONLY", if !shell_title_integration && !shell_integration { "1" } else { "0" });
                         cmd.env("MAITERM_REAL_ZDOTDIR", &real_zdotdir);
                         cmd.env("ZDOTDIR", integration_dir.to_string_lossy().to_string());
                     }
                 }
             }
             "fish" => {
-                if shell_title_integration || shell_integration {
+                if shell_title_integration || shell_integration || codex_launcher.is_some() {
                     let mut parts: Vec<String> = Vec::new();
+                    if codex_launcher.is_some() {
+                        parts.push(r#"function codex; /bin/sh "$MAITERM_CODEX_LAUNCHER" $argv; end"#.into());
+                    }
                     if shell_integration {
                         parts.push(
                             r#"function __aiterm_osc133 --on-event fish_prompt; printf '\e]133;D;%d\a\e]133;A\a' $status; end"#.to_string()
@@ -2203,6 +2222,12 @@ fn setup_zsh_integration(title: bool, shell_integration: bool) -> Result<std::pa
     std::fs::create_dir_all(&zsh_dir).map_err(|e| e.to_string())?;
 
     let zshenv_content = r#"# maiTerm shell integration - do not edit
+if [[ -n "$MAITERM_CODEX_LAUNCHER" ]]; then
+  function codex { /bin/sh "$MAITERM_CODEX_LAUNCHER" "$@"; }
+fi
+if [[ "$MAITERM_ZSH_CODEX_ONLY" == 1 ]]; then
+  ZDOTDIR="$MAITERM_REAL_ZDOTDIR"
+fi
 if [[ -n "$MAITERM_REAL_ZDOTDIR" ]]; then
   [[ -f "$MAITERM_REAL_ZDOTDIR/.zshenv" ]] && source "$MAITERM_REAL_ZDOTDIR/.zshenv"
 else
