@@ -57,6 +57,10 @@ pub const ADVISOR_TOOL_ENV: &str = crate::hive::launch::ADVISOR_TOOL_ENV;
 pub const CODEX_EFFORTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
 /// Codex `approvals_reviewer`: Codex refuses to start on any other value.
 pub const CODEX_REVIEWERS: &[&str] = &["user", "auto_review"];
+/// Codex `[tui] fullscreen_transcript`: true (Codex's default) runs the TUI on the alternate
+/// screen; false is its "Scrollback" mode, inline in the terminal's own history, whatever
+/// `alternate_screen` says (probed against codex-cli 0.172.0, 2026-11-26).
+const CODEX_FULLSCREEN: &[&str] = &["tui", "fullscreen_transcript"];
 
 /// Antigravity `agentMode`. `""` is itself a saved choice ("Default"), distinct from absent.
 pub const AGY_MODES: &[&str] = &["", "accept-edits", "plan", "auto"];
@@ -213,6 +217,8 @@ pub struct CodexPart {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub reviewer: Option<String>,
+    /// `[tui] fullscreen_transcript`, "true"/"false".
+    pub fullscreen: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug, Default, PartialEq)]
@@ -333,16 +339,27 @@ fn codex_status(path: &Path) -> CodexPart {
             return part;
         }
     };
-    let get = |k: &str| {
-        doc.get(k).and_then(|i| i.as_value()).map(|v| match v.as_str() {
+    let get = |keys: &[&str]| {
+        codex_value(&doc, keys).map(|v| match v.as_str() {
             Some(s) => s.to_string(),
             None => v.to_string().trim().to_string(),
         })
     };
-    part.model = get("model");
-    part.effort = get("model_reasoning_effort");
-    part.reviewer = get("approvals_reviewer");
+    part.model = get(&["model"]);
+    part.effort = get(&["model_reasoning_effort"]);
+    part.reviewer = get(&["approvals_reviewer"]);
+    part.fullscreen = get(CODEX_FULLSCREEN);
     part
+}
+
+/// The value at `keys` (a top-level key, or one in a table) in a Codex config.
+fn codex_value<'a>(doc: &'a toml_edit::DocumentMut, keys: &[&str]) -> Option<&'a toml_edit::Value> {
+    let (leaf, tables) = keys.split_last()?;
+    let mut table: &dyn toml_edit::TableLike = doc.as_table();
+    for k in tables {
+        table = table.get(k)?.as_table_like()?;
+    }
+    table.get(leaf)?.as_value()
 }
 
 fn agy_status(path: &Path) -> AgyPart {
@@ -388,6 +405,14 @@ impl Runtime {
     }
 }
 
+fn on_off(v: &str) -> Result<Value, String> {
+    match v {
+        "true" => Ok(json!(true)),
+        "false" => Ok(json!(false)),
+        _ => Err(format!("{v:?} is not on or off")),
+    }
+}
+
 fn one_of(value: &str, allowed: &[&str], what: &str) -> Result<(), String> {
     if allowed.contains(&value) {
         Ok(())
@@ -401,7 +426,7 @@ fn one_of(value: &str, allowed: &[&str], what: &str) -> Result<(), String> {
 /// an error either way.
 ///
 /// Keys: Claude `advisor`, `model`, `effort:<model id>`, `retention`; Codex `model`, `effort`,
-/// `reviewer`; Antigravity `agent_mode`, `show_thinking`, `queued_messages`.
+/// `reviewer`, `fullscreen`; Antigravity `agent_mode`, `show_thinking`, `queued_messages`.
 pub fn typed(runtime: Runtime, key: &str, value: Option<&str>) -> Result<Option<Value>, String> {
     match (runtime, key) {
         (Runtime::Claude, "advisor") => value.map(|v| one_of(v, CLAUDE_ADVISORS, "Claude advisor").map(|_| json!(v))).transpose(),
@@ -428,14 +453,9 @@ pub fn typed(runtime: Runtime, key: &str, value: Option<&str>) -> Result<Option<
             .transpose(),
         (Runtime::Codex, "effort") => value.map(|v| one_of(v, CODEX_EFFORTS, "Codex reasoning effort").map(|_| json!(v))).transpose(),
         (Runtime::Codex, "reviewer") => value.map(|v| one_of(v, CODEX_REVIEWERS, "Codex approvals reviewer").map(|_| json!(v))).transpose(),
+        (Runtime::Codex, "fullscreen") => value.map(on_off).transpose(),
         (Runtime::Agy, "agent_mode") => value.map(|v| one_of(v, AGY_MODES, "Antigravity agent mode").map(|_| json!(v))).transpose(),
-        (Runtime::Agy, "show_thinking") => value
-            .map(|v| match v {
-                "true" => Ok(json!(true)),
-                "false" => Ok(json!(false)),
-                _ => Err(format!("{v:?} is not on or off")),
-            })
-            .transpose(),
+        (Runtime::Agy, "show_thinking") => value.map(on_off).transpose(),
         (Runtime::Agy, "queued_messages") => {
             value.map(|v| one_of(v, AGY_QUEUED, "Antigravity queued-messages choice").map(|_| json!(v))).transpose()
         }
@@ -468,11 +488,13 @@ fn claude_path(key: &str) -> Result<Vec<&str>, String> {
     })
 }
 
-fn codex_key(key: &str) -> Result<&'static str, String> {
+/// Where a Codex setting lives in `config.toml`: a top-level key, or a table and its key.
+fn codex_key(key: &str) -> Result<&'static [&'static str], String> {
     Ok(match key {
-        "model" => "model",
-        "effort" => "model_reasoning_effort",
-        "reviewer" => "approvals_reviewer",
+        "model" => &["model"],
+        "effort" => &["model_reasoning_effort"],
+        "reviewer" => &["approvals_reviewer"],
+        "fullscreen" => CODEX_FULLSCREEN,
         _ => return Err(format!("Unknown Codex setting {key:?}")),
     })
 }
@@ -535,28 +557,52 @@ fn valid_codex_model(v: &str) -> bool {
     !v.is_empty() && v.len() <= 100 && v.chars().all(|c| c.is_ascii_alphanumeric() || "-_.:/".contains(c))
 }
 
-fn set_codex(path: &Path, toml_key: &str, value: Option<Value>) -> Result<bool, String> {
-    let value = value.as_ref().and_then(Value::as_str);
+/// A Codex value as JSON (a string or a bool, the only kinds maiTerm sets there).
+fn codex_json(v: &toml_edit::Value) -> Option<Value> {
+    v.as_str().map(|s| json!(s)).or_else(|| v.as_bool().map(|b| json!(b)))
+}
+
+fn set_codex(path: &Path, keys: &[&str], value: Option<Value>) -> Result<bool, String> {
+    let new: Option<toml_edit::Value> = match &value {
+        None => None,
+        Some(Value::String(s)) => Some(s.as_str().into()),
+        Some(Value::Bool(b)) => Some((*b).into()),
+        Some(v) => return Err(format!("{v} can't be written to Codex's config")),
+    };
+    let Some((leaf, tables)) = keys.split_last() else { return Err("No Codex key".into()) };
     edit_text(path, |raw| {
         let mut doc = parse_toml(path, raw)?;
-        let current = doc.get(toml_key).and_then(|i| i.as_str()).map(str::to_string);
-        match value {
-            Some(v) if current.as_deref() == Some(v) => return Ok(None),
-            // An existing key keeps its place and its comments; a new one goes in as a
-            // top-level key (`insert` on the root table puts it before the first [table],
-            // where Codex reads it).
-            Some(v) => match doc.get_mut(toml_key).and_then(|i| i.as_value_mut()) {
+        let mut table: &mut dyn toml_edit::TableLike = doc.as_table_mut();
+        for k in tables {
+            if table.get(k).is_none() {
+                if new.is_none() {
+                    return Ok(None);
+                }
+                // A new table goes in as a `[k]` section at the end of the file.
+                table.insert(k, toml_edit::Item::Table(toml_edit::Table::new()));
+            }
+            table = match table.get_mut(k).and_then(|i| i.as_table_like_mut()) {
+                Some(t) => t,
+                None => return Err(format!("{k} in {} is not a table", path.display())),
+            };
+        }
+        let current = table.get(leaf).and_then(|i| i.as_value()).and_then(codex_json);
+        match &new {
+            Some(v) if current.is_some() && current == codex_json(v) => return Ok(None),
+            // An existing key keeps its place and its comments; a new top-level one goes in
+            // before the first [table] (`insert` on the root table), where Codex reads it.
+            Some(v) => match table.get_mut(leaf).and_then(|i| i.as_value_mut()) {
                 Some(old) => {
                     let decor = old.decor().clone();
-                    *old = v.into();
+                    *old = v.clone();
                     *old.decor_mut() = decor;
                 }
                 None => {
-                    doc.insert(toml_key, toml_edit::value(v));
+                    table.insert(leaf, toml_edit::Item::Value(v.clone()));
                 }
             },
             None => {
-                if doc.remove(toml_key).is_none() {
+                if table.remove(leaf).is_none() {
                     return Ok(None);
                 }
             }
@@ -705,9 +751,10 @@ fn local_value(p: &Paths, runtime: Runtime, key: &str) -> Result<Option<Value>, 
                 Err(e) => return Err(format!("Cannot read {}: {e}", p.codex.display())),
             };
             let doc = parse_toml(&p.codex, raw.as_deref())?;
-            match doc.get(codex_key(key)?).and_then(|i| i.as_value()) {
+            let keys = codex_key(key)?;
+            match codex_value(&doc, keys) {
                 None => Ok(None),
-                Some(v) => v.as_str().map(|s| Some(json!(s))).ok_or_else(|| format!("{} in {} is not a string", codex_key(key).unwrap_or(key), p.codex.display())),
+                Some(v) => codex_json(v).map(Some).ok_or_else(|| format!("{} in {} is not a string or true/false", keys.join("."), p.codex.display())),
             }
         }
         Runtime::Agy => Ok(read_json(&p.agy)?.get(agy_key(key)?).filter(|v| !v.is_null()).cloned()),
@@ -721,7 +768,7 @@ fn local_value(p: &Paths, runtime: Runtime, key: &str) -> Result<Option<Value>, 
 fn carriable(runtime: Runtime, key: &str, v: &Value) -> bool {
     match (runtime, key) {
         (Runtime::Claude, "retention") => v.as_u64().is_some_and(|d| (1..=RETENTION_MAX_DAYS).contains(&d)),
-        (Runtime::Agy, "show_thinking") => v.is_boolean(),
+        (Runtime::Agy, "show_thinking") | (Runtime::Codex, "fullscreen") => v.is_boolean(),
         (Runtime::Codex, "reviewer") => v.as_str().is_some_and(|s| CODEX_REVIEWERS.contains(&s)),
         (Runtime::Codex, "model") => v.as_str().is_some_and(valid_codex_model),
         _ => v.is_string(),
@@ -847,16 +894,20 @@ if json.dumps(s,sort_keys=True)!=before:
         os.chmod(tmp,os.stat(t).st_mode&0o7777)
     os.replace(tmp,t)"#;
 
-/// Merges managed settings into a remote `~/.codex/config.toml` (top-level string keys only),
+/// Merges managed settings into a remote `~/.codex/config.toml` (a one-line string or
+/// true/false, at the top level or in one `[table]`; a key arrives as its path, `["model"]` or
+/// `["tui", "fullscreen_transcript"]`),
 /// textually, as `CODEX_TOML_MERGE_PY` does: python3 has no TOML writer. A line counts as a
 /// key or a table header only where a statement can start: not inside a multi-line string, an
 /// array or an inline table. A key whose value isn't a one-line string, or that appears twice,
-/// leaves the file alone. A changed value keeps its line and trailing comment; a new key goes on
-/// the first line, which is always top level; a removed one loses its line. With tomllib
+/// leaves the file alone, and so does a table set as dotted keys or an inline one. A changed
+/// value keeps its line and trailing comment; a new top-level key goes on the first line, which
+/// is always top level, a new table key just under its `[table]` line, and a table that isn't
+/// there yet at the end of the file; a removed key loses its line (its table header stays). With tomllib
 /// (Python 3.11+) a file that doesn't parse is left alone, and so is an edit after which the
 /// file reads back as anything but the old file with exactly our keys changed. Keeps the file's
 /// mode (the bridge's own token is in it).
-const PY_REMOTE_TOML: &str = r##"import json,os,re,sys
+const PY_REMOTE_TOML: &str = r##"import copy,json,os,re,sys
 Q=chr(39)
 d=json.load(sys.stdin)
 ops=d.get("codex") or []
@@ -923,35 +974,57 @@ for l in lines:
             elif c in "]}":
                 depth=max(0,depth-1)
             i+=1
-end=len(lines)
-for i,l in enumerate(lines):
-    if starts[i] and re.match(r"^\s*\[",l):
-        end=i
-        break
-one=re.compile(r"^(\s*[^\s=#]+\s*=\s*)(\"(?:[^\"\\]|\\.)*\"|"+Q+"[^"+Q+"]*"+Q+r")(\s*(?:#.*)?)$")
+one=re.compile(r"^(\s*[^\s=#]+\s*=\s*)(\"(?:[^\"\\]|\\.)*\"|"+Q+"[^"+Q+"]*"+Q+r"|true|false)(\s*(?:#.*)?)$")
+def named(n):
+    e=re.escape(n)
+    return "("+e+"|\""+e+"\"|"+Q+e+Q+")"
 for k,v in ops:
-    e=re.escape(k)
-    key=re.compile(r"^\s*("+e+"|\""+e+"\"|"+Q+e+Q+r")\s*=")
-    idx=[i for i in range(end) if starts[i] and key.match(lines[i])]
+    path=k if isinstance(k,list) else [k]
+    hs=[i for i in range(len(lines)) if starts[i] and re.match(r"^\s*\[",lines[i])]
+    end=hs[0] if hs else len(lines)
+    lo,hi=0,end
+    if len(path)==2:
+        t=path[0]
+        if any(starts[i] and re.match(r"^\s*"+named(t)+r"\s*[.=]",lines[i]) for i in range(end)):
+            leave(t+" is set as a dotted key or an inline table")
+        own=[i for i in hs if re.match(r"^\s*\[\s*"+named(t)+r"\s*\]\s*(#.*)?$",lines[i])]
+        if len(own)>1:
+            leave("["+t+"] appears more than once")
+        if not own:
+            if v is None:
+                continue
+            at=len(lines)-1 if lines[-1]=="" else len(lines)
+            add=["["+t+"]",path[1]+" = "+json.dumps(v)]
+            if at>0 and lines[at-1].strip()!="":
+                add=[""]+add
+            lines[at:at]=add
+            starts[at:at]=[True]*len(add)
+            continue
+        lo=own[0]+1
+        hi=([i for i in hs if i>own[0]]+[len(lines)])[0]
+    elif len(path)!=1:
+        continue
+    name=".".join(path)
+    key=re.compile(r"^\s*"+named(path[-1])+r"\s*=")
+    idx=[i for i in range(lo,hi) if starts[i] and key.match(lines[i])]
     if len(idx)>1:
-        leave(k+" is set more than once")
+        leave(name+" is set more than once")
     m=one.match(lines[idx[0]]) if idx else None
     if idx and not m:
-        leave(k+" is not a one-line string")
+        leave(name+" is not a one-line string or true/false")
     if v is None:
         if idx:
             del lines[idx[0]]
             del starts[idx[0]]
-            end-=1
         continue
     if not idx:
-        lines.insert(0,k+" = "+json.dumps(v))
-        starts.insert(0,True)
-        end+=1
+        lines.insert(lo,path[-1]+" = "+json.dumps(v))
+        starts.insert(lo,True)
         continue
     cur=m.group(2)
     try:
-        same=(json.loads(cur) if cur[0]=="\"" else cur[1:-1])==v
+        same=(cur[1:-1] if cur[0]==Q else json.loads(cur))
+        same=same==v and type(same)==type(v)
     except Exception:
         same=False
     if not same:
@@ -964,12 +1037,18 @@ if tomllib:
         new=tomllib.loads(res)
     except Exception:
         leave("the edit would not parse")
-    want=dict(old)
+    want=copy.deepcopy(old)
     for k,v in ops:
+        path=k if isinstance(k,list) else [k]
+        t=want
+        for n in path[:-1]:
+            if n not in t:
+                t[n]={}
+            t=t[n]
         if v is None:
-            want.pop(k,None)
+            t.pop(path[-1],None)
         else:
-            want[k]=v
+            t[path[-1]]=v
     if new!=want:
         leave("the edit would change more than its own keys")
 t=os.path.realpath(p)
@@ -1170,6 +1249,36 @@ mod tests {
         assert!(set(&p, Runtime::Codex, "model", None).unwrap());
         assert!(!fs::read_to_string(&p.codex).unwrap().contains("gpt-6"));
         assert!(!set(&p, Runtime::Codex, "model", None).unwrap());
+    }
+
+    #[test]
+    fn the_codex_screen_goes_in_its_tui_table() {
+        let (_h, p) = scratch();
+        // No [tui] yet: one is added at the end, the top-level keys stay above every table.
+        write(&p.codex, "model = \"a\"\n\n[tui.model_availability_nux]\nx = 1\n");
+        assert!(set(&p, Runtime::Codex, "fullscreen", Some("false")).unwrap());
+        let text = fs::read_to_string(&p.codex).unwrap();
+        let doc: toml_edit::DocumentMut = text.parse().unwrap();
+        assert_eq!(doc["tui"]["fullscreen_transcript"].as_bool(), Some(false), "{text}");
+        assert_eq!(doc["tui"]["model_availability_nux"]["x"].as_integer(), Some(1));
+        assert_eq!(status(&p).codex.fullscreen.as_deref(), Some("false"));
+        assert!(!set(&p, Runtime::Codex, "fullscreen", Some("false")).unwrap(), "nothing to change");
+
+        // An existing [tui] keeps its other keys and the value its comment.
+        let before = "[tui]\nstatus_line_use_colors = true\nfullscreen_transcript = true # mine\n";
+        write(&p.codex, before);
+        assert!(set(&p, Runtime::Codex, "fullscreen", Some("false")).unwrap());
+        assert_eq!(fs::read_to_string(&p.codex).unwrap(), "[tui]\nstatus_line_use_colors = true\nfullscreen_transcript = false # mine\n");
+        assert_eq!(local_value(&p, Runtime::Codex, "fullscreen").unwrap(), Some(json!(false)));
+        assert!(set(&p, Runtime::Codex, "fullscreen", None).unwrap());
+        assert_eq!(fs::read_to_string(&p.codex).unwrap(), "[tui]\nstatus_line_use_colors = true\n");
+        assert!(!set(&p, Runtime::Codex, "fullscreen", None).unwrap());
+        assert!(set(&p, Runtime::Codex, "fullscreen", Some("scrollback")).is_err());
+
+        // Removing it where there is no [tui] creates none.
+        write(&p.codex, "model = \"a\"\n");
+        assert!(!set(&p, Runtime::Codex, "fullscreen", None).unwrap());
+        assert_eq!(fs::read_to_string(&p.codex).unwrap(), "model = \"a\"\n");
     }
 
     #[test]
@@ -1451,12 +1560,45 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn the_codex_merge_sets_a_key_in_its_table() {
+        let ops = json!([[["tui", "fullscreen_transcript"], false]]);
+        let cases = [
+            // No [tui]: one is added at the end, after the tables already there.
+            ("model = \"a\"\n\n[tui.nux]\nx = 1\n", "model = \"a\"\n\n[tui.nux]\nx = 1\n\n[tui]\nfullscreen_transcript = false\n"),
+            ("", "[tui]\nfullscreen_transcript = false\n"),
+            // In [tui], never in the table after it; the comment stays.
+            ("[tui]\nfullscreen_transcript = true # mine\n[other]\nfullscreen_transcript = true\n", "[tui]\nfullscreen_transcript = false # mine\n[other]\nfullscreen_transcript = true\n"),
+            ("[tui]\nstatus_line_use_colors = true\n", "[tui]\nfullscreen_transcript = false\nstatus_line_use_colors = true\n"),
+            // Already so: untouched.
+            ("[ tui ] # x\nfullscreen_transcript = false\n", "[ tui ] # x\nfullscreen_transcript = false\n"),
+        ];
+        for (toml, want) in cases {
+            let Some(out) = codex_merge(toml, ops.clone()) else { return };
+            assert_eq!(out, [want.to_string(), want.to_string()], "{toml:?}");
+        }
+        // Removal takes the line and leaves the header.
+        let Some(out) = codex_merge("[tui]\nfullscreen_transcript = false\nx = 1\n", json!([[["tui", "fullscreen_transcript"], null]])) else { return };
+        assert_eq!(out, ["[tui]\nx = 1\n".to_string(), "[tui]\nx = 1\n".to_string()]);
+        // A [tui] it can't edit safely is left alone.
+        for toml in [
+            "tui.fullscreen_transcript = true\n",            // dotted
+            "tui = { fullscreen_transcript = true }\n",      // inline
+            "[tui]\nx = 1\n[tui]\ny = 2\n",                  // twice (also invalid)
+            "[tui]\nfullscreen_transcript = \"\"\"\nx\n\"\"\"\n", // not one line
+        ] {
+            let Some(out) = codex_merge(toml, ops.clone()) else { return };
+            assert_eq!(out, [toml.to_string(), toml.to_string()], "{toml:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn host_files_keep_their_mode() {
         use std::os::unix::fs::PermissionsExt;
         let (_h, p) = scratch();
         let (remote, r) = scratch();
         fs::create_dir_all(p.managed.parent().unwrap()).unwrap();
-        fs::write(&p.managed, json!({"keys": {"codex.effort": "low", "agy.agent_mode": "plan", "claude.advisor": "opus"}}).to_string()).unwrap();
+        fs::write(&p.managed, json!({"keys": {"codex.effort": "low", "codex.fullscreen": false, "agy.agent_mode": "plan", "claude.advisor": "opus"}}).to_string()).unwrap();
         write(&r.codex, "model = \"a\"\n");
         write(&r.agy, "{}");
         write(&r.claude, r#"{"env":null}"#);
@@ -1469,7 +1611,9 @@ mod tests {
         for f in [&r.codex, &r.agy, &r.claude] {
             assert_eq!(fs::metadata(f).unwrap().permissions().mode() & 0o777, 0o600, "{}", f.display());
         }
-        assert!(fs::read_to_string(&r.codex).unwrap().contains("model_reasoning_effort = \"low\""));
+        let codex = fs::read_to_string(&r.codex).unwrap();
+        assert!(codex.contains("model_reasoning_effort = \"low\""), "{codex}");
+        assert!(codex.ends_with("\n[tui]\nfullscreen_transcript = false\n"), "{codex}");
         let c = json_at(&r.claude);
         assert_eq!((c["advisorModel"].as_str(), c["env"][ADVISOR_TOOL_ENV].as_str()), (Some("opus"), Some("1")), "the switch goes with the advisor");
     }

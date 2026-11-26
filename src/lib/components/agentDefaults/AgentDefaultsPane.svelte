@@ -39,6 +39,10 @@
     { value: 'user', label: 'You (user)' },
     { value: 'auto_review', label: 'Automatic review (auto_review)' },
   ];
+  const CODEX_SCREENS: Option[] = [
+    { value: 'false', label: 'Scrollback' },
+    { value: 'true', label: 'Fullscreen' },
+  ];
   const AGY_MODES: Option[] = [
     { value: '', label: 'Default' },
     { value: 'accept-edits', label: 'Accept edits' },
@@ -463,6 +467,18 @@
               {@render drifted('codex', 'reviewer', x.reviewer, x.error)}
             </div>
             {@render choice('codex', 'reviewer', x.reviewer, CODEX_REVIEWERS, locked('codex', 'reviewer', x.error), 'Codex approvals reviewer')}
+          </div>
+          <div class="row">
+            {@render tick('codex', 'fullscreen', "Codex's screen", x.error)}
+            <div class="text">
+              <span class="label">Screen</span>
+              <p class="hint">
+                Scrollback runs Codex inline, so its conversation stays in the terminal's own
+                history; Fullscreen (Codex's default) takes over the whole screen.
+              </p>
+              {@render drifted('codex', 'fullscreen', x.fullscreen, x.error)}
+            </div>
+            {@render choice('codex', 'fullscreen', x.fullscreen, CODEX_SCREENS, locked('codex', 'fullscreen', x.error), 'Codex screen')}
           </div>
         </div>
       {/if}

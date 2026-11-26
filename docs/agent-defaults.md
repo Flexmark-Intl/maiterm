@@ -98,8 +98,10 @@ is left alone everywhere, which is how a host keeps its own value.
   whose tabs bridged before the change kept its old values until a reconnect (2026-11-23:
   server02 had no advisor after the human ticked it). Two python3 snippets: a JSON merge for `~/.claude/settings.json` and
   `~/.gemini/antigravity-cli/settings.json` (`[path, value]` pairs; a removal also drops an
-  object it empties: `env`, a `modelSettings` entry), and a textual top-level edit of
-  `~/.codex/config.toml` (python3 has no TOML writer), checked with `tomllib` where the host has
+  object it empties: `env`, a `modelSettings` entry), and a textual edit of
+  `~/.codex/config.toml` (python3 has no TOML writer: top-level keys, and keys in one `[table]`,
+  which is added at the end of the file when missing; a table set as dotted keys or inline is
+  left alone), checked with `tomllib` where the host has
   Python 3.11+.
 - **Left alone:** a host without the agent's folder (nothing created), a file that doesn't
   parse, a link to a missing file. A file is rewritten only when something changed, through a
@@ -130,6 +132,7 @@ CLIs, and a wrong key is silently ignored.
 | Default model | `model` | Free text with suggestions (Codex's model names change too often for a fixed list). |
 | Reasoning effort | `model_reasoning_effort` | `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (Codex's own list; `none` left out). Codex starts on ANY string here, so the list is maiTerm's check, not Codex's. |
 | Approvals reviewer | `approvals_reviewer` | `user` or `auto_review`. Codex refuses to START on any other value ("failed to load bootstrap configuration"). |
+| Screen | `[tui] fullscreen_transcript` | Scrollback (`false`) or Fullscreen (`true`, Codex's default). Probed on codex-cli 0.172.0 (2026-11-26) by counting alternate-screen entries (`ESC[?1049h`) at startup: `false` runs inline even with `alternate_screen = "always"`, `true` uses the alternate screen unless `alternate_screen = "never"` (or `--no-alt-screen`). The one this section sets is `fullscreen_transcript`: it is the switch Codex itself labels Scrollback/Fullscreen. |
 
 ### 3.3 Antigravity — `~/.gemini/antigravity-cli/settings.json`
 
