@@ -106,7 +106,8 @@ fn not_applied_status_event(
 
 /// Bind this tab's remote record to the ssh maiTerm just typed for it — the spawn/reconnect/replay
 /// paths call this from their own "ssh came up" poll, which runs whether or not maiLink is. Fresh
-/// probe, and `try_bind` checks the argv names THIS handoff, so a different ssh never binds.
+/// probe; `try_bind` checks the handoff handle in argv for `SentUnverified` and checks `target_host`
+/// for `NotApplied`/`HostLogin` (where no handle was staged) so an unrelated ssh host never binds.
 ///
 /// When binding succeeds for a `NotApplied` prep (e.g. missing/expired keychain token or staging
 /// failure), also returns the desktop `"remote-account-status"` event so the error badge only
@@ -138,25 +139,6 @@ fn bind_after_ssh_up_with_ssh(
     }
     let ev = not_applied_status_event(tab_id, remote, "prepare");
     (true, ev)
-}
-
-/// Bind this tab's fresh remote record to the ssh process holding its terminal RIGHT NOW — for
-/// the handoff paths that type the fragment into an ssh already running (the bridge's typed-ssh
-/// path, the manual inject), where the argv carries no handoff path to recognise it by. Fresh
-/// probe: this is an edge, and a cached snapshot could predate the ssh.
-///
-/// Returns the desktop `"remote-account-status"` event when a live SSH process was bound and the
-/// record is `NotApplied`.
-pub(crate) fn bind_remote_now(
-    app: &AppState,
-    tab_id: &str,
-) -> Option<RemoteAccountStatusEvent> {
-    let pty = app.tab_pty_map.read().get(tab_id).cloned()?;
-    let (pid, _) = crate::pty::get_pty_foreground_ssh(app, &pty, true)?;
-    let mut records = app.tab_accounts.write();
-    let remote = records.get_mut(tab_id)?.remote.as_mut()?;
-    remote.ssh_pid = Some(pid);
-    not_applied_status_event(tab_id, remote, "prepare")
 }
 
 /// `GET /accounts` and the WS `accounts` frame — §14.3 `AccountsSnapshot`.
@@ -737,11 +719,16 @@ mod tests {
         let (app, tab) = fixture();
         let account = Some(tab_record::AccountRef { id: "a".into(), label: "work@example.com".into() });
 
-        // Failed prep (handle = None): binding to the live ssh returns the desktop badge event
-        // once, and a second bind attempt on the already-bound record is a no-op.
-        let r = RemoteRecord::new(account.clone(), RemoteState::NotApplied, Some("token expired".into()));
+        // Failed prep (handle = None) with target_host: must NOT bind to a different SSH host
+        // (e.g. user manually running `ssh other` after a fast-failing baked ssh to `nova`), and
+        // MUST bind + emit once for the matching host (even with full binary path / flags).
+        let mut r = RemoteRecord::new(account.clone(), RemoteState::NotApplied, Some("token expired".into()));
+        r.target_host = Some("nova".into());
         note_remote(&app, &tab, r);
-        let (bound, ev) = bind_after_ssh_up_with_ssh(&app, &tab, 700, "ssh nova");
+        assert_eq!(bind_after_ssh_up_with_ssh(&app, &tab, 699, "ssh other"), (false, None));
+        assert_eq!(app.tab_accounts.read()[&tab].remote.as_ref().unwrap().ssh_pid, None);
+
+        let (bound, ev) = bind_after_ssh_up_with_ssh(&app, &tab, 700, "/usr/bin/ssh -p 2222 nova");
         assert!(bound);
         let ev = ev.expect("binding a NotApplied prep must emit the desktop error status");
         assert_eq!(ev.status, "not_applied");

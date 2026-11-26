@@ -2195,37 +2195,49 @@ pub async fn prepare_remote_account_token(
         };
         let mut remote = RemoteRecord::new(account, state_, reason);
         remote.handle = prep.handle.clone();
+        remote.target_host = prep.host.clone();
+        // `bind_now`: the caller is about to type the fragment into an ssh that is ALREADY
+        // running, so probe its PID on a blocking thread BEFORE writing `note_remote` — setting
+        // `ssh_pid` on OUR record atomically with no post-write lock-drop TOCTOU against a
+        // concurrent `prepare_remote_account_token`.
+        let bound_pid = if bind_now.unwrap_or(false) {
+            let st = state.inner().clone();
+            let tid = tab_id.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::mailink::accounts::foreground_ssh_pid_fresh(&st, &tid)
+            })
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        };
+        remote.ssh_pid = bound_pid;
         crate::mailink::accounts::note_remote(state.inner(), &tab_id, remote);
         // Keep the desktop tab's error indicator in step with live SSH sessions:
-        // - `SentUnverified` / `HostLogin` immediately clear any stale badge.
-        // - `NotApplied` is ONLY emitted once bound to a LIVE foreground SSH process:
-        //   * when `bind_now` is true (live ssh injection), `bind_remote_now` binds on a blocking
-        //     thread and emits the badge only if SSH is still foreground;
-        //   * when `bind_now` is false (baked ssh not typed yet), `bind_remote_account` emits the
-        //     badge once the ssh process actually comes up — so slow shell init, `preexec` titles,
-        //     fast-failing ssh, or a retracted reconnect never strand or race a badge on the local
-        //     prompt.
-        if matches!(state_, RemoteState::SentUnverified | RemoteState::HostLogin) {
-            let clear_ev = crate::mailink::accounts::RemoteAccountStatusEvent {
+        // - `NotApplied` with a live bound PID (`bind_now` succeeded): emit the badge now.
+        // - Everything else (`SentUnverified`, `HostLogin`, or `NotApplied` not yet bound because
+        //   baked `ssh` has not started yet or live `ssh` exited): emit `"ok"` to clear any stale
+        //   badge from a prior session; for baked `ssh`, `bind_remote_account` will emit
+        //   `"not_applied"` once the target ssh process is actually live and bound.
+        let status_ev = if state_ == RemoteState::NotApplied && bound_pid.is_some() {
+            crate::mailink::accounts::RemoteAccountStatusEvent {
+                tab_id: tab_id.clone(),
+                status: "not_applied",
+                account_label: prep.account_label.clone(),
+                reason: prep.detail.clone().or_else(|| Some("the token could not be placed".into())),
+                source: "prepare",
+            }
+        } else {
+            crate::mailink::accounts::RemoteAccountStatusEvent {
                 tab_id: tab_id.clone(),
                 status: "ok",
                 account_label: prep.account_label.clone(),
                 reason: None,
                 source: "prepare",
-            };
-            crate::mailink::accounts::emit_remote_account_status(&app, &clear_ev);
-        }
-        if bind_now.unwrap_or(false) {
-            let st = state.inner().clone();
-            let tid = tab_id.clone();
-            if let Ok(Some(ev)) = tauri::async_runtime::spawn_blocking(move || {
-                crate::mailink::accounts::bind_remote_now(&st, &tid)
-            })
-            .await
-            {
-                crate::mailink::accounts::emit_remote_account_status(&app, &ev);
             }
-        }
+        };
+        crate::mailink::accounts::emit_remote_account_status(&app, &status_ev);
     }
     Ok(prep)
 }

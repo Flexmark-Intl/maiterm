@@ -66,6 +66,10 @@ pub struct RemoteRecord {
     /// This handoff's own name (`remote::handoff_handle` — tab id plus a per-prepare nonce). The
     /// evidence an ssh is recognised by. `None` when nothing was staged (a refusal, host_login).
     pub handle: Option<String>,
+    /// Normalized ssh target (`port_book_key`, e.g. `ews@nova`) this prep was built for. Used by
+    /// `try_bind` when `handle` is `None` (`NotApplied` / `HostLogin`) so a fast-failing baked ssh
+    /// to host A cannot later bind and badge an unrelated `ssh hostB` started within the poll window.
+    pub target_host: Option<String>,
     /// True when `state == RemoteState::NotApplied` was set by a remote `SessionStart` env
     /// precedence check (§6.1), rather than a delivery/expiry failure. Lets a subsequent clean
     /// `SessionStart` inside the same SSH session (e.g. after `unset ANTHROPIC_API_KEY`) clear
@@ -75,7 +79,15 @@ pub struct RemoteRecord {
 
 impl RemoteRecord {
     pub fn new(account: Option<AccountRef>, state: RemoteState, reason: Option<String>) -> Self {
-        Self { account, state, reason, ssh_pid: None, handle: None, env_mismatch: false }
+        Self {
+            account,
+            state,
+            reason,
+            ssh_pid: None,
+            handle: None,
+            target_host: None,
+            env_mismatch: false,
+        }
     }
 }
 
@@ -263,22 +275,46 @@ pub fn wire(
 /// it bound.
 ///
 /// A record with NO handle staged nothing — a refused or failed push (`not_applied`), or a host
-/// not covered (`host_login`) — so the ssh typed after it carries no name to recognise. Those bind
-/// to the ssh this edge sees, because the edge is the path's own poll right after typing it, and
-/// because what they claim is a warning or "the host's own login", never an identity: misplaced,
-/// the cost is a check, not false reassurance. `sent_unverified` always requires the name.
+/// not covered (`host_login`) — so the ssh typed after it carries no handoff path. When
+/// `target_host` is recorded, those still require the foreground ssh's target (`port_book_key`)
+/// to match so a fast-failing baked ssh to host A cannot bind and badge a later `ssh hostB`.
+/// `sent_unverified` always requires the exact handoff handle in argv.
 pub fn try_bind(remote: &mut RemoteRecord, pid: u32, cmd: &str) -> bool {
     if remote.ssh_pid.is_some() {
         return false;
     }
     let ok = match remote.handle.as_deref() {
         Some(h) => names_handoff(cmd, h),
-        None => remote.state != RemoteState::SentUnverified,
+        None => {
+            remote.state != RemoteState::SentUnverified
+                && remote
+                    .target_host
+                    .as_deref()
+                    .is_none_or(|expected| ssh_cmd_target(cmd) == expected)
+        }
     };
     if ok {
         remote.ssh_pid = Some(pid);
     }
     ok
+}
+
+/// Extract the normalized ssh target (`port_book_key`) from a foreground command line such as
+/// `ssh -t -p 2222 ews@nova ...` or `/usr/bin/ssh hostA`.
+fn ssh_cmd_target(cmd: &str) -> String {
+    let trimmed = cmd.trim_start();
+    let args = match trimmed.split_once(char::is_whitespace) {
+        Some((bin, rest)) => {
+            let base = bin.rsplit(['/', '\\']).next().unwrap_or(bin);
+            if matches!(base, "ssh" | "autossh" | "mosh" | "mosh-client") {
+                rest
+            } else {
+                trimmed
+            }
+        }
+        None => trimmed,
+    };
+    crate::commands::ssh_tunnel::port_book_key(args)
 }
 
 /// Whether an ssh command line is the one maiTerm typed for this handoff.

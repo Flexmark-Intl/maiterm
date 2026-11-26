@@ -1506,10 +1506,11 @@
       if (terminal) terminal.dispose();
       terminalsStore.unregister(tabId);
       cleanupTab(tabId);
-      // Real teardown (close / suspend / archive) — drop any disconnect badge.
-      // (Not on a preserved PTY move: the badge is keyed by tabId and the
-      // reattaching pane should keep showing it.)
+      // Real teardown (close / suspend / archive) — drop any disconnect/account error badges.
+      // (Not on a preserved PTY move: the badges are keyed by tabId and the
+      // reattaching pane should keep showing them.)
       sshDisconnectStore.clear(tabId);
+      claudeStateStore.clearRemoteAccountError(tabId);
     }
   });
 
