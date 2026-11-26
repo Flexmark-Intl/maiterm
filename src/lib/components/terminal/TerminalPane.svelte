@@ -133,14 +133,6 @@
   // --- SSH drop detection / recovery ---
   // Set (via getPtyInfo) while an interactive ssh session is the foreground job.
   let sshForeground: { cmd: string; host: string | null } | null = null;
-  // True only after `getPtyForeground`/`getPtyInfo` actually observed a live SSH process
-  // in this pane (unlike `sshForeground`, which `reconnectSsh` pre-sets on `onTyped` before
-  // `ssh` execs). Prevents `preexec` title hooks or slow shell startup from clearing a fresh
-  // `prepare_remote_account_token` error badge before the baked `ssh` process starts.
-  let sshObservedForeground = false;
-  // True once this shell has emitted OSC 133 B/C (preexec / command start), so a slow local
-  // shell's initial prompt (`OSC 133;A`) is never mistaken for an SSH session exiting.
-  let sawShellCommand = false;
   /**
    * Have we seen this PTY's foreground be something OTHER than ssh? Only after that does a
    * subsequent ssh detection mean "the user just connected, the remote end is a shell at a
@@ -783,7 +775,6 @@
           const clonedSsh = !!isInteractiveSsh && typedBakedSsh;
           if (isInteractiveSsh) {
             typedBakedSsh = false;
-            sshObservedForeground = true;
             // Track the live ssh session + its remote title so we can preserve
             // the title and replay the connection if it drops unexpectedly.
             sshForeground = { cmd, host: parseSshHost(cmd) };
@@ -825,22 +816,23 @@
           } else if (isInteractiveSsh && bridgeStatus !== 'connected' && bridgeStatus !== 'pending') {
             enableBridge(tabId, cmd, ptyId, freshSsh).catch(() => {});
           } else if (!cmd) {
-            const hadSsh = hasBridge(tabId) || sshObservedForeground;
             if (hasBridge(tabId)) {
               sshForeground = null;
               disableBridge(tabId).catch(() => {});
             }
-            if (hadSsh) {
-              sshObservedForeground = false;
-              sshForeground = null;
-              // Local shell title after an observed SSH session exited: clear any remote account
-              // error badge even when shell integration (OSC 133) is disabled or inside startup.
-              // Gated on `hadSsh` so `preexec` title hooks and slow local shell init never erase
-              // a fresh `prepare_remote_account_token` badge before a baked `ssh` starts.
-              claudeStateStore.clearRemoteAccountError(tabId);
-            }
+            // Remote account error badges are only emitted once bound to a live SSH process, so
+            // any subsequent local-shell title with `!cmd` means that SSH session has ended.
+            claudeStateStore.clearRemoteAccountError(tabId);
           }
         }).catch(() => {});
+      } else if (!spinnerTick && claudeStateStore.getRemoteAccountError(tabId)) {
+        // Even with the SSH bridge disabled in preferences, clear a live remote account error
+        // badge when a local-shell title fires after SSH exits (covers shells without OSC 133).
+        getPtyForeground(ptyId, true)
+          .then((cmd) => {
+            if (!cmd) claudeStateStore.clearRemoteAccountError(tabId);
+          })
+          .catch(() => {});
       }
     });
 
@@ -856,26 +848,15 @@
       {
         const raw = event.payload.cmd;
         if (raw === 'A') activityStore.noteShellPrompt(tabId, ptyId);
-        else if (raw === 'B' || raw === 'C') {
-          sawShellCommand = true;
-          activityStore.noteCommandBegin(tabId, ptyId);
-        } else if (raw === 'D') activityStore.noteCommandExit(tabId, ptyId, event.payload.exit_code ?? 0);
-        // Fast SSH exit/failure during the 15s auto-resume suppression window: only after a
-        // command has actually started (or SSH was observed/bridged/reattached) so a slow local
-        // shell's initial `OSC 133;A` never erases a fresh `prepare_remote_account_token` badge
-        // before the queued `ssh` command runs.
-        if (
-          raw === 'A' &&
-          !trackActivity &&
-          (sawShellCommand || hasBridge(tabId) || sshObservedForeground || reattaching) &&
-          claudeStateStore.getRemoteAccountError(tabId)
-        ) {
+        else if (raw === 'B' || raw === 'C') activityStore.noteCommandBegin(tabId, ptyId);
+        else if (raw === 'D') activityStore.noteCommandExit(tabId, ptyId, event.payload.exit_code ?? 0);
+        // Fast SSH exit during the 15s auto-resume suppression window: because badges are only
+        // emitted once bound to a live SSH process, a local `OSC 133;A` with `!foregroundCmd`
+        // unconditionally means SSH has exited.
+        if (raw === 'A' && !trackActivity && claudeStateStore.getRemoteAccountError(tabId)) {
           getPtyForeground(ptyId, true)
             .then((foregroundCmd) => {
-              if (!foregroundCmd) {
-                sshObservedForeground = false;
-                claudeStateStore.clearRemoteAccountError(tabId);
-              }
+              if (!foregroundCmd) claudeStateStore.clearRemoteAccountError(tabId);
             })
             .catch(() => {});
         }
@@ -888,10 +869,7 @@
         // before clearing Claude state or tearing down the bridge. Whether the ssh
         // DROPPED is not judged here: Rust does that for every terminal, mounted or
         // not (`pty/ssh_watch.rs`), and reports it through `handleDropEvent`.
-        const canClearRemoteError =
-          !!claudeStateStore.getRemoteAccountError(tabId) &&
-          (sawShellCommand || hasBridge(tabId) || sshObservedForeground || reattaching);
-        if (claudeStateStore.getState(tabId) || hasBridge(tabId) || sshForeground || canClearRemoteError) {
+        if (claudeStateStore.getState(tabId) || hasBridge(tabId) || sshForeground || claudeStateStore.getRemoteAccountError(tabId)) {
           // Fresh probe: this is the ssh-EXIT edge. A stale positive (the cache still
           // showing the ssh that just exited) leaves the old host's bridge registered
           // on the tab, and that stale 'connected' is what then blocks bridging the
@@ -910,10 +888,7 @@
               if (hasBridge(tabId)) {
                 disableBridge(tabId).catch(() => {});
               }
-              if (canClearRemoteError) {
-                claudeStateStore.clearRemoteAccountError(tabId);
-              }
-              sshObservedForeground = false;
+              claudeStateStore.clearRemoteAccountError(tabId);
               sshForeground = null;
             }
           }).catch(() => {});
@@ -1099,10 +1074,7 @@
               await new Promise(r => setTimeout(r, 500));
               try {
                 const info = await getPtyInfo(ptyId);
-                if (info.foreground_command) {
-                  sshObservedForeground = true;
-                  break;
-                }
+                if (info.foreground_command) break;
               } catch { return; } // tab gone
               if (i === maxAttempts - 1) { typedBakedSsh = false; return; } // timed out
             }
@@ -1790,7 +1762,6 @@
       ?? tab.restore_ssh_command
       ?? null;
     sshForeground = null;
-    sshObservedForeground = false;
     // Covers non-OSC-133 SSH drops (`ssh-tunnel-down` / stderr fallback) as well as `exit-255`:
     // the remote session is gone and the local shell holds the tty again.
     claudeStateStore.clearRemoteAccountError(tabId);

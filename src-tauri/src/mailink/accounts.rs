@@ -84,33 +84,79 @@ pub(crate) fn chat_account(app: &AppState, tab_id: &str, runtime_slug: &str) -> 
         .unwrap_or(Value::Null)
 }
 
+fn not_applied_status_event(
+    tab_id: &str,
+    remote: &RemoteRecord,
+    source: &'static str,
+) -> Option<RemoteAccountStatusEvent> {
+    if remote.state != RemoteState::NotApplied {
+        return None;
+    }
+    Some(RemoteAccountStatusEvent {
+        tab_id: tab_id.to_string(),
+        status: "not_applied",
+        account_label: remote.account.as_ref().map(|a| a.label.clone()),
+        reason: remote
+            .reason
+            .clone()
+            .or_else(|| Some("the token could not be placed".into())),
+        source,
+    })
+}
+
 /// Bind this tab's remote record to the ssh maiTerm just typed for it — the spawn/reconnect/replay
 /// paths call this from their own "ssh came up" poll, which runs whether or not maiLink is. Fresh
 /// probe, and `try_bind` checks the argv names THIS handoff, so a different ssh never binds.
-pub(crate) fn bind_after_ssh_up(app: &AppState, tab_id: &str) -> bool {
+///
+/// When binding succeeds for a `NotApplied` prep (e.g. missing/expired keychain token or staging
+/// failure), also returns the desktop `"remote-account-status"` event so the error badge only
+/// ever appears on a LIVE, BOUND SSH session — never before `ssh` starts, on a fast-failing `ssh`,
+/// or after a gated reconnect is retracted before typing `ssh`.
+pub(crate) fn bind_after_ssh_up(
+    app: &AppState,
+    tab_id: &str,
+) -> (bool, Option<RemoteAccountStatusEvent>) {
     let pty = app.tab_pty_map.read().get(tab_id).cloned();
     let Some((pid, cmd)) = pty.and_then(|p| crate::pty::get_pty_foreground_ssh(app, &p, true)) else {
-        return false;
+        return (false, None);
     };
+    bind_after_ssh_up_with_ssh(app, tab_id, pid, &cmd)
+}
+
+fn bind_after_ssh_up_with_ssh(
+    app: &AppState,
+    tab_id: &str,
+    pid: u32,
+    cmd: &str,
+) -> (bool, Option<RemoteAccountStatusEvent>) {
     let mut records = app.tab_accounts.write();
-    records
-        .get_mut(tab_id)
-        .and_then(|r| r.remote.as_mut())
-        .is_some_and(|r| tab_record::try_bind(r, pid, &cmd))
+    let Some(remote) = records.get_mut(tab_id).and_then(|r| r.remote.as_mut()) else {
+        return (false, None);
+    };
+    if !tab_record::try_bind(remote, pid, cmd) {
+        return (false, None);
+    }
+    let ev = not_applied_status_event(tab_id, remote, "prepare");
+    (true, ev)
 }
 
 /// Bind this tab's fresh remote record to the ssh process holding its terminal RIGHT NOW — for
 /// the handoff paths that type the fragment into an ssh already running (the bridge's typed-ssh
 /// path, the manual inject), where the argv carries no handoff path to recognise it by. Fresh
 /// probe: this is an edge, and a cached snapshot could predate the ssh.
-pub(crate) fn bind_remote_now(app: &AppState, tab_id: &str) {
-    let pty = app.tab_pty_map.read().get(tab_id).cloned();
-    let Some((pid, _)) = pty.and_then(|p| crate::pty::get_pty_foreground_ssh(app, &p, true)) else {
-        return;
-    };
-    if let Some(remote) = app.tab_accounts.write().get_mut(tab_id).and_then(|r| r.remote.as_mut()) {
-        remote.ssh_pid = Some(pid);
-    }
+///
+/// Returns the desktop `"remote-account-status"` event when a live SSH process was bound and the
+/// record is `NotApplied`.
+pub(crate) fn bind_remote_now(
+    app: &AppState,
+    tab_id: &str,
+) -> Option<RemoteAccountStatusEvent> {
+    let pty = app.tab_pty_map.read().get(tab_id).cloned()?;
+    let (pid, _) = crate::pty::get_pty_foreground_ssh(app, &pty, true)?;
+    let mut records = app.tab_accounts.write();
+    let remote = records.get_mut(tab_id)?.remote.as_mut()?;
+    remote.ssh_pid = Some(pid);
+    not_applied_status_event(tab_id, remote, "prepare")
 }
 
 /// `GET /accounts` and the WS `accounts` frame — §14.3 `AccountsSnapshot`.
@@ -684,5 +730,38 @@ mod tests {
         assert_eq!(app.tab_accounts.read()[&tab].remote.as_ref().unwrap().state, RemoteState::NotApplied);
         let local_clear = apply_remote_auth_env(&app, &tab, tab_record::Place::Local, &missing, UP_LONG).unwrap();
         assert_eq!(local_clear.status, "ok");
+    }
+
+    #[test]
+    fn bind_after_ssh_up_emits_prepare_error_only_when_not_applied_binds_live_ssh() {
+        let (app, tab) = fixture();
+        let account = Some(tab_record::AccountRef { id: "a".into(), label: "work@example.com".into() });
+
+        // Failed prep (handle = None): binding to the live ssh returns the desktop badge event
+        // once, and a second bind attempt on the already-bound record is a no-op.
+        let r = RemoteRecord::new(account.clone(), RemoteState::NotApplied, Some("token expired".into()));
+        note_remote(&app, &tab, r);
+        let (bound, ev) = bind_after_ssh_up_with_ssh(&app, &tab, 700, "ssh nova");
+        assert!(bound);
+        let ev = ev.expect("binding a NotApplied prep must emit the desktop error status");
+        assert_eq!(ev.status, "not_applied");
+        assert_eq!(ev.source, "prepare");
+        assert_eq!(ev.account_label.as_deref(), Some("work@example.com"));
+        assert_eq!(ev.reason.as_deref(), Some("token expired"));
+        assert_eq!(app.tab_accounts.read()[&tab].remote.as_ref().unwrap().ssh_pid, Some(700));
+        assert_eq!(bind_after_ssh_up_with_ssh(&app, &tab, 700, "ssh nova"), (false, None));
+
+        // Healthy SentUnverified prep: binds when argv matches the handoff, emits no error event.
+        let mut ok = RemoteRecord::new(account, RemoteState::SentUnverified, None);
+        ok.handle = Some("t1-abcd".into());
+        note_remote(&app, &tab, ok);
+        let (bound, ev) = bind_after_ssh_up_with_ssh(
+            &app,
+            &tab,
+            701,
+            "ssh -t nova '[ -r ~/.maiterm/tokens/tok-t1-abcd ] && . x'",
+        );
+        assert!(bound);
+        assert!(ev.is_none());
     }
 }

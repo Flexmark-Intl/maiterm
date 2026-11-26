@@ -2196,34 +2196,36 @@ pub async fn prepare_remote_account_token(
         let mut remote = RemoteRecord::new(account, state_, reason);
         remote.handle = prep.handle.clone();
         crate::mailink::accounts::note_remote(state.inner(), &tab_id, remote);
-        // `bind_now`: the caller is about to type the fragment into an ssh that is ALREADY
-        // running, so that process is the one this handoff belongs to. Every other caller types
-        // an ssh whose own argv names the handoff file, and is bound when that is seen.
-        if bind_now.unwrap_or(false) {
-            crate::mailink::accounts::bind_remote_now(state.inner(), &tab_id);
-        }
-        // Keep the desktop tab's error indicator in step with the handoff outcome: clear any
-        // previous error on a fresh `ready` / `not_applicable` handoff, and surface delivery or
-        // expiry failures on the tab itself (not only in a transient toast).
-        let status_ev = match state_ {
-            RemoteState::NotApplied => crate::mailink::accounts::RemoteAccountStatusEvent {
+        // Keep the desktop tab's error indicator in step with live SSH sessions:
+        // - `SentUnverified` / `HostLogin` immediately clear any stale badge.
+        // - `NotApplied` is ONLY emitted once bound to a LIVE foreground SSH process:
+        //   * when `bind_now` is true (live ssh injection), `bind_remote_now` binds on a blocking
+        //     thread and emits the badge only if SSH is still foreground;
+        //   * when `bind_now` is false (baked ssh not typed yet), `bind_remote_account` emits the
+        //     badge once the ssh process actually comes up — so slow shell init, `preexec` titles,
+        //     fast-failing ssh, or a retracted reconnect never strand or race a badge on the local
+        //     prompt.
+        if matches!(state_, RemoteState::SentUnverified | RemoteState::HostLogin) {
+            let clear_ev = crate::mailink::accounts::RemoteAccountStatusEvent {
                 tab_id: tab_id.clone(),
-                status: "not_applied",
+                status: "ok",
                 account_label: prep.account_label.clone(),
-                reason: prep.detail.clone().or_else(|| Some("the token could not be placed".into())),
+                reason: None,
                 source: "prepare",
-            },
-            RemoteState::SentUnverified | RemoteState::HostLogin => {
-                crate::mailink::accounts::RemoteAccountStatusEvent {
-                    tab_id: tab_id.clone(),
-                    status: "ok",
-                    account_label: prep.account_label.clone(),
-                    reason: None,
-                    source: "prepare",
-                }
+            };
+            crate::mailink::accounts::emit_remote_account_status(&app, &clear_ev);
+        }
+        if bind_now.unwrap_or(false) {
+            let st = state.inner().clone();
+            let tid = tab_id.clone();
+            if let Ok(Some(ev)) = tauri::async_runtime::spawn_blocking(move || {
+                crate::mailink::accounts::bind_remote_now(&st, &tid)
+            })
+            .await
+            {
+                crate::mailink::accounts::emit_remote_account_status(&app, &ev);
             }
-        };
-        crate::mailink::accounts::emit_remote_account_status(&app, &status_ev);
+        }
     }
     Ok(prep)
 }
@@ -2454,13 +2456,20 @@ pub async fn discard_remote_account_token(
 /// once — on the main thread that is one UI stall per tab (the mesh-liveness pinwheel lesson).
 #[tauri::command]
 pub async fn bind_remote_account(
+    app: tauri::AppHandle,
     state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
     tab_id: String,
 ) -> Result<bool, String> {
-    let app = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || crate::mailink::accounts::bind_after_ssh_up(&app, &tab_id))
-        .await
-        .map_err(|e| format!("bind task failed: {e}"))
+    let st = state.inner().clone();
+    let (bound, ev) = tauri::async_runtime::spawn_blocking(move || {
+        crate::mailink::accounts::bind_after_ssh_up(&st, &tab_id)
+    })
+    .await
+    .map_err(|e| format!("bind task failed: {e}"))?;
+    if let Some(ev) = ev {
+        crate::mailink::accounts::emit_remote_account_status(&app, &ev);
+    }
+    Ok(bound)
 }
 
 /// Run one short script on the remote over a connection of its own, optionally feeding it
