@@ -640,14 +640,29 @@ mod tests {
         assert!(super::pty_command_for_cli_impl(Path::new("/bin/a&b.cmd"), &["setup-token"], true).is_err());
 
         // UNC paths (e.g. Folder Redirection %APPDATA%) cannot be `cwd` for cmd.exe; safe UNC
-        // paths are invoked directly without setting `cwd`.
+        // paths are invoked directly with `/` normalized to `\` so cmd.exe never reads `/` as
+        // a switch delimiter.
         let unc = Path::new("//server/share/users/ann/AppData/Roaming/npm/claude.cmd");
         let win_unc = super::pty_command_for_cli_impl(unc, &["setup-token"], true).unwrap();
         assert_eq!(
             win_unc.get_argv(),
-            &[OsStr::new("cmd.exe"), OsStr::new("/d"), OsStr::new("/c"), unc.as_os_str(), OsStr::new("setup-token")]
+            &[
+                OsStr::new("cmd.exe"),
+                OsStr::new("/d"),
+                OsStr::new("/c"),
+                OsStr::new(r"\\server\share\users\ann\AppData\Roaming\npm\claude.cmd"),
+                OsStr::new("setup-token"),
+            ]
         );
         assert!(win_unc.get_cwd().is_none());
+        let mixed_unc = Path::new(r"\\server\share/npm\claude.cmd");
+        let win_mixed = super::pty_command_for_cli_impl(mixed_unc, &["setup-token"], true).unwrap();
+        assert_eq!(win_mixed.get_argv()[3], OsStr::new(r"\\server\share\npm\claude.cmd"));
+        assert!(win_mixed.get_cwd().is_none());
+        let root_unc = Path::new(r"\\server\share\claude.cmd");
+        let win_root = super::pty_command_for_cli_impl(root_unc, &["setup-token"], true).unwrap();
+        assert_eq!(win_root.get_argv()[3], OsStr::new(r"\\server\share\claude.cmd"));
+        assert!(win_root.get_cwd().is_none());
         assert!(super::pty_command_for_cli_impl(Path::new("//server/share/My Folder/claude.cmd"), &["setup-token"], true).is_err());
 
         let native_exe = Path::new("/Users/ann/.local/bin/claude.exe");
@@ -1474,16 +1489,21 @@ fn pty_command_for_cli_impl(
     windows: bool,
 ) -> Result<portable_pty::CommandBuilder, String> {
     let mut cmd = if windows && is_windows_batch_shim(cli) {
-        let parent = cli.parent().filter(|p| !p.as_os_str().is_empty());
-        if parent.is_some_and(is_unc_path) {
+        if is_unc_path(cli) {
+            // Normalize `/` to `\` because `cmd.exe /d /c` treats `/` in an unquoted command
+            // token as a switch delimiter (unlike `CreateProcessW`), and check `is_unc_path(cli)`
+            // directly rather than via `cli.parent()` so host-OS path parsing doesn't matter.
             let full = cli
                 .to_str()
                 .filter(|s| is_safe_cmd_token(s, true))
-                .ok_or_else(|| format!("cannot safely launch UNC batch shim `{}` in a PTY", cli.display()))?;
+                .ok_or_else(|| format!("cannot safely launch UNC batch shim `{}` in a PTY", cli.display()))?
+                .replace('/', r"\");
             let mut c = portable_pty::CommandBuilder::new("cmd.exe");
-            c.args(["/d", "/c", full]);
+            c.args(["/d", "/c"]);
+            c.arg(full);
             c
         } else {
+            let parent = cli.parent().filter(|p| !p.as_os_str().is_empty());
             let name = cli
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -2379,26 +2399,31 @@ pub async fn discard_remote_account_token(
         .as_deref()
         .unwrap_or("the token was prepared but the session did not use it");
     let downgraded = crate::mailink::accounts::downgrade_remote(state.inner(), &tab_id, &handle, why);
-    // Surface the tab error badge ONLY when:
+    // Surface the desktop tab error badge and maiLink phone doorbell ONLY when:
     //  1. the caller abandoned a live session (`reason.is_some()`, never `retract()`),
     //  2. `downgrade_remote` confirmed this handle is still current and had a bound `ssh_pid`,
     //  3. that exact `bound_pid` is still foreground (never an already-exited SSH or a new host),
     //  4. after the `ps` await, `tab_accounts` still holds this same downgraded `handle` (so a
     //     concurrent `prepare_remote_account_token` landing during `ps` cannot be clobbered).
     if reason.is_some() {
-        if let Some((Some(bound_pid), ev)) = downgraded {
-            let st = state.inner().clone();
-            let tid = tab_id.clone();
-            let current_pid = tauri::async_runtime::spawn_blocking(move || {
-                crate::mailink::accounts::foreground_ssh_pid_fresh(&st, &tid)
-            })
-            .await
-            .ok()
-            .flatten();
-            if current_pid == Some(bound_pid)
-                && crate::mailink::accounts::remote_handle_is_not_applied(state.inner(), &tab_id, &handle)
-            {
-                crate::mailink::accounts::emit_remote_account_status(&app, &ev);
+        if let Some(outcome) = downgraded {
+            if let Some(bound_pid) = outcome.bound_pid {
+                let st = state.inner().clone();
+                let tid = tab_id.clone();
+                let current_pid = tauri::async_runtime::spawn_blocking(move || {
+                    crate::mailink::accounts::foreground_ssh_pid_fresh(&st, &tid)
+                })
+                .await
+                .ok()
+                .flatten();
+                if current_pid == Some(bound_pid)
+                    && crate::mailink::accounts::remote_handle_is_not_applied(state.inner(), &tab_id, &handle)
+                {
+                    crate::mailink::accounts::emit_remote_account_status(&app, &outcome.event);
+                    if outcome.entering_failure {
+                        crate::mailink::accounts::ring_remote_account_failure(state.inner(), &tab_id);
+                    }
+                }
             }
         }
     }

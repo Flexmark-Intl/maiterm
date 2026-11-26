@@ -828,8 +828,9 @@ function createAgentStateStore() {
       });
       unlisteners.push(u12);
 
-      // When Rust detects an SSH drop (even on an unmounted tab or a shell without OSC 133 / title
-      // updates), the local shell holds the tty again — clear any stale remote account error badge.
+      // When Rust detects an SSH drop (OSC 133 exit 255, including on unmounted tabs), the local
+      // shell holds the tty again — clear any stale remote account error badge. Non-OSC-133 drops
+      // (`ssh-tunnel-down` / stderr fallback) clear in TerminalPane's `handleSshDrop`.
       const u13 = await listen<{ tab_id?: string }>('ssh-dropped', (e) => {
         const tid = e.payload?.tab_id;
         if (tid && remoteAccountErrors.get(tid) != null) {

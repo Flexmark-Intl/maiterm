@@ -410,54 +410,68 @@ fn apply_remote_auth_env(
     event
 }
 
+/// Outcome of `downgrade_remote`: returned so the caller (`discard_remote_account_token`) can
+/// confirm the bound SSH process is still alive before emitting the desktop badge or ringing
+/// maiLink's phone doorbell (avoiding spurious alerts on `retract()` or after SSH has exited).
+pub(crate) struct DowngradeOutcome {
+    pub(crate) entering_failure: bool,
+    pub(crate) bound_pid: Option<u32>,
+    pub(crate) event: RemoteAccountStatusEvent,
+}
+
 /// A prepared handoff that the session never used: that session is not running as the account.
 ///
 /// **Only if the record is still THAT handoff's.** Checked and updated under a single write lock
 /// (no read/write TOCTOU with a concurrent `prepare_remote_account_token`), and updated IN PLACE
 /// so a bound `ssh_pid` and `handle` stay intact (allowing maiLink to serve `not_applied` for a
 /// `bindNow` session and allowing the caller to verify the exact SSH PID before emitting a tab
-/// badge). Returns `(bound_ssh_pid, status_event)` when the handle matched.
+/// badge or doorbell). Does NOT ring the doorbell itself; callers call
+/// `ring_remote_account_failure` once liveness is confirmed.
 pub(crate) fn downgrade_remote(
     app: &AppState,
     tab_id: &str,
     handle: &str,
     reason: &str,
-) -> Option<(Option<u32>, RemoteAccountStatusEvent)> {
-    downgrade_remote_at_uptime(app, tab_id, handle, reason, app.started_at.elapsed())
+) -> Option<DowngradeOutcome> {
+    let mut records = app.tab_accounts.write();
+    let remote = records.get_mut(tab_id)?.remote.as_mut()?;
+    if remote.handle.as_deref() != Some(handle) {
+        return None;
+    }
+    let was = remote.state;
+    remote.state = RemoteState::NotApplied;
+    remote.reason = Some(reason.to_string());
+    remote.env_mismatch = false;
+    let bound_pid = remote.ssh_pid;
+    let account_label = remote.account.as_ref().map(|a| a.label.clone());
+    let event = RemoteAccountStatusEvent {
+        tab_id: tab_id.to_string(),
+        status: "not_applied",
+        account_label,
+        reason: Some(reason.to_string()),
+        source: "discard",
+    };
+    Some(DowngradeOutcome {
+        entering_failure: was != RemoteState::NotApplied,
+        bound_pid,
+        event,
+    })
 }
 
-fn downgrade_remote_at_uptime(
+/// Queue the maiLink phone doorbell for a confirmed live remote-account failure, respecting the
+/// startup baseline window.
+pub(crate) fn ring_remote_account_failure(app: &AppState, tab_id: &str) {
+    ring_remote_account_failure_at_uptime(app, tab_id, app.started_at.elapsed());
+}
+
+fn ring_remote_account_failure_at_uptime(
     app: &AppState,
     tab_id: &str,
-    handle: &str,
-    reason: &str,
     uptime: std::time::Duration,
-) -> Option<(Option<u32>, RemoteAccountStatusEvent)> {
-    let (entering_failure, bound_pid, event) = {
-        let mut records = app.tab_accounts.write();
-        let remote = records.get_mut(tab_id)?.remote.as_mut()?;
-        if remote.handle.as_deref() != Some(handle) {
-            return None;
-        }
-        let was = remote.state;
-        remote.state = RemoteState::NotApplied;
-        remote.reason = Some(reason.to_string());
-        remote.env_mismatch = false;
-        let bound_pid = remote.ssh_pid;
-        let account_label = remote.account.as_ref().map(|a| a.label.clone());
-        let ev = RemoteAccountStatusEvent {
-            tab_id: tab_id.to_string(),
-            status: "not_applied",
-            account_label,
-            reason: Some(reason.to_string()),
-            source: "discard",
-        };
-        (was != RemoteState::NotApplied, bound_pid, ev)
-    };
-    if entering_failure && uptime >= RING_BASELINE_WINDOW {
+) {
+    if uptime >= RING_BASELINE_WINDOW {
         queue_ring(app, tab_id);
     }
-    Some((bound_pid, event))
 }
 
 /// Content-light by construction (§14.5): the queue carries the tab id and its NAME, and the
@@ -565,17 +579,17 @@ mod tests {
         r.handle = Some("h1".into());
         r.ssh_pid = Some(555);
         note_remote(&app, &tab, r);
-        assert!(downgrade_remote_at_uptime(&app, &tab, "h-other", "not ours", UP_LONG).is_none());
+        assert!(downgrade_remote(&app, &tab, "h-other", "not ours").is_none());
         assert_eq!(
             app.tab_accounts.read()[&tab].remote.as_ref().unwrap().state,
             RemoteState::SentUnverified,
             "a discard for a different handoff must not touch this record"
         );
-        let (bound_pid, ev) =
-            downgrade_remote_at_uptime(&app, &tab, "h1", "prepared but not used", UP_LONG).unwrap();
-        assert_eq!(bound_pid, Some(555));
-        assert_eq!(ev.status, "not_applied");
-        assert_eq!(ev.source, "discard");
+        let outcome = downgrade_remote(&app, &tab, "h1", "prepared but not used").unwrap();
+        assert!(outcome.entering_failure);
+        assert_eq!(outcome.bound_pid, Some(555));
+        assert_eq!(outcome.event.status, "not_applied");
+        assert_eq!(outcome.event.source, "discard");
         let r = app.tab_accounts.read()[&tab].remote.clone().unwrap();
         assert_eq!(r.state, RemoteState::NotApplied);
         assert_eq!(r.account, account);
@@ -583,6 +597,10 @@ mod tests {
         assert_eq!(r.handle.as_deref(), Some("h1"));
         assert!(remote_handle_is_not_applied(&app, &tab, "h1"));
         assert!(!remote_handle_is_not_applied(&app, &tab, "h2"));
+        // `downgrade_remote` alone must not ring (retract / already-exited SSH must stay silent).
+        assert!(app.mailink_pending_rings.lock().is_empty());
+        // Once the caller verifies the bound SSH is still live, ringing queues the doorbell.
+        ring_remote_account_failure_at_uptime(&app, &tab, UP_LONG);
         assert_eq!(app.mailink_pending_rings.lock().len(), 1);
     }
 
