@@ -2,12 +2,13 @@
 #
 # deploy-local-build.sh — swap a freshly-built maiTerm.app over the installed copy and restart it.
 #
-# WHY THIS EXISTS: an agent (Claude/Codex/…) running inside a maiTerm tab cannot quit→copy→launch
+# WHY THIS EXISTS: an agent (Claude/Codex/agy/…) running inside a maiTerm tab cannot quit→copy→launch
 # maiTerm itself — quitting the app kills the agent's PTY mid-command, cancelling the very script
-# doing the swap. This script SELF-DETACHES (re-execs under `nohup`, disowned, backgrounded; macOS
-# has no `setsid`) so the swap runs OUTSIDE the caller's process tree and survives maiTerm's exit.
-# maiTerm's auto-resume then brings the agent session back on relaunch, and it can read the log
-# below to confirm the outcome.
+# doing the swap. This script SELF-DETACHES into its own session via `POSIX::setsid()` (macOS has
+# no `setsid` CLI, and plain `nohup … & disown` stays in the caller's process group, which
+# harnesses like Antigravity CLI kill on command exit) so the swap runs OUTSIDE both the harness's
+# process group and maiTerm's PTY tree. maiTerm's auto-resume then brings the agent session back on
+# relaunch, and it can read the log below to confirm the outcome.
 #
 # USAGE (returns immediately after detaching):
 #   scripts/deploy-local-build.sh [SRC_APP]
@@ -98,9 +99,37 @@ if [[ "$DETACHED" != "1" ]]; then
       exit 1
     fi
   fi
-  nohup "$0" "$DETACH_FLAG" "$SRC" >>"$LOG" 2>&1 </dev/null &
-  disown || true
-  echo "Detached deploy started (pid $!)."
+  # Detach synchronously via fork + POSIX::setsid() + pipe ack before the parent exits:
+  # - `fork()` guarantees the child is not a process group leader, so `setsid()` never fails EPERM;
+  # - the parent waits on the pipe until AFTER `setsid()`, `SIGHUP=IGNORE`, and stdio redirects
+  #   complete, closing the race where a caller harness (e.g. `agy` run_command) kills the parent's
+  #   process group the instant exit 0 returns;
+  # - closing inherited fds 3..64 ensures no harness pipe stays open waiting for EOF.
+  DETACHED_PID=$(perl -MPOSIX -e '
+    my $log = shift @ARGV;
+    pipe(my $r, my $w) or die "pipe: $!";
+    my $pid = fork();
+    die "fork: $!" unless defined $pid;
+    if ($pid == 0) {
+      close $r;
+      POSIX::setsid() >= 0 or die "setsid: $!";
+      $SIG{HUP} = "IGNORE";
+      open(STDIN, "<", "/dev/null") or die "stdin: $!";
+      open(STDOUT, ">>", $log) or die "stdout: $!";
+      open(STDERR, ">&STDOUT") or die "stderr: $!";
+      print $w "$$\n";
+      close $w;
+      POSIX::close($_) for 3..64;
+      exec @ARGV or die "exec: $!";
+    }
+    close $w;
+    my $child = <$r>;
+    close $r;
+    chomp($child) if defined $child;
+    die "detach failed\n" unless defined $child && $child =~ /^\d+$/;
+    print "$child\n";
+  ' "$LOG" "$0" "$DETACH_FLAG" "$SRC")
+  echo "Detached deploy started (pid $DETACHED_PID)."
   echo "Log: $LOG"
   exit 0
 fi
