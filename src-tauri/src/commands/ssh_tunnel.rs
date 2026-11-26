@@ -538,6 +538,46 @@ pub(crate) fn port_book_key(host_key: &str) -> String {
     host_key.trim().to_string()
 }
 
+/// Extract the normalized ssh target (`port_book_key`) from a foreground command line such as
+/// `ssh -p 2222 ews@nova`, `/usr/bin/ssh nova`, or `autossh -t -o ControlMaster=no -M 0 ews@nova`.
+/// Understands `autossh`'s `-M <port>` option (which plain `ssh` treats as a no-arg flag).
+pub(crate) fn ssh_command_target(cmd: &str) -> String {
+    let words = crate::util::ssh_words::split(cmd);
+    let mut tokens = words.iter().map(String::as_str).peekable();
+    let is_autossh = match tokens.peek() {
+        Some(&first) => {
+            let base = first.rsplit(['/', '\\']).next().unwrap_or(first);
+            if matches!(base, "ssh" | "autossh" | "mosh" | "mosh-client") {
+                tokens.next();
+                base == "autossh"
+            } else {
+                false
+            }
+        }
+        None => return String::new(),
+    };
+    while let Some(token) = tokens.next() {
+        if token == "--" {
+            if let Some(host) = tokens.next() {
+                return host.to_string();
+            }
+            break;
+        }
+        if token.starts_with('-') {
+            if is_autossh && token == "-M" {
+                tokens.next();
+                continue;
+            }
+            if token.len() == 2 && SSH_FLAGS_WITH_ARG.contains(&token) {
+                tokens.next();
+            }
+            continue;
+        }
+        return token.to_string();
+    }
+    cmd.trim().to_string()
+}
+
 /// The remote port this maiTerm will ask for on `host_key`. Answerable without a tunnel:
 /// that is what lets the ssh command carry it before the tunnel exists.
 pub fn preferred_remote_port(host_key: &str) -> u16 {

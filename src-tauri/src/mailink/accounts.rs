@@ -43,11 +43,17 @@ pub(crate) fn tab_runs_remote(app: &AppState, tab_id: &str) -> bool {
     matches!(place(app, tab_id), tab_record::Place::Remote { .. })
 }
 
+/// Fresh foreground-SSH `(pid, cmd)` probe for `tab_id` (used on one-shot edges like
+/// `prepare_remote_account_token(bind_now=true)`, never on periodic ticks).
+pub(crate) fn foreground_ssh_fresh(app: &AppState, tab_id: &str) -> Option<(u32, String)> {
+    let pty = app.tab_pty_map.read().get(tab_id).cloned()?;
+    crate::pty::get_pty_foreground_ssh(app, &pty, true)
+}
+
 /// Fresh foreground-SSH PID probe for `tab_id` (used on one-shot edges like
 /// `discard_remote_account_token`, never on periodic ticks).
 pub(crate) fn foreground_ssh_pid_fresh(app: &AppState, tab_id: &str) -> Option<u32> {
-    let pty = app.tab_pty_map.read().get(tab_id).cloned()?;
-    crate::pty::get_pty_foreground_ssh(app, &pty, true).map(|(pid, _)| pid)
+    foreground_ssh_fresh(app, tab_id).map(|(pid, _)| pid)
 }
 
 /// True iff `tab_id`'s remote record still belongs to `handle` and is in `NotApplied`.
@@ -737,6 +743,28 @@ mod tests {
         assert_eq!(ev.reason.as_deref(), Some("token expired"));
         assert_eq!(app.tab_accounts.read()[&tab].remote.as_ref().unwrap().ssh_pid, Some(700));
         assert_eq!(bind_after_ssh_up_with_ssh(&app, &tab, 700, "ssh nova"), (false, None));
+
+        // `autossh -M <port>` must not parse `<port>` as the target host (and plain `ssh -M`
+        // still treats `-M` as a no-arg OpenSSH flag).
+        let mut auto_r = RemoteRecord::new(account.clone(), RemoteState::NotApplied, Some("token expired".into()));
+        auto_r.target_host = Some("ews@nova".into());
+        note_remote(&app, &tab, auto_r);
+        let (bound, ev) = bind_after_ssh_up_with_ssh(
+            &app,
+            &tab,
+            702,
+            "autossh -t -o ControlMaster=no -M 0 ews@nova 'exec $SHELL -l'",
+        );
+        assert!(bound);
+        assert_eq!(ev.unwrap().status, "not_applied");
+
+        // `HostLogin` with `target_host` must not bind to an unrelated host either.
+        let mut hl = RemoteRecord::new(None, RemoteState::HostLogin, None);
+        hl.target_host = Some("hostA".into());
+        note_remote(&app, &tab, hl);
+        assert_eq!(bind_after_ssh_up_with_ssh(&app, &tab, 703, "ssh hostB"), (false, None));
+        assert_eq!(bind_after_ssh_up_with_ssh(&app, &tab, 704, "ssh -M hostA"), (true, None));
+        assert_eq!(app.tab_accounts.read()[&tab].remote.as_ref().unwrap().ssh_pid, Some(704));
 
         // Healthy SentUnverified prep: binds when argv matches the handoff, emits no error event.
         let mut ok = RemoteRecord::new(account, RemoteState::SentUnverified, None);

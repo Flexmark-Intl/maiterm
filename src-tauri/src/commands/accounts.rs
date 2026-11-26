@@ -2197,18 +2197,33 @@ pub async fn prepare_remote_account_token(
         remote.handle = prep.handle.clone();
         remote.target_host = prep.host.clone();
         // `bind_now`: the caller is about to type the fragment into an ssh that is ALREADY
-        // running, so probe its PID on a blocking thread BEFORE writing `note_remote` — setting
-        // `ssh_pid` on OUR record atomically with no post-write lock-drop TOCTOU against a
-        // concurrent `prepare_remote_account_token`.
+        // running, so probe its `(pid, cmd)` on a blocking thread BEFORE writing `note_remote` —
+        // setting `ssh_pid` on OUR record atomically with no post-write lock-drop TOCTOU against
+        // a concurrent `prepare_remote_account_token`, and verifying `target_host` so a slow
+        // `run_ssh` timeout on host A cannot overwrite or badge a live session on host B.
         let bound_pid = if bind_now.unwrap_or(false) {
             let st = state.inner().clone();
             let tid = tab_id.clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                crate::mailink::accounts::foreground_ssh_pid_fresh(&st, &tid)
+            let fg = tauri::async_runtime::spawn_blocking(move || {
+                crate::mailink::accounts::foreground_ssh_fresh(&st, &tid)
             })
             .await
             .ok()
-            .flatten()
+            .flatten();
+            match fg {
+                Some((pid, cmd)) => {
+                    let host_matches = remote.target_host.as_deref().is_none_or(|expected| {
+                        crate::commands::ssh_tunnel::ssh_command_target(&cmd) == expected
+                    });
+                    if !host_matches {
+                        // The tab moved on to a different SSH host while `prepare_inner` ran:
+                        // do not overwrite the newer host's `tab_accounts` record or badge.
+                        return Ok(prep);
+                    }
+                    Some(pid)
+                }
+                None => None,
+            }
         } else {
             None
         };
@@ -2260,7 +2275,7 @@ async fn prepare_inner(
     // the host's own login. `port_book_key` is the codebase's most careful ssh-target
     // extractor (it understands `-p2222` and `-oKey=Val` inline), and it is already the thing
     // that makes the bridge and a tab's replay agree on what host they are talking about.
-    let target = crate::commands::ssh_tunnel::port_book_key(ssh_args.trim_start_matches("ssh "));
+    let target = crate::commands::ssh_tunnel::ssh_command_target(&ssh_args);
 
     let (account_id, label, plan, minted_at) = {
         let prefs = &state.app_data.read().preferences;
@@ -2268,7 +2283,15 @@ async fn prepare_inner(
             // The plan goes with the token: without it the remote cannot tell what the account is
             // entitled to and silently resolves a different model. See `stage_contents`.
             Some(a) => (a.id.clone(), a.label.clone(), a.plan.clone(), a.token_minted_at),
-            None => return Ok((RemoteTokenPrep::not_applicable(), None)),
+            None => {
+                // Keep `host` populated so the resulting `HostLogin` record carries `target_host`
+                // and cannot later bind to an unrelated SSH host in `try_bind`.
+                let mut prep = RemoteTokenPrep::not_applicable();
+                if !target.is_empty() {
+                    prep.host = Some(target);
+                }
+                return Ok((prep, None));
+            }
         }
     };
 

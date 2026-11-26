@@ -290,31 +290,13 @@ pub fn try_bind(remote: &mut RemoteRecord, pid: u32, cmd: &str) -> bool {
                 && remote
                     .target_host
                     .as_deref()
-                    .is_none_or(|expected| ssh_cmd_target(cmd) == expected)
+                    .is_none_or(|expected| crate::commands::ssh_tunnel::ssh_command_target(cmd) == expected)
         }
     };
     if ok {
         remote.ssh_pid = Some(pid);
     }
     ok
-}
-
-/// Extract the normalized ssh target (`port_book_key`) from a foreground command line such as
-/// `ssh -t -p 2222 ews@nova ...` or `/usr/bin/ssh hostA`.
-fn ssh_cmd_target(cmd: &str) -> String {
-    let trimmed = cmd.trim_start();
-    let args = match trimmed.split_once(char::is_whitespace) {
-        Some((bin, rest)) => {
-            let base = bin.rsplit(['/', '\\']).next().unwrap_or(bin);
-            if matches!(base, "ssh" | "autossh" | "mosh" | "mosh-client") {
-                rest
-            } else {
-                trimmed
-            }
-        }
-        None => trimmed,
-    };
-    crate::commands::ssh_tunnel::port_book_key(args)
 }
 
 /// Whether an ssh command line is the one maiTerm typed for this handoff.
