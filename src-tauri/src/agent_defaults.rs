@@ -1043,8 +1043,13 @@ if tomllib:
         t=want
         for n in path[:-1]:
             if n not in t:
+                if v is None:
+                    t=None
+                    break
                 t[n]={}
             t=t[n]
+        if t is None:
+            continue
         if v is None:
             t.pop(path[-1],None)
         else:
@@ -1576,6 +1581,10 @@ mod tests {
             let Some(out) = codex_merge(toml, ops.clone()) else { return };
             assert_eq!(out, [want.to_string(), want.to_string()], "{toml:?}");
         }
+        // Removing it where there is no [tui] creates none, and doesn't stop the other keys.
+        let both = json!([[["tui", "fullscreen_transcript"], null], ["model", "b"]]);
+        let Some(out) = codex_merge("model = \"a\"\n", both) else { return };
+        assert_eq!(out, ["model = \"b\"\n".to_string(), "model = \"b\"\n".to_string()]);
         // Removal takes the line and leaves the header.
         let Some(out) = codex_merge("[tui]\nfullscreen_transcript = false\nx = 1\n", json!([[["tui", "fullscreen_transcript"], null]])) else { return };
         assert_eq!(out, ["[tui]\nx = 1\n".to_string(), "[tui]\nx = 1\n".to_string()]);
