@@ -24,6 +24,21 @@ use super::registrar::Registrar;
 
 pub(crate) const CODEX_LAUNCH_SH: &str = include_str!("../../resources/codex/launch.sh");
 
+/// Ensure `<app_data_dir>/codex-launch.sh` exists and matches the bundled launcher script.
+/// Written lazily on PTY spawn as well as during `CodexRegistrar::install` so the first tabs
+/// spawned on startup never race the registrar.
+#[cfg(unix)]
+pub(crate) fn ensure_launch_helper() -> Result<std::path::PathBuf, String> {
+    let dir = crate::state::persistence::app_data_dir().ok_or("No data directory")?;
+    let path = dir.join("codex-launch.sh");
+    if fs::read_to_string(&path).is_ok_and(|cur| cur == CODEX_LAUNCH_SH) {
+        return Ok(path);
+    }
+    fs::create_dir_all(&dir).map_err(|e| format!("create {:?}: {}", dir, e))?;
+    atomic_write(&path, CODEX_LAUNCH_SH)?;
+    Ok(path)
+}
+
 /// The Codex lifecycle events we register a forwarding command hook for.
 const CODEX_HOOK_EVENTS: &[&str] = &[
     "SessionStart",
@@ -76,10 +91,8 @@ impl Registrar for CodexRegistrar {
         }
 
         #[cfg(unix)]
-        if let Some(dir) = crate::state::persistence::app_data_dir() {
-            if let Err(e) = atomic_write(&dir.join("codex-launch.sh"), CODEX_LAUNCH_SH) {
-                log::warn!("Codex launch helper: {e}");
-            }
+        if let Err(e) = ensure_launch_helper() {
+            log::warn!("Codex launch helper: {e}");
         }
 
         let name = mcp_name();

@@ -9,6 +9,7 @@
  * 4. On tab close → disableBridge() → decrements ref count → kills tunnel if last
  */
 
+import { remoteCodexAlias } from '$lib/tauri/codexShell';
 import * as commands from '$lib/tauri/commands';
 import { splitWords } from '$lib/utils/shellWords';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
@@ -288,47 +289,7 @@ function isSharedHost(hostKey: string, excludeTabId: string): boolean {
   return false;
 }
 
-/**
- * SSH short flags that take a following argument.
- * See `man ssh` OPTIONS section.
- */
-const SSH_FLAGS_WITH_ARG = new Set([
-  '-b', '-c', '-D', '-E', '-e', '-F', '-I', '-i', '-J', '-L',
-  '-l', '-m', '-O', '-o', '-p', '-Q', '-R', '-S', '-W', '-w',
-]);
-
-/**
- * Detect whether an ssh process is running an interactive shell or a one-shot remote command.
- *
- * One-shot commands (e.g. `ssh host 'some-cmd'` from Claude Code's Bash tool) must NOT
- * trigger the MCP bridge: by the time the tunnel is set up (~1-2s), the one-shot ssh has
- * already exited, so the env-var injection lands in the LOCAL shell instead of the remote.
- *
- * Returns true when:
- *   - ssh has no trailing remote command (pure interactive), OR
- *   - trailing command contains `exec $SHELL` (maiTerm's split/restore reconnect pattern)
- */
-export function isInteractiveSshSession(cmd: string): boolean {
-  const tokens = splitWords(commands.sshArgsOf(cmd));
-  let i = 0;
-  let sawHost = false;
-  while (i < tokens.length) {
-    const t = tokens[i];
-    if (t.startsWith('-')) {
-      // Known flag+arg pair, unless written as -oKey=Value (combined).
-      if (SSH_FLAGS_WITH_ARG.has(t) && t.length === 2) i += 2;
-      else i += 1;
-    } else if (!sawHost) {
-      sawHost = true;
-      i += 1;
-    } else {
-      // Trailing remote command — interactive only if it keeps a login shell alive.
-      const remote = tokens.slice(i).join(' ');
-      return /\bexec\s+\$?SHELL\b/.test(remote);
-    }
-  }
-  return true;
-}
+export { isInteractiveSshSession } from '$lib/tauri/commands';
 
 /**
  * True when the tab's PTY currently has an interactive ssh session in the
@@ -346,7 +307,7 @@ export async function isRemoteShellForeground(ptyId: string): Promise<boolean> {
     // cached snapshot still showing the ssh that just exited. Reading that from
     // the 800ms poll cache is precisely how a remote-port export lands locally.
     const cmd = await commands.getPtyForeground(ptyId, true);
-    return !!cmd && isInteractiveSshSession(cmd);
+    return !!cmd && commands.isInteractiveSshSession(cmd);
   } catch {
     return false;
   }
@@ -977,8 +938,8 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
     // %maitermTabId, %maitermPort for individual values, %maitermExport for the full export command.
     setVariable(tabId, 'maitermTabId', tabId);
     setVariable(tabId, 'maitermPort', String(tunnelInfo.remote_port));
-    setVariable(tabId, 'maitermExport',
-      `export MAITERM_TAB_ID=${tabId} MAITERM_PORT=${tunnelInfo.remote_port} MAITERM_AUTH=${authToken} ${commands.REMOTE_CLAUDE_MOD_ENV}`);
+    const bridgeExport = `export MAITERM_TAB_ID=${tabId} MAITERM_PORT=${tunnelInfo.remote_port} MAITERM_AUTH=${authToken} ${commands.REMOTE_CLAUDE_MOD_ENV}`;
+    setVariable(tabId, 'maitermExport', bridgeExport);
 
     // Inject MAITERM_TAB_ID and MAITERM_PORT into the remote shell FIRST — before
     // building or kicking off the remote setup below. The injection only needs
@@ -1065,8 +1026,7 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
           // Taken only now, at the point of writing. Every guard above is a reason not to type
           // anything at all, and each of them hands the file back rather than leaving it.
           const acct = account ? await account.take() : null;
-          let envCmd = " export MAITERM_TAB_ID=" + tabId + " MAITERM_PORT=" + tunnelInfo.remote_port
-            + " MAITERM_AUTH=" + authToken + " " + commands.REMOTE_CLAUDE_MOD_ENV;
+          let envCmd = " " + bridgeExport + (codexOn ? "; " + remoteCodexAlias : "");
           // Refused rather than escaped if it could break out — see buildSshCommand. Here it
           // would be worse: this string is typed straight at a live remote shell.
           if (acct && !acct.includes("'")) envCmd += "; " + acct;

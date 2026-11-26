@@ -1192,6 +1192,7 @@ pub fn get_mcp_auth(state: tauri::State<'_, Arc<AppState>>) -> Option<String> {
 /// What a tab's ssh command exports so the remote agent can reach THIS maiTerm.
 #[derive(serde::Serialize)]
 pub struct RemoteBridgeEnv {
+    pub codex: bool,
     pub port: u16,
     pub auth: String,
 }
@@ -1219,7 +1220,9 @@ pub fn get_remote_bridge_env(
         .values()
         .find(|t| port_book_key(&t.host_key) == key)
         .map(|t| t.remote_port);
+    let data = state.app_data.read();
     Some(RemoteBridgeEnv {
+        codex: data.preferences.codex_ide && data.preferences.codex_ide_ssh,
         port: live.unwrap_or_else(|| preferred_remote_port(&host_key)),
         auth,
     })
@@ -1397,6 +1400,9 @@ pub fn build_codex_setup_script(remote_port: u16, auth: String, tab_id: String, 
     // No-op cleanly on hosts without the Codex CLI. Use if/then/fi (NOT `|| exit`).
     lines.push("if command -v codex >/dev/null 2>&1; then".to_string());
     lines.push("mkdir -p ~/.codex/hooks ~/.codex/prompts".to_string());
+    lines.push("mkdir -p ~/.maiterm/codex && launch_tmp=$(mktemp ~/.maiterm/codex/launch.XXXXXX) && cat > \"$launch_tmp\" <<'MAITERM_CODEX_LAUNCH_EOF' && mv -f \"$launch_tmp\" ~/.maiterm/codex/launch.sh || exit 1".into());
+    lines.push(crate::claude_code::codex::CODEX_LAUNCH_SH.trim_end().into());
+    lines.push("MAITERM_CODEX_LAUNCH_EOF".into());
     lines.push("shim_abs=\"$HOME/.codex/hooks/agent-hook.sh\"".to_string());
     if hooks {
         // Hook shim — literal bytes via a quoted heredoc (no expansion of $1/$HOME/etc).

@@ -383,7 +383,7 @@ async function bridgeWith(a: { tabId?: string; with_tab_id?: string; fork?: bool
     // This card goes to the phone. getPtyInfo cleans maiTerm's export (MAITERM_AUTH) off the
     // line, a full-path ssh or autossh included; anything the cleaner still does not recognise
     // would come back raw, so a line still carrying it is refused rather than shown.
-    if (ssh && /MAITERM_|\bexec\s+\$?SHELL\b/.test(ssh)) {
+    if (ssh && /MAITERM_|\b(?:exec|maiterm-codex-login)\s+\$?SHELL\b/.test(ssh)) {
       return { error: `“${them.tab.name}”'s ssh command cannot be read safely, so it is not forked by request. The human can fork it with the Agent Bridge picker.` };
     }
     const runs = ssh

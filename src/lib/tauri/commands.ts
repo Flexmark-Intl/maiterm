@@ -1,3 +1,4 @@
+import { remoteCodexLogin } from './codexShell';
 import { Channel, invoke } from '@tauri-apps/api/core';
 import type { AgentRuntime } from '$lib/agents/types';
 import type { AgentMarkAbs, Baseline, BaselineStat, DeleteTicket, DirReq, FileOp, LedgerEntry, OpResult, OpenAck, PlaceHints, StatInfo, TabTurn, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
@@ -24,7 +25,7 @@ import type {
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
 import { savedCwd } from '$lib/stores/relocateFallback';
-import { parseWordSpans, quoteWord, type WordSpan } from '$lib/utils/shellWords';
+import { parseWordSpans, quoteWord, splitWords, type WordSpan } from '$lib/utils/shellWords';
 import type { AgentBridge, AgentRequest, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, FollowUp, ClaudeSetupReport, MailinkDevice, MailinkPairingPayload, MeshTopic, MoveTargetWindow, Pane, Preferences, ScrollInfo, SearchResult, Service, ShellInfo, SplitDirection, Tab, Task, Workstream, FrameMeta, WatchStatus, WindowData, Workspace, WorkspaceNote } from './types';
 
 // Terminal commands
@@ -53,7 +54,7 @@ function wordSpansOf(s: string): WordSpan[] {
  * `ps` line), or several words with the quotes left in (cmd.exe, which doesn't quote with `'`)
  * — its values read the same, and this finds where it starts.
  */
-const INJECTED_TAIL = /^'?(?:export\s+MAITERM_TAB_ID=|\[ -r ~\/\.maiterm\/|cd\s).*exec\s+'?\$?SHELL'?\s+-l'?$/s;
+const INJECTED_TAIL = /^'?(?:export\s+MAITERM_TAB_ID=|\[ -r ~\/\.maiterm\/|cd\s).*(?:exec|maiterm-codex-login)\s+'?\$?SHELL'?\s+-l'?$/s;
 
 /** ssh's options that take an argument (OpenSSH's getopt string, as `watch.rs` has them). */
 const SSH_ARG_FLAGS = 'bceilmopBDEFIJLOPQRSwW';
@@ -69,6 +70,26 @@ const SSH_ARG_FLAG = new RegExp(`[${SSH_ARG_FLAGS}]`);
  */
 export function remoteCommandIndex(values: string[]): number {
   return sshWalk(values).remote;
+}
+
+/**
+ * Detect whether an ssh process is running an interactive shell or a one-shot remote command.
+ *
+ * One-shot commands (e.g. `ssh host 'some-cmd'` from Claude Code's Bash tool) must NOT
+ * trigger the MCP bridge: by the time the tunnel is set up (~1-2s), the one-shot ssh has
+ * already exited, so the env-var injection lands in the LOCAL shell instead of the remote.
+ *
+ * Returns true when:
+ *   - ssh has no trailing remote command (pure interactive), OR
+ *   - trailing command contains `exec $SHELL` or `maiterm-codex-login $SHELL`
+ *     (maiTerm's split/restore reconnect pattern)
+ */
+export function isInteractiveSshSession(cmd: string): boolean {
+  const tokens = splitWords(sshArgsOf(cmd));
+  const remoteIdx = remoteCommandIndex(tokens);
+  if (remoteIdx >= tokens.length) return true;
+  const remote = tokens.slice(remoteIdx).join(' ');
+  return /\b(?:exec|maiterm-codex-login)\s+\$?SHELL\b/.test(remote);
 }
 
 /**
@@ -279,14 +300,14 @@ export function cleanSshCommand(cmd: string): string {
   // one of the three things maiTerm itself starts that command with, so the `.*` cannot run
   // backwards over a user's own flags.
   let cleaned = cmd.replace(
-    /\s+'(?:export\s+MAITERM_TAB_ID=|\[ -r ~\/\.maiterm\/|cd\s).*exec\s+\$?SHELL\s+-l'\s*$/,
+    /\s+'(?:export\s+MAITERM_TAB_ID=|\[ -r ~\/\.maiterm\/|cd\s).*(?:exec|maiterm-codex-login)\s+\$?SHELL\s+-l'\s*$/,
     '',
   );
   // `ps` reports argv joined by spaces, so the same command comes back from the process table
   // with its quotes gone. Anchored on our own export so a greedy `.*` cannot eat a user's flags.
   // `[ -r ~/.maiterm/` opens the §6 account fragment (`accounts::remote`), listed here as well
   // as the export because the two are independently optional.
-  cleaned = cleaned.replace(/\s+(?:export\s+MAITERM_TAB_ID=|\[ -r ~\/\.maiterm\/).*exec\s+\$?SHELL\s+-l\s*$/, '');
+  cleaned = cleaned.replace(/\s+(?:export\s+MAITERM_TAB_ID=|\[ -r ~\/\.maiterm\/).*(?:exec|maiterm-codex-login)\s+\$?SHELL\s+-l\s*$/, '');
   // Pre-export form (stored commands from earlier builds, and ps output for them).
   cleaned = cleaned.replace(/\s+cd\s+.*?&&\s+exec\s+\$?SHELL\s+-l\s*$/, '');
   // The rest by WORD (shell words, as Rust reads it — `utils/shellWords`), never by regex over
@@ -396,7 +417,7 @@ export function buildSshCommand(
   sshCmd: string | null,
   remoteCwd: string | null,
   tabId?: string | null,
-  bridge?: { port: number; auth: string } | null,
+  bridge?: { port: number; auth: string; codex?: boolean } | null,
   accountExport?: string | null,
 ): string {
   if (!sshCmd) return '';
@@ -417,18 +438,21 @@ export function buildSshCommand(
   // from a validated tab id and nothing else, so a quote here means something is wrong upstream
   // and the right answer is to send no token, not to send a repaired one.
   if (accountExport && !accountExport.includes("'")) prelude += `${accountExport}; `;
+  const login = bridge?.codex && exports.includes(REMOTE_CLAUDE_MOD_ENV) && exports[0]?.startsWith('MAITERM_TAB_ID=')
+    ? remoteCodexLogin().replaceAll("'", "'\\''")
+    : 'exec $SHELL -l';
   if (!remoteCwd) {
     if (!prelude) {
       return `${program} -o ControlMaster=no ${rest}`;
     }
-    return `${program} -t -o ControlMaster=no ${rest} '${prelude}exec $SHELL -l'`;
+    return `${program} -t -o ControlMaster=no ${rest} '${prelude}${login}'`;
   }
   // `shellEscapePath` quotes for the REMOTE shell, but the line is typed into the local one,
   // inside its own single quotes. A plain path passes through both unharmed; one with a space,
   // a quote or a `$` must be escaped again for the local shell, or it splits there (and the
   // remote `cd` fails, ending the session) or expands on this computer.
   const cdPath = SAFE_REMOTE_PATH.test(remoteCwd) ? shellEscapePath(remoteCwd) : shellEscapePath(remoteCwd).replace(/'/g, "'\\''");
-  return `${program} -t -o ControlMaster=no ${rest} '${prelude}cd ${cdPath} && exec $SHELL -l'`;
+  return `${program} -t -o ControlMaster=no ${rest} '${prelude}cd ${cdPath} && ${login}'`;
 }
 
 export function normalizeSshInput(input: string): string {
@@ -2350,7 +2374,7 @@ export async function getSshBridgeRefusal(): Promise<string | null> {
  * Answerable before the tunnel exists — see buildSshCommand. Null while the MCP server
  * is still coming up, in which case the command is built without them, exactly as before.
  */
-export async function getRemoteBridgeEnv(hostKey: string): Promise<{ port: number; auth: string } | null> {
+export async function getRemoteBridgeEnv(hostKey: string): Promise<{ port: number; auth: string; codex: boolean } | null> {
   // A stored command may keep the user's ssh program (cleanSshCommand); Rust keys on the host.
   return invoke('get_remote_bridge_env', { hostKey: sshArgsOf(hostKey) });
 }
@@ -2448,6 +2472,8 @@ export interface AgentDefaultsCodex {
   model: string | null;
   effort: string | null;
   reviewer: string | null;
+  /** `[tui] fullscreen_transcript`: "true" fullscreen (Codex's default), "false" scrollback. */
+  fullscreen: string | null;
 }
 
 export interface AgentDefaultsAgy {

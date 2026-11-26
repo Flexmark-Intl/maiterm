@@ -227,9 +227,19 @@ pub fn spawn_pty(
 
         // Local Codex TUIs must inherit THIS tab's hook and MCP environment.
         // Keep the helper out of PATH and leave the user's login files alone.
-        let codex_launcher = app_data_dir()
-            .map(|d| d.join("codex-launch.sh"))
-            .filter(|p| prefs.codex_ide && state.mcp_port.read().is_some() && p.is_file());
+        // Write lazily if absent/drifted so tabs spawned during app startup never race
+        // CodexRegistrar::install().
+        let codex_launcher = if prefs.codex_ide && state.mcp_port.read().is_some() {
+            match crate::claude_code::codex::ensure_launch_helper() {
+                Ok(path) => Some(path),
+                Err(e) => {
+                    log::warn!("Codex launch helper: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         cmd.env_remove("MAITERM_CODEX_LAUNCHER");
         cmd.env_remove("BASH_FUNC_codex%%");
         if let Some(path) = &codex_launcher {
@@ -249,7 +259,10 @@ pub fn spawn_pty(
             "bash" => {
                 // Import before login initialization so a user's own function can override it.
                 if codex_launcher.is_some() {
-                    cmd.env("BASH_FUNC_codex%%", r#"() { /bin/sh "$MAITERM_CODEX_LAUNCHER" "$@"; }"#);
+                    cmd.env(
+                        "BASH_FUNC_codex%%",
+                        r#"() { if [ -r "${MAITERM_CODEX_LAUNCHER:-}" ]; then /bin/sh "$MAITERM_CODEX_LAUNCHER" "$@"; else command codex "$@"; fi; }"#,
+                    );
                 }
                 if shell_integration {
                     let title_part = if shell_title_integration {
@@ -313,7 +326,7 @@ pub fn spawn_pty(
                 if shell_title_integration || shell_integration || codex_launcher.is_some() {
                     let mut parts: Vec<String> = Vec::new();
                     if codex_launcher.is_some() {
-                        parts.push(r#"function codex; /bin/sh "$MAITERM_CODEX_LAUNCHER" $argv; end"#.into());
+                        parts.push(r#"function codex; if test -n "$MAITERM_CODEX_LAUNCHER" -a -r "$MAITERM_CODEX_LAUNCHER"; /bin/sh "$MAITERM_CODEX_LAUNCHER" $argv; else; command codex $argv; end; end"#.into());
                     }
                     if shell_integration {
                         parts.push(
@@ -2223,7 +2236,13 @@ fn setup_zsh_integration(title: bool, shell_integration: bool) -> Result<std::pa
 
     let zshenv_content = r#"# maiTerm shell integration - do not edit
 if [[ -n "$MAITERM_CODEX_LAUNCHER" ]]; then
-  function codex { /bin/sh "$MAITERM_CODEX_LAUNCHER" "$@"; }
+  function codex {
+    if [[ -r "$MAITERM_CODEX_LAUNCHER" ]]; then
+      /bin/sh "$MAITERM_CODEX_LAUNCHER" "$@"
+    else
+      command codex "$@"
+    fi
+  }
 fi
 if [[ "$MAITERM_ZSH_CODEX_ONLY" == 1 ]]; then
   ZDOTDIR="$MAITERM_REAL_ZDOTDIR"

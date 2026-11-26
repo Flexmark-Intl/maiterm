@@ -319,3 +319,38 @@ trace, and source reading, and per project rule that is not evidence the phone f
 
 Use `ews@nova` for subsequent SSH verification. Back up and restore its Codex
 configuration and remove test artifacts. The review itself changed no runtime behavior.
+
+## Follow-up: codex-cli 0.172.0 shared app-server daemon (2026-11-26)
+
+`codex-cli 0.172.0` enabled `features.daemon_auto_start = true` (`stable`) by default.
+Interactive `codex` (and `codex resume` / `codex fork`) now attaches to a single shared
+background daemon (`~/.codex/app-server-control/app-server-control.sock`) unless `--no-daemon`
+is passed.
+
+Source inspection of `codex-rust-v0.172.0` and live probes confirmed:
+- Both MCP `env_http_headers` (`x-maiterm-tab = "MAITERM_TAB_ID"`) and command hooks
+  (`agent-hook.sh` reading `MAITERM_PORT` / `MAITERM_AUTH` / `MAITERM_TAB_ID`) resolve against
+  the **daemon's** process environment, not the connecting TUI tab's environment.
+- After a maiTerm restart, a pre-existing daemon keeps the dead `MAITERM_PORT` / `MAITERM_AUTH`
+  and stale `MAITERM_TAB_ID` of whichever tab originally spawned it — hooks silently fail with
+  `Connection refused` and MCP sends the wrong tab ID. Even without a restart, every Codex tab
+  collides on the daemon's single `MAITERM_TAB_ID`.
+- `[features] daemon_auto_start = false` is not sufficient by itself: Codex still attaches to
+  an already-running daemon (`existing_daemon`) unless `--no-daemon` is passed.
+- **Additional 0.172.0 checks verified live**:
+  - All nine existing `[hooks.state.*.trusted_hash]` entries remain accepted without
+    `--dangerously-bypass-hook-trust`.
+  - The live command-approval overlay (`Would you like to run the following command?`) still
+    matches `codex_approval_overlay_open`.
+  - An empty interactive TUI connects MCP (`initialize` + `tools/list` with `x-maiterm-tab`)
+    immediately on boot, while `SessionStart` arrives on the first turn.
+
+**Fix:**
+- Local and SSH interactive shells inside maiTerm route `codex` through a POSIX launcher
+  (`src-tauri/resources/codex/launch.sh`) that probes `command codex --help` for `--no-daemon`
+  at launch (so older CLIs such as `0.161.0` on `ews@nova` pass through untouched) and prepends
+  `--no-daemon` for interactive / `resume` / `fork` invocations while leaving non-TUI
+  subcommands (`exec`, `mcp`, `app-server`, `queue`, etc.) untouched.
+- `server.rs` seeds an idle `Codex` session on `MCP initialize` (matching `Agy`, dropped and
+  replaced as soon as `SessionStart` delivers the real thread UUID) and logs `tab=` on
+  `MCP initialize` so stale/missing `x-maiterm-tab` headers are visible in `aiterm.log`.

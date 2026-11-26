@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { remoteCodexAlias } from '$lib/tauri/codexShell';
   import { onMount, onDestroy, untrack } from 'svelte';
   import { countedListen as listen } from '$lib/utils/listenCounter';
   import { afterLayout, nextLayout } from '$lib/utils/layout';
@@ -2074,6 +2075,7 @@
                 const acct = await remoteAccountExport(tabId, bridge.hostKey, true);
                 let envCmd = " export MAITERM_TAB_ID=" + tabId + " MAITERM_PORT=" + bridge.remotePort
                   + " MAITERM_AUTH=" + auth + " " + REMOTE_CLAUDE_MOD_ENV;
+                if (preferencesStore.codexIde && preferencesStore.codexIdeSsh) envCmd += "; " + remoteCodexAlias;
                 if (acct && !acct.includes("'")) envCmd += "; " + acct;
                 envCmd += "\n";
                 const bytes = Array.from(new TextEncoder().encode(envCmd));
