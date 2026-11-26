@@ -815,9 +815,14 @@
             // correct a stale MAITERM_PORT in the remote shell.
           } else if (isInteractiveSsh && bridgeStatus !== 'connected' && bridgeStatus !== 'pending') {
             enableBridge(tabId, cmd, ptyId, freshSsh).catch(() => {});
-          } else if (!cmd && hasBridge(tabId)) {
-            sshForeground = null;
-            disableBridge(tabId).catch(() => {});
+          } else if (!cmd) {
+            if (hasBridge(tabId)) {
+              sshForeground = null;
+              disableBridge(tabId).catch(() => {});
+            }
+            // Local shell title without SSH foreground: clear any remote account error badge even
+            // when shell integration (OSC 133) is disabled or inside the startup suppression window.
+            claudeStateStore.clearRemoteAccountError(tabId);
           }
         }).catch(() => {});
       }
@@ -837,6 +842,15 @@
         if (raw === 'A') activityStore.noteShellPrompt(tabId, ptyId);
         else if (raw === 'B' || raw === 'C') activityStore.noteCommandBegin(tabId, ptyId);
         else if (raw === 'D') activityStore.noteCommandExit(tabId, ptyId, event.payload.exit_code ?? 0);
+        // Fast SSH exit/failure during the 15s auto-resume suppression window: verify SSH is gone
+        // and clear any remote account error badge immediately rather than leaving it on the local prompt.
+        if (raw === 'A' && !trackActivity && claudeStateStore.getRemoteAccountError(tabId)) {
+          getPtyForeground(ptyId, true)
+            .then((foregroundCmd) => {
+              if (!foregroundCmd) claudeStateStore.clearRemoteAccountError(tabId);
+            })
+            .catch(() => {});
+        }
       }
       if (!trackActivity) return;
       const { cmd, exit_code } = event.payload;

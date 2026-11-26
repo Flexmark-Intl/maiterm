@@ -828,6 +828,16 @@ function createAgentStateStore() {
       });
       unlisteners.push(u12);
 
+      // When Rust detects an SSH drop (even on an unmounted tab or a shell without OSC 133 / title
+      // updates), the local shell holds the tty again — clear any stale remote account error badge.
+      const u13 = await listen<{ tab_id?: string }>('ssh-dropped', (e) => {
+        const tid = e.payload?.tab_id;
+        if (tid && remoteAccountErrors.get(tid) != null) {
+          remoteAccountErrors.set(tid, null);
+        }
+      });
+      unlisteners.push(u13);
+
       // Every listener is attached: from here a hook can't be missed between Rust's answer and
       // the page applying it, so the backfill may run.
       listening = true;

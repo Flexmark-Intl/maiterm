@@ -43,14 +43,22 @@ pub(crate) fn tab_runs_remote(app: &AppState, tab_id: &str) -> bool {
     matches!(place(app, tab_id), tab_record::Place::Remote { .. })
 }
 
-/// Fresh foreground-process check for whether `tab_id` is currently running a remote SSH session
-/// (used on one-shot edges like `discard_remote_account_token`, never on periodic ticks).
-pub(crate) fn tab_runs_remote_fresh(app: &AppState, tab_id: &str) -> bool {
-    let pty = app.tab_pty_map.read().get(tab_id).cloned();
-    let fg = pty
-        .as_deref()
-        .and_then(|p| crate::pty::get_pty_foreground(app, p, true).ok().flatten());
-    fg.is_some()
+/// Fresh foreground-SSH PID probe for `tab_id` (used on one-shot edges like
+/// `discard_remote_account_token`, never on periodic ticks).
+pub(crate) fn foreground_ssh_pid_fresh(app: &AppState, tab_id: &str) -> Option<u32> {
+    let pty = app.tab_pty_map.read().get(tab_id).cloned()?;
+    crate::pty::get_pty_foreground_ssh(app, &pty, true).map(|(pid, _)| pid)
+}
+
+/// True iff `tab_id`'s remote record still belongs to `handle` and is in `NotApplied`.
+/// Checked after an async `ps` probe so a concurrent `prepare_remote_account_token` cannot have
+/// its newer healthy state overwritten by an older discard's event.
+pub(crate) fn remote_handle_is_not_applied(app: &AppState, tab_id: &str, handle: &str) -> bool {
+    app.tab_accounts
+        .read()
+        .get(tab_id)
+        .and_then(|r| r.remote.as_ref())
+        .is_some_and(|r| r.handle.as_deref() == Some(handle) && r.state == RemoteState::NotApplied)
 }
 
 /// The wire `account` for one chat. `Value::Null` = known unmanaged (§14.1 rule 1).
@@ -248,7 +256,7 @@ pub(crate) struct RemoteAccountStatusEvent {
     pub status: &'static str,
     pub account_label: Option<String>,
     pub reason: Option<String>,
-    /// `"hook"` (remote `SessionStart` precedence check), `"prepare"`, or `"clear"`.
+    /// `"hook"` (remote `SessionStart` precedence check), `"prepare"`, `"discard"`, or `"clear"`.
     pub source: &'static str,
 }
 
@@ -404,34 +412,52 @@ fn apply_remote_auth_env(
 
 /// A prepared handoff that the session never used: that session is not running as the account.
 ///
-/// **Only if the record is still THAT handoff's.** A newer prep for the same tab may have replaced
-/// it in the meantime, and downgrading the newer one would mark a session that did get its token
-/// as `not_applied`. Returns the desktop status event when the handle matched and the record was
-/// downgraded.
+/// **Only if the record is still THAT handoff's.** Checked and updated under a single write lock
+/// (no read/write TOCTOU with a concurrent `prepare_remote_account_token`), and updated IN PLACE
+/// so a bound `ssh_pid` and `handle` stay intact (allowing maiLink to serve `not_applied` for a
+/// `bindNow` session and allowing the caller to verify the exact SSH PID before emitting a tab
+/// badge). Returns `(bound_ssh_pid, status_event)` when the handle matched.
 pub(crate) fn downgrade_remote(
     app: &AppState,
     tab_id: &str,
     handle: &str,
     reason: &str,
-) -> Option<RemoteAccountStatusEvent> {
-    let current = app.tab_accounts.read().get(tab_id).and_then(|r| r.remote.clone());
-    if current.as_ref().and_then(|r| r.handle.as_deref()) != Some(handle) {
-        return None;
+) -> Option<(Option<u32>, RemoteAccountStatusEvent)> {
+    downgrade_remote_at_uptime(app, tab_id, handle, reason, app.started_at.elapsed())
+}
+
+fn downgrade_remote_at_uptime(
+    app: &AppState,
+    tab_id: &str,
+    handle: &str,
+    reason: &str,
+    uptime: std::time::Duration,
+) -> Option<(Option<u32>, RemoteAccountStatusEvent)> {
+    let (entering_failure, bound_pid, event) = {
+        let mut records = app.tab_accounts.write();
+        let remote = records.get_mut(tab_id)?.remote.as_mut()?;
+        if remote.handle.as_deref() != Some(handle) {
+            return None;
+        }
+        let was = remote.state;
+        remote.state = RemoteState::NotApplied;
+        remote.reason = Some(reason.to_string());
+        remote.env_mismatch = false;
+        let bound_pid = remote.ssh_pid;
+        let account_label = remote.account.as_ref().map(|a| a.label.clone());
+        let ev = RemoteAccountStatusEvent {
+            tab_id: tab_id.to_string(),
+            status: "not_applied",
+            account_label,
+            reason: Some(reason.to_string()),
+            source: "discard",
+        };
+        (was != RemoteState::NotApplied, bound_pid, ev)
+    };
+    if entering_failure && uptime >= RING_BASELINE_WINDOW {
+        queue_ring(app, tab_id);
     }
-    let account = current.and_then(|r| r.account);
-    let account_label = account.as_ref().map(|a| a.label.clone());
-    note_remote(
-        app,
-        tab_id,
-        RemoteRecord::new(account, RemoteState::NotApplied, Some(reason.to_string())),
-    );
-    Some(RemoteAccountStatusEvent {
-        tab_id: tab_id.to_string(),
-        status: "not_applied",
-        account_label,
-        reason: Some(reason.to_string()),
-        source: "discard",
-    })
+    Some((bound_pid, event))
 }
 
 /// Content-light by construction (§14.5): the queue carries the tab id and its NAME, and the
@@ -537,17 +563,27 @@ mod tests {
         let account = Some(tab_record::AccountRef { id: "a".into(), label: "a@example.com".into() });
         let mut r = RemoteRecord::new(account.clone(), RemoteState::SentUnverified, None);
         r.handle = Some("h1".into());
+        r.ssh_pid = Some(555);
         note_remote(&app, &tab, r);
-        downgrade_remote(&app, &tab, "h-other", "not ours");
+        assert!(downgrade_remote_at_uptime(&app, &tab, "h-other", "not ours", UP_LONG).is_none());
         assert_eq!(
             app.tab_accounts.read()[&tab].remote.as_ref().unwrap().state,
             RemoteState::SentUnverified,
             "a discard for a different handoff must not touch this record"
         );
-        downgrade_remote(&app, &tab, "h1", "prepared but not used");
+        let (bound_pid, ev) =
+            downgrade_remote_at_uptime(&app, &tab, "h1", "prepared but not used", UP_LONG).unwrap();
+        assert_eq!(bound_pid, Some(555));
+        assert_eq!(ev.status, "not_applied");
+        assert_eq!(ev.source, "discard");
         let r = app.tab_accounts.read()[&tab].remote.clone().unwrap();
         assert_eq!(r.state, RemoteState::NotApplied);
         assert_eq!(r.account, account);
+        assert_eq!(r.ssh_pid, Some(555), "ssh_pid must survive downgrade so maiLink serves not_applied");
+        assert_eq!(r.handle.as_deref(), Some("h1"));
+        assert!(remote_handle_is_not_applied(&app, &tab, "h1"));
+        assert!(!remote_handle_is_not_applied(&app, &tab, "h2"));
+        assert_eq!(app.mailink_pending_rings.lock().len(), 1);
     }
 
     #[test]
