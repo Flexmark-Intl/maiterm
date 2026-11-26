@@ -342,7 +342,12 @@ fn codex_status(path: &Path) -> CodexPart {
     let get = |keys: &[&str]| {
         codex_value(&doc, keys).map(|v| match v.as_str() {
             Some(s) => s.to_string(),
-            None => v.to_string().trim().to_string(),
+            None => {
+                // A value's Display carries its spacing and its trailing `# comment`.
+                let mut bare = v.clone();
+                bare.decor_mut().clear();
+                bare.to_string()
+            }
         })
     };
     part.model = get(&["model"]);
@@ -1275,6 +1280,7 @@ mod tests {
         assert!(set(&p, Runtime::Codex, "fullscreen", Some("false")).unwrap());
         assert_eq!(fs::read_to_string(&p.codex).unwrap(), "[tui]\nstatus_line_use_colors = true\nfullscreen_transcript = false # mine\n");
         assert_eq!(local_value(&p, Runtime::Codex, "fullscreen").unwrap(), Some(json!(false)));
+        assert_eq!(status(&p).codex.fullscreen.as_deref(), Some("false"), "the comment is not the value");
         assert!(set(&p, Runtime::Codex, "fullscreen", None).unwrap());
         assert_eq!(fs::read_to_string(&p.codex).unwrap(), "[tui]\nstatus_line_use_colors = true\n");
         assert!(!set(&p, Runtime::Codex, "fullscreen", None).unwrap());
