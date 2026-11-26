@@ -2075,9 +2075,11 @@
                 const acct = await remoteAccountExport(tabId, bridge.hostKey, true);
                 let envCmd = " export MAITERM_TAB_ID=" + tabId + " MAITERM_PORT=" + bridge.remotePort
                   + " MAITERM_AUTH=" + auth + " " + REMOTE_CLAUDE_MOD_ENV;
-                if (preferencesStore.codexIde && preferencesStore.codexIdeSsh) envCmd += "; " + remoteCodexAlias;
                 if (acct && !acct.includes("'")) envCmd += "; " + acct;
                 envCmd += "\n";
+                if (preferencesStore.codexIde && preferencesStore.codexIdeSsh) {
+                  envCmd += " " + remoteCodexAlias + "\n";
+                }
                 const bytes = Array.from(new TextEncoder().encode(envCmd));
                 await writeTerminal(ptyId, bytes);
               }

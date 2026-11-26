@@ -4,9 +4,17 @@ import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildSshCommand, cleanSshCommand, isInteractiveSshSession } from './commands';
-import { remoteCodexAlias } from './codexShell';
+import { remoteCodexAlias, remoteCodexLogin } from './codexShell';
 
 describe.skipIf(process.platform === 'win32')('Codex in a bridged login shell', () => {
+  it('remoteCodexLogin contains no single quotes or backslashes (safe for local fish)', () => {
+    const login = remoteCodexLogin();
+    expect(login).not.toContain("'");
+    expect(login).not.toContain('\\');
+    const line = buildSshCommand('test-host', '/srv/app', 'ab-12', { port: 1234, auth: 'scratch', codex: true });
+    expect(line).not.toContain("'\\''");
+  });
+
   for (const shell of ['/bin/bash', '/bin/zsh']) {
     it.skipIf(shell.endsWith('zsh') && process.platform !== 'darwin')(`routes through the launcher after ${shell} login`, () => {
       const home = mkdtempSync(join(tmpdir(), 'codex-shell-'));
@@ -14,6 +22,7 @@ describe.skipIf(process.platform === 'win32')('Codex in a bridged login shell', 
         const dir = join(home, '.maiterm', 'codex');
         mkdirSync(dir, { recursive: true });
         copyFileSync('src-tauri/resources/codex/launch.sh', join(dir, 'launch.sh'));
+        copyFileSync('src-tauri/resources/codex/login.sh', join(dir, 'login.sh'));
         writeFileSync(join(home, 'codex'), '#!/bin/sh\nif [ "$1" = --help ]; then echo "  --no-daemon"; else printf "<%s>" "$@"; fi\n', { mode: 0o755 });
         const line = buildSshCommand('test-host', home, 'ab-12', { port: 1234, auth: 'scratch', codex: true });
         // Parse the command once in the local shell, then once on the SSH host.
@@ -33,6 +42,22 @@ describe.skipIf(process.platform === 'win32')('Codex in a bridged login shell', 
       }
     });
   }
+
+  it('falls back cleanly to exec $SHELL -l when login.sh is not installed yet', () => {
+    const home = mkdtempSync(join(tmpdir(), 'codex-shell-nologin-'));
+    try {
+      const line = buildSshCommand('test-host', home, 'ab-12', { port: 1234, auth: 'scratch', codex: true });
+      const remote = execFileSync('/bin/sh', ['-c', 'ssh() { shift 4; printf "%s" "$1"; }; ' + line], { encoding: 'utf8' });
+      const result = execFileSync('/bin/sh', ['-c', remote], {
+        env: { HOME: home, SHELL: '/bin/bash', PATH: process.env.PATH },
+        input: 'printf "TAB=%s" "$MAITERM_TAB_ID"\n',
+        encoding: 'utf8',
+      });
+      expect(result).toContain('TAB=ab-12');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 
   it('passes through older codex without --no-daemon and skips non-TUI subcommands', () => {
     const home = mkdtempSync(join(tmpdir(), 'codex-shell-old-'));
@@ -60,17 +85,34 @@ describe.skipIf(process.platform === 'win32')('Codex in a bridged login shell', 
     }
   });
 
-  it('remoteCodexAlias falls back to real codex when launch.sh has not been installed yet', () => {
-    const home = mkdtempSync(join(tmpdir(), 'codex-shell-fallback-'));
-    try {
-      writeFileSync(join(home, 'codex'), '#!/bin/sh\nprintf "FALLBACK:"; printf "<%s>" "$@"\n', { mode: 0o755 });
-      const out = execFileSync('/bin/bash', ['-c', `${remoteCodexAlias}; codex resume abc`], {
-        env: { HOME: home, PATH: `${home}:${process.env.PATH}`, MAITERM_TAB_ID: 'ab-12' },
-        encoding: 'utf8',
-      });
-      expect(out).toBe('FALLBACK:<resume><abc>');
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
+  for (const shell of ['/bin/bash', '/bin/zsh']) {
+    it.skipIf(shell.endsWith('zsh') && process.platform !== 'darwin')(`remoteCodexAlias replaces pre-existing alias and falls back cleanly in ${shell}`, () => {
+      const home = mkdtempSync(join(tmpdir(), 'codex-shell-alias-'));
+      try {
+        writeFileSync(join(home, 'codex'), '#!/bin/sh\nif [ "$1" = --help ]; then echo "  --no-daemon"; else printf "REAL:"; printf "<%s>" "$@"; fi\n', { mode: 0o755 });
+        const args = shell.endsWith('zsh') ? ['-f'] : ['--norc'];
+        const prelude = shell.endsWith('bash') ? 'shopt -s expand_aliases\n' : '';
+        const script = `${prelude}alias codex='echo OLD'\nexport MAITERM_TAB_ID=ab-12\n ${remoteCodexAlias}\ncodex resume "two words"\n`;
+        const fallbackOut = execFileSync(shell, args, {
+          env: { HOME: home, PATH: `${home}:${process.env.PATH}` },
+          input: script,
+          encoding: 'utf8',
+        });
+        expect(fallbackOut.trim()).toBe('REAL:<resume><two words>');
+
+        // Once setup installs launch.sh, the same alias routes through it.
+        const dir = join(home, '.maiterm', 'codex');
+        mkdirSync(dir, { recursive: true });
+        copyFileSync('src-tauri/resources/codex/launch.sh', join(dir, 'launch.sh'));
+        const routedOut = execFileSync(shell, args, {
+          env: { HOME: home, PATH: `${home}:${process.env.PATH}` },
+          input: script,
+          encoding: 'utf8',
+        });
+        expect(routedOut.trim()).toBe('REAL:<--no-daemon><resume><two words>');
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+  }
 });

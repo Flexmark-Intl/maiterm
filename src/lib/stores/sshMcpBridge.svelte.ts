@@ -1026,11 +1026,14 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
           // Taken only now, at the point of writing. Every guard above is a reason not to type
           // anything at all, and each of them hands the file back rather than leaving it.
           const acct = account ? await account.take() : null;
-          let envCmd = " " + bridgeExport + (codexOn ? "; " + remoteCodexAlias : "");
+          let envCmd = " " + bridgeExport;
           // Refused rather than escaped if it could break out — see buildSshCommand. Here it
           // would be worse: this string is typed straight at a live remote shell.
           if (acct && !acct.includes("'")) envCmd += "; " + acct;
           envCmd += "\n";
+          // Separate line (leading space keeps it out of history) so a shell-specific alias
+          // quirk can never abort the MAITERM_* export or one-shot account handoff above.
+          if (codexOn) envCmd += " " + remoteCodexAlias + "\n";
           const bytes = Array.from(new TextEncoder().encode(envCmd));
           await commands.writeTerminal(ptyId, bytes);
           injectedEnvPort.set(tabId, tunnelInfo.remote_port);

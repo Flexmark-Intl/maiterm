@@ -439,7 +439,7 @@ export function buildSshCommand(
   // and the right answer is to send no token, not to send a repaired one.
   if (accountExport && !accountExport.includes("'")) prelude += `${accountExport}; `;
   const login = bridge?.codex && exports.includes(REMOTE_CLAUDE_MOD_ENV) && exports[0]?.startsWith('MAITERM_TAB_ID=')
-    ? remoteCodexLogin().replaceAll("'", "'\\''")
+    ? remoteCodexLogin()
     : 'exec $SHELL -l';
   if (!remoteCwd) {
     if (!prelude) {

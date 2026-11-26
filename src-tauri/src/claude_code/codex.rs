@@ -23,6 +23,7 @@ use super::lockfile::AGENT_HOOK_SHIM;
 use super::registrar::Registrar;
 
 pub(crate) const CODEX_LAUNCH_SH: &str = include_str!("../../resources/codex/launch.sh");
+pub(crate) const CODEX_LOGIN_SH: &str = include_str!("../../resources/codex/login.sh");
 
 /// Ensure `<app_data_dir>/codex-launch.sh` exists and matches the bundled launcher script.
 /// Written lazily on PTY spawn as well as during `CodexRegistrar::install` so the first tabs

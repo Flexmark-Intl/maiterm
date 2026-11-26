@@ -6501,6 +6501,7 @@ async fn hooks_handler(
                     (true, _, _) => false,
                 };
                 if may_clear {
+                    MCP_SEEDED_SESSIONS.lock().remove(&session_id);
                     sessions.remove(&session_id).map(|s| s.tab_id)
                 } else {
                     log::info!("Claude hook: session {} ended, but it is claimed by more than one tab{} — leaving the mapping to the live claimant",

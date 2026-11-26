@@ -1403,6 +1403,9 @@ pub fn build_codex_setup_script(remote_port: u16, auth: String, tab_id: String, 
     lines.push("mkdir -p ~/.maiterm/codex && launch_tmp=$(mktemp ~/.maiterm/codex/launch.XXXXXX) && cat > \"$launch_tmp\" <<'MAITERM_CODEX_LAUNCH_EOF' && mv -f \"$launch_tmp\" ~/.maiterm/codex/launch.sh || exit 1".into());
     lines.push(crate::claude_code::codex::CODEX_LAUNCH_SH.trim_end().into());
     lines.push("MAITERM_CODEX_LAUNCH_EOF".into());
+    lines.push("login_tmp=$(mktemp ~/.maiterm/codex/login.XXXXXX) && cat > \"$login_tmp\" <<'MAITERM_CODEX_LOGIN_EOF' && mv -f \"$login_tmp\" ~/.maiterm/codex/login.sh || exit 1".into());
+    lines.push(crate::claude_code::codex::CODEX_LOGIN_SH.trim_end().into());
+    lines.push("MAITERM_CODEX_LOGIN_EOF".into());
     lines.push("shim_abs=\"$HOME/.codex/hooks/agent-hook.sh\"".to_string());
     if hooks {
         // Hook shim — literal bytes via a quoted heredoc (no expansion of $1/$HOME/etc).
