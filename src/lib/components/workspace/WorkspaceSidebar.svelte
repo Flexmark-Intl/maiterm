@@ -1458,6 +1458,11 @@
     border-bottom: 1px solid var(--bg-light);
     border-bottom-left-radius: 3px;
   }
+  /* A hovered or active row fills with --bg-light, the line's own colour, which would erase it. */
+  .workspace-item.child:hover .workspace-name::before,
+  .workspace-item.child.active .workspace-name::before {
+    border-color: var(--fg-dim);
+  }
 
   .ws-signals, .ws-kind {
     display: flex;
