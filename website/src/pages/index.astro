@@ -35,6 +35,11 @@ const description =
  * `blurb` runs to about six words. It is a signpost, not a summary; the band it
  * points at does the explaining.
  *
+ * `row: true` marks the few that get a row with a blurb; the rest are a compact run of
+ * links under them. The rail sits beside the hero shot and has to END about where the
+ * shot does: fifteen full rows ran a screen and a half past it (2026-11-27). Keep the
+ * rows to about five, and promote one only by demoting another.
+ *
  * On the top entry, name the RUNTIME rather than "agent". Everywhere else on this
  * site an agent IS a CLI — Claude Code, Codex, Antigravity — so "two agent logins" reads as
  * two different agents signed in, which is the one thing that feature does not
@@ -58,6 +63,7 @@ const KEY_FEATURES = [
     // refuses queued jobs elsewhere; create.rs refuses Windows) — the band note says so.
     title: 'Hive',
     blurb: 'One goal, a Queen and her crew',
+    row: true,
   },
   {
     id: 'files',
@@ -106,8 +112,8 @@ const KEY_FEATURES = [
     // is stopped at off the screen, and sends through send_tab_message. It does not replace
     // the terminal — the tab is still there — so don't say "never".
     title: 'Workstream Loom',
-    blurb:
-      'Talk to every agent in the window from one place — read it, answer it, send it work — without opening a single terminal.',
+    blurb: 'Talk to every agent from one place',
+    row: true,
   },
   {
     id: 'accounts',
@@ -121,9 +127,9 @@ const KEY_FEATURES = [
     // app does not store. No number either: managed_accounts is unbounded.
     blurb: 'As many logins as you need, side by side',
   },
-  { id: 'stack', title: 'Workspace stack', blurb: 'One dev server, however many agents' },
-  { id: 'board', title: 'Task board', blurb: 'A real kanban board, shared with them' },
-  { id: 'overlord', title: 'Overlord', blurb: 'Rules that watch the whole window' },
+  { id: 'stack', title: 'Workspace stack', blurb: 'One dev server, however many agents', row: true },
+  { id: 'board', title: 'Task board', blurb: 'A real kanban board, shared with them', row: true },
+  { id: 'overlord', title: 'Overlord', blurb: 'Rules that watch the whole window', row: true },
   { id: 'mesh', title: 'Mesh workspace', blurb: 'Specialists that ask each other' },
   { id: 'mailink', title: 'maiLink companion', blurb: 'Your agents in your pocket, no cloud' },
   { id: 'comms', title: 'Chat threads', blurb: 'Answer where the report landed' },
@@ -218,7 +224,8 @@ const EVERYTHING = [
         point where the people who needed convincing had already left.
 
         So the fold now carries the page's own contents list beside the shot: what
-        maiTerm does, in seven lines, newest at the top with the weight it earns.
+        maiTerm does, newest at the top with the weight it earns, a few rows with a
+        line each, and the rest as a run of plain links so the list ends with the shot.
         It is a rail rather than a grid because a grid of seven would compete with
         the h1 for the eye; a single narrow column reads as an index, which is what
         it is.
@@ -228,7 +235,7 @@ const EVERYTHING = [
     <div class="hero-lower">
       <nav class="hero-rail" aria-label="What maiTerm does">
         {
-          KEY_FEATURES.map((f) => (
+          KEY_FEATURES.filter((f) => f.new || f.row).map((f) => (
             <a class:list={['rail-item', { 'rail-item--new': f.new }]} href={`#${f.id}`}>
               {f.new && <span class="rail-tag">New</span>}
               <span class="rail-text">
@@ -238,6 +245,13 @@ const EVERYTHING = [
             </a>
           ))
         }
+        <ul class="rail-more">
+          {
+            KEY_FEATURES.filter((f) => !f.new && !f.row).map((f) => (
+              <li><a href={`#${f.id}`}>{f.title}</a></li>
+            ))
+          }
+        </ul>
       </nav>
 
       <div class="hero-shot">
@@ -1521,6 +1535,35 @@ const EVERYTHING = [
     text-wrap: pretty;
   }
 
+  /* The rest of the bands, as plain links that wrap: an index you can still reach every
+     band from, at a fraction of the height of a row each. */
+  .rail-more {
+    list-style: none;
+    margin: 0.6rem 0 0;
+    padding: 0.75rem 0.7rem 0;
+    border-top: 1px solid var(--ln-border);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem 0.95rem;
+    font-size: 0.875rem;
+    line-height: 1.45;
+  }
+  .rail-more a {
+    color: var(--ln-fg-dim);
+    text-decoration: none;
+  }
+  .rail-more a:hover {
+    color: var(--ln-fg);
+    text-decoration: underline;
+    text-underline-offset: 0.2em;
+  }
+  .rail-item:focus-visible,
+  .rail-more a:focus-visible {
+    outline: 2px solid var(--ln-accent);
+    outline-offset: 2px;
+    border-radius: 0.3rem;
+  }
+
   /* The celebrated one. It is a card and the rest are rows, which is the whole
      point — "newest" has to be legible before a word is read. */
   .rail-item--new {
@@ -1575,9 +1618,26 @@ const EVERYTHING = [
      it ~580px tall — under 62vh, so nothing would crop and it reverts to the
      framed picture the full-width version existed to avoid. Cap it lower so the
      crop survives the narrower column. */
+  /* So beside the rail the shot takes the RAIL's height: it runs down to the band's
+     edge with the rail, cropped at the bottom (and at the right, if the rail is the
+     taller), rather than stopping short and leaving the rail hanging below it. */
   @media (min-width: 64rem) {
+    .hero-lower {
+      align-items: stretch;
+    }
+    .hero-shot {
+      position: relative;
+      min-height: 24rem;
+    }
     .hero-shot .ln-shot {
-      max-height: min(62vh, 30rem);
+      position: absolute;
+      inset: 0;
+      max-height: none;
+    }
+    .hero-shot .ln-shot img {
+      height: 100%;
+      object-fit: cover;
+      object-position: left top;
     }
   }
 
