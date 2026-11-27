@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   checkoutInCommand, copyKey, copyRefusal, copyTabName, copyTargetsOf, copyTitle, detectEndpoint, dueCopies, exitIsCrash, importVerdict,
   intentPatch, isHumanDefined, launchableUrl, moveVerb, parseCopyKey, pickCopy, placeholdersIn, publishRow, refusedAgentEdits, restartAllowed, restartDelay,
-  restorePlan, rollupStatus, runsManyCopies, sameService, sharesByDefault, shq, startIntent, startLine, targetLabel, RESTART_WINDOW_MS,
+  restorePlan, runsManyCopies, sameService, sharesByDefault, shq, startIntent, startLine, targetLabel, RESTART_WINDOW_MS,
 } from './model';
 
 describe('copies (docs/hive.md §6.9)', () => {
@@ -225,14 +225,6 @@ describe('copies (docs/hive.md §6.9)', () => {
     expect(sameService({ name: 'db', command: 'docker compose up', cwd: '/q' }, offers[2])).toBe(false);
   });
 
-  it('counts a stopped copy elsewhere only while it is up in the rollup', () => {
-    // The store's rollup adds a copy on another checkout as a non-auto-start row while it is
-    // not stopped: a crashed copy turns the dot red, a stopped one is invisible.
-    expect(rollupStatus([{ status: 'ready', autoStart: true }, { status: 'crashed', autoStart: false }])).toBe('crashed');
-    expect(rollupStatus([{ status: 'ready', autoStart: true }])).toBe('ready');
-    expect(rollupStatus([{ status: 'ready', autoStart: true }, { status: 'running', autoStart: false }])).toBe('ready');
-  });
-
   it('types exactly the legacy line for a service on its own folder with no placeholders', () => {
     // `stack_resolve_copy` hands such a service back unchanged (Rust's shortcut); the store
     // feeds that to startLine, so the line must equal what it typed before copies existed.
@@ -315,25 +307,6 @@ describe('restart ceiling', () => {
     expect(restartDelay(0)).toBe(1000);
     expect(restartDelay(2)).toBe(4000);
     expect(restartDelay(99)).toBe(30000);
-  });
-});
-
-describe('rollupStatus', () => {
-  const row = (status: Parameters<typeof rollupStatus>[0][number]['status'], autoStart = true) => ({ status, autoStart });
-
-  it('is null for an empty or fully stopped stack', () => {
-    expect(rollupStatus([])).toBeNull();
-    expect(rollupStatus([row('stopped'), row('stopped')])).toBeNull();
-  });
-  it('reports the worst thing first', () => {
-    expect(rollupStatus([row('ready'), row('crashed')])).toBe('crashed');
-    expect(rollupStatus([row('ready'), row('starting')])).toBe('starting');
-  });
-  it('is green only when every auto-start service is up', () => {
-    expect(rollupStatus([row('ready'), row('running')])).toBe('ready');
-    expect(rollupStatus([row('ready'), row('stopped')])).toBe('partial');
-    // A stopped service that was never meant to auto-start does not count against it.
-    expect(rollupStatus([row('ready'), row('stopped', false)])).toBe('ready');
   });
 });
 

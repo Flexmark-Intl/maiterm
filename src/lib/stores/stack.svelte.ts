@@ -44,8 +44,8 @@ import { preferencesStore } from './preferences.svelte';
 import { normalizeTitle } from '$lib/tasks/model';
 import {
   checkoutInCommand, copyKey, copyRefusal, copyTabName, copyTargetsOf, detectEndpoint, exitIsCrash, intentPatch, moveVerb,
-  parseCopyKey, publishRow, restartAllowed, restartDelay, restorePlan, rollupStatus, runsManyCopies, startIntent, startLine, targetLabel,
-  RESTART_CEILING, RESTART_WINDOW_MS, type Rollup, type ServiceStatus,
+  parseCopyKey, publishRow, restartAllowed, restartDelay, restorePlan, runsManyCopies, startIntent, startLine, targetLabel,
+  RESTART_CEILING, RESTART_WINDOW_MS, type ServiceStatus,
 } from '$lib/stack/model';
 import { stripAnsi } from '$lib/utils/ansi';
 
@@ -1389,22 +1389,6 @@ function createStackStore() {
       // A job's row never reaches the mirror; the filter only guards a state loaded mid-run.
       const all = workspaceOf(workspaceId)?.stack ?? [];
       return all.some((s) => s.kind === 'job') ? all.filter((s) => s.kind !== 'job') : all;
-    },
-
-    /** Rollup for the sidebar dot: null when the stack is empty or all stopped. Each service's
-     *  own folder counts as it always has; a copy elsewhere counts only while it is up (it is
-     *  never "expected", so a stopped one can't make the dot partial). A shared service is
-     *  another workspace's to report. */
-    rollup(workspaceId: string): Rollup {
-      const rows: { status: ServiceStatus; autoStart: boolean }[] = [];
-      for (const s of this.services(workspaceId)) {
-        if (s.shared_from) continue;
-        rows.push({ status: rt(s.id).status, autoStart: s.auto_start ?? true });
-        for (const c of copiesOf(workspaceId, s.id)) {
-          if (c.target && c.runtime.status !== 'stopped') rows.push({ status: c.runtime.status, autoStart: false });
-        }
-      }
-      return rollupStatus(rows);
     },
 
     // ── Definitions ─────────────────────────────────────────────────────────────

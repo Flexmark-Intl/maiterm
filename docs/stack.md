@@ -677,10 +677,9 @@ beside the others. Only a target where a copy is already up is greyed out, so th
 refusal points. A stopped copy on another checkout can be **closed** (its tab goes, with
 its row and its intent); the own folder's row is the service and stays.
 
-The sidebar shows one row per copy (`web · on session-store@3f2a91c :5174`, indented under
-the own folder's), the console drawer one pill per copy, and the rollup counts a copy
-elsewhere only while it is up (it is never "expected", so a stopped one can't make the dot
-partial).
+The stack panel shows one row per copy (`web · on session-store@3f2a91c :5174`, indented
+under the own folder's), the workspace row one dot per copy, and the console drawer one pill
+per copy.
 
 ### 14.4 Agents: `on`
 
@@ -748,7 +747,7 @@ A Hive's run queue is a caller of this stack, not a second one. Rust decides whe
   Rust inserts the row when the job starts and removes it when it ends, and every job row (and a
   tab bound to a job id with no row) is swept on load: after a restart none runs. Clone and share
   drop them. The store keeps a job's row in `jobRows`, never in the workspace's mirror, so a job
-  is out of the priming line, the rollup, the Overlord rules, `was_running` and every restart.
+  is out of the priming line, the row dots, the Overlord rules, `was_running` and every restart.
   It never restarts and never marks intent; a non-zero exit is the job's result, never `crashed`.
 - **Starting one is an rpc** (`stack.job.start {workspace_id, row, target, line}`), answered
   `{accepted, confirmed, tab_id, pty_id}`: the store mints a hidden bound tab, types the line
