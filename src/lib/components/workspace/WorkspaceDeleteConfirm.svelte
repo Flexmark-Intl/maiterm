@@ -72,7 +72,7 @@
     }
     if (tabs) out.push(tabs === 1 ? 'Its tab closes, and any agent in it ends.' : `Its ${tabs} tabs close, and any agents in them end.`);
     if (services) out.push(services === 1 ? '1 running service stops.' : `${services} running services stop.`);
-    if (working) out.push('Claude is working there right now.');
+    if (working) out.push('An agent is working there right now.');
     if (archived) out.push(archived === 1 ? 'Its archived tab goes too.' : `Its ${archived} archived tabs go too.`);
     out.push('Its tasks and notes are deleted with it.');
     if (children.length) out.push(`${children.length === 1 ? 'The workspace under it is' : `The ${children.length} workspaces under it are`} deleted too: ${children.map((c) => c.name).join(', ')}.`);
