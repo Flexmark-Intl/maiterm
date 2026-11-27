@@ -299,7 +299,8 @@
   let didDrag = false;
 
   function handlePointerDown(e: PointerEvent, workspaceId: string) {
-    if (e.button !== 0 || editingId === workspaceId) return;
+    // No reordering while filtering: the rows on screen are a subset, so "before this one" is ambiguous.
+    if (e.button !== 0 || editingId === workspaceId || filterQuery) return;
     if ((e.target as HTMLElement).closest('.tooltip-wrapper')) return;
     pendingDragWorkspaceId = workspaceId;
     dragStartX = e.clientX;
@@ -678,6 +679,42 @@
   const suspendedWorkspaces = $derived(sortedWorkspaces.filter((w) => w.suspended && w.id !== workspacesStore.activeWorkspaceId));
   let suspendedOpen = $state(false);
 
+  // ── Filter ──
+  let filterText = $state('');
+  let filterEl = $state<HTMLInputElement | null>(null);
+  const filterQuery = $derived(filterText.trim().toLowerCase());
+  /** Every workspace whose name matches, in list order; null when not filtering. */
+  const filteredWorkspaces = $derived(
+    filterQuery ? sortedWorkspaces.filter((w) => w.name.toLowerCase().includes(filterQuery)) : null,
+  );
+  function handleFilterKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      filterText = '';
+      filterEl?.blur();
+    } else if (e.key === 'Enter' && filteredWorkspaces?.length) {
+      // Enter opens the first match and clears the filter, as a switcher would.
+      e.preventDefault();
+      const first = filteredWorkspaces[0].id;
+      filterText = '';
+      filterEl?.blur();
+      void handleItemClick(first);
+    } else if (e.key === 'ArrowDown' && filteredWorkspaces?.length) {
+      e.preventDefault();
+      workspaceListEl?.querySelector<HTMLElement>('.workspace-item')?.focus();
+    }
+  }
+  /** Typing while a row has focus goes to the filter. */
+  function typeToFilter(e: KeyboardEvent) {
+    if (e.metaKey || e.ctrlKey || e.altKey || e.key.length !== 1 || e.key === ' ') return;
+    const t = e.target as HTMLElement;
+    if (t.closest('input, textarea, [contenteditable="true"]')) return;
+    e.preventDefault();
+    filterText += e.key;
+    filterEl?.focus();
+  }
+
   async function handleItemClick(workspaceId: string) {
     // Suppress click after a drag
     if (didDrag) {
@@ -761,29 +798,28 @@
     </Tooltip>
   {/if}
   <div class="sidebar-header">
-    <span class="title">WORKSPACES</span>
-    <IconButton tooltip="Suspend all other workspaces" size={20} style="font-size: 0.769rem" onclick={handleSuspendAllOthers}><Icon name="pause" size={10} /></IconButton>
-    <IconButton tooltip="New workspace ({modSymbol}N)" size={20} style="font-size: 1.231rem" onclick={handleNewWorkspace}>+</IconButton>
+    <div class="header-row">
+      <span class="title">Workspaces</span>
+      <IconButton tooltip="Suspend all other workspaces" size={20} style="font-size: 0.769rem" onclick={handleSuspendAllOthers}><Icon name="pause" size={10} /></IconButton>
+      <IconButton tooltip="New workspace ({modSymbol}N)" size={20} style="font-size: 1.231rem" onclick={handleNewWorkspace}>+</IconButton>
+    </div>
+    <label class="ws-filter">
+      <Icon name="search" size={11} />
+      <input
+        type="text"
+        placeholder="Filter workspaces"
+        aria-label="Filter workspaces"
+        autocomplete="off"
+        spellcheck="false"
+        bind:value={filterText}
+        bind:this={filterEl}
+        onkeydown={handleFilterKeydown}
+      />
+    </label>
   </div>
 
-  {#if preferencesStore.showRecentWorkspaces && workspacesStore.recentWorkspaces.length > 0}
-    <div class="recent-section">
-      <span class="recent-title">RECENT</span>
-      <div class="recent-list">
-        {#each workspacesStore.recentWorkspaces as workspace (workspace.id)}
-          <button
-            class="recent-item"
-            onclick={() => handleItemClick(workspace.id)}
-            title={workspace.name}
-          >
-            {workspace.name}
-          </button>
-        {/each}
-      </div>
-    </div>
-  {/if}
-
-  <div class="workspace-list" bind:this={workspaceListEl}>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="workspace-list" bind:this={workspaceListEl} onkeydown={typeToFilter}>
     {#snippet wsRow(workspace: Workspace)}
       <div
         class="workspace-item"
@@ -893,10 +929,19 @@
         {/if}
       </div>
     {/snippet}
+    {#if filteredWorkspaces}
+      <!-- Filtering: every match in one flat list, suspended ones included. -->
+      {#each filteredWorkspaces as workspace (workspace.id)}
+        {@render wsRow(workspace)}
+      {:else}
+        <p class="filter-empty">No workspace matches “{filterText.trim()}”. Escape clears the filter.</p>
+      {/each}
+    {:else}
     {#each liveWorkspaces as workspace (workspace.id)}
       {@render wsRow(workspace)}
     {/each}
-    {#if suspendedWorkspaces.length}
+    {/if}
+    {#if !filteredWorkspaces && suspendedWorkspaces.length}
       <!-- Suspended workspaces wait at the bottom, named while the group is closed. -->
       <button
         type="button"
@@ -1139,11 +1184,51 @@
 
 
   .sidebar-header {
-    padding: 12px 16px;
+    padding: 8px 10px 10px 16px;
     border-bottom: 1px solid var(--bg-light);
     display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .header-row {
+    display: flex;
     align-items: center;
-    justify-content: space-between;
+    gap: 2px;
+  }
+  .header-row .title { flex: 1; }
+
+  .ws-filter {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 8px;
+    border: 1px solid var(--bg-light);
+    border-radius: 5px;
+    background: var(--bg-dark);
+    color: var(--fg-dim);
+    cursor: text;
+  }
+  .ws-filter:focus-within { border-color: var(--accent); }
+  .ws-filter input {
+    flex: 1;
+    min-width: 0;
+    padding: 4px 0;
+    border: none;
+    outline: none;
+    background: none;
+    color: var(--fg);
+    font-family: inherit;
+    font-size: 0.85rem;
+  }
+  .ws-filter input::placeholder { color: var(--fg-dim); }
+
+  .filter-empty {
+    margin: 0;
+    padding: 10px 16px;
+    color: var(--fg-dim);
+    font-size: 0.85rem;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
   }
 
   /* Overlord accessor — deck-styled (see src/lib/overlord/deck.css), sitting above the
@@ -1223,50 +1308,11 @@
   }
 
   .title {
-    font-size: 0.846rem;
+    font-size: 0.85rem;
     font-weight: 600;
-    letter-spacing: 0.5px;
     color: var(--fg-dim);
   }
 
-
-  .recent-section {
-    padding: 8px 16px;
-    border-bottom: 1px solid var(--bg-light);
-  }
-
-  .recent-title {
-    font-size: 0.769rem;
-    font-weight: 600;
-    letter-spacing: 0.5px;
-    color: var(--fg-dim);
-  }
-
-  .recent-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-    margin-top: 6px;
-  }
-
-  .recent-item {
-    font-size: 0.846rem;
-    padding: 2px 8px;
-    border-radius: 3px;
-    background: var(--bg-light);
-    color: var(--fg);
-    cursor: pointer;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 100%;
-    transition: background 0.1s;
-  }
-
-  .recent-item:hover {
-    background: var(--accent);
-    color: var(--bg-dark);
-  }
 
   .workspace-list {
     flex: 1;
