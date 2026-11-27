@@ -347,9 +347,11 @@ fn list_tabs(state: &Arc<AppState>, app: &AppHandle) -> Value {
                     tab_used(&t.id),
                     serde_json::json!({
                         "id": t.id,
-                        // A Hive's coordinator is the Queen on every screen, whatever an older
-                        // Hive named its tab; its workspace is the Hive's name.
-                        "name": if is_queen(t) { crate::hive::create::COORDINATOR_TAB_NAME } else { t.name.as_str() },
+                        // The name its Chrome group takes, the same `relinked` sends later: a
+                        // Hive's coordinator is the Queen on every screen, whatever an older Hive
+                        // named its tab (its workspace is the Hive's name), and a live title loses
+                        // its status glyph.
+                        "name": super::group_tab_name(t),
                         "workspace": ws.name,
                         "window": window,
                         "runtime": t.runtime,

@@ -284,9 +284,8 @@ pub fn remap_tab(app: &AppHandle, from: &str, to: &str) {
     }
 }
 
-/// Tell the extension a link's maiTerm tab id or names: after a reload (a new id), a rename the
-/// human made, or a move to another workspace. The extension re-titles the Chrome group from the
-/// names; a null name leaves it as it was.
+/// Tell the extension a link's maiTerm tab id or names: after a reload (a new id), a rename, or a
+/// move to another workspace. The extension re-titles the Chrome group from the names.
 fn notify_relinked(link: &mut Link, conns: &HashMap<String, Conn>, names: Option<&GroupNames>) {
     if let Some(n) = names {
         link.told_label = n.label();
@@ -360,7 +359,8 @@ fn prune(state: &Arc<AppState>, app: &AppHandle) {
     for mut l in std::mem::take(&mut reg.links) {
         match current_id(state, &reg, &l.maiterm_tab_id) {
             Some(id) if id == l.maiterm_tab_id => {
-                // Renamed by the human, or moved to another workspace: the group's title follows.
+                // Renamed (a live title's text changed too), or moved to another workspace: the
+                // group's title follows.
                 if let Some(names) = group_names(state, &id) {
                     if names.label() != l.told_label {
                         notify_relinked(&mut l, &reg.conns, Some(&names));
@@ -772,23 +772,44 @@ pub fn touch_window(state: &Arc<AppState>, label: &str) {
     }
 }
 
-/// The names a linked tab's Chrome group follows ("<workspace>/<tab>"): its workspace's, and the
-/// tab's only when it is one the human chose (or a Hive's "Queen"). An unrenamed tab's name is the
-/// terminal's live title, which an agent's spinner changes every second: None, and the extension
-/// keeps the name it linked with.
+/// The names a linked tab's Chrome group follows ("<workspace>/<tab>"): its workspace's and
+/// `group_tab_name`. One answer for every link of the agent, so they never retitle against each other.
 fn group_names(state: &Arc<AppState>, tab_id: &str) -> Option<GroupNames> {
     let data = state.app_data.read();
     data.windows.iter().flat_map(|w| w.workspaces.iter()).find_map(|ws| {
         let t = ws.panes.iter().flat_map(|p| p.tabs.iter()).find(|t| t.id == tab_id)?;
-        let tab = if t.hive_role.as_deref() == Some(crate::hive::ROLE_COORDINATOR) {
-            Some(crate::hive::create::COORDINATOR_TAB_NAME.to_string())
-        } else if t.custom_name {
-            Some(t.name.clone())
-        } else {
-            None
-        };
-        Some(GroupNames { tab, workspace: ws.name.clone() })
+        Some(GroupNames { tab: Some(group_tab_name(t)), workspace: ws.name.clone() })
     })
+}
+
+/// An agent tab's name for its Chrome group: a Hive's coordinator is "Queen"; a name the human
+/// chose stands; otherwise the tab's name is the terminal's live title, whose leading status glyph
+/// an agent animates every second (Claude's `✳`/`◐`/`◑`), so the glyph is dropped and the group
+/// changes only with the title's text (Darryl's choice, 2026-11-27).
+pub(crate) fn group_tab_name(t: &crate::state::Tab) -> String {
+    if t.hive_role.as_deref() == Some(crate::hive::ROLE_COORDINATOR) {
+        crate::hive::create::COORDINATOR_TAB_NAME.to_string()
+    } else if t.custom_name {
+        t.name.clone()
+    } else {
+        strip_status_glyph(&t.name).to_string()
+    }
+}
+
+/// "✳ Fix the bug" → "Fix the bug": a leading 1–3 symbols that are not letters, digits or spaces,
+/// then whitespace, then the rest (the rule `src/lib/utils/titleSpinner.ts` matches on). Anything
+/// else is returned as it is.
+fn strip_status_glyph(title: &str) -> &str {
+    let lead = title.chars().take_while(|c| !c.is_alphanumeric() && !c.is_whitespace()).count();
+    if !(1..=3).contains(&lead) {
+        return title;
+    }
+    let after: &str = &title[title.char_indices().nth(lead).map_or(title.len(), |(i, _)| i)..];
+    let rest = after.trim_start();
+    if rest.len() == after.len() || rest.trim_end().is_empty() {
+        return title;
+    }
+    rest
 }
 
 struct GroupNames {
@@ -877,6 +898,20 @@ mod tests {
             purpose: String::new(),
             told_label: String::new(),
         }
+    }
+
+    #[test]
+    fn a_status_glyph_is_dropped_from_a_group_name() {
+        assert_eq!(strip_status_glyph("✳ Fix the bug"), "Fix the bug");
+        assert_eq!(strip_status_glyph("◐ Fix the bug"), "Fix the bug");
+        assert_eq!(strip_status_glyph("⠂  Fixing build"), "Fixing build");
+        assert_eq!(strip_status_glyph("Claude Code"), "Claude Code");
+        assert_eq!(strip_status_glyph("user@host:~/src"), "user@host:~/src");
+        assert_eq!(strip_status_glyph("~/src"), "~/src");
+        assert_eq!(strip_status_glyph("✳"), "✳");
+        assert_eq!(strip_status_glyph("✳ "), "✳ ");
+        assert_eq!(strip_status_glyph("!!!! loud"), "!!!! loud");
+        assert_eq!(strip_status_glyph(""), "");
     }
 
     /// The registry is one global and tests run in parallel: each test holds this while it uses it.

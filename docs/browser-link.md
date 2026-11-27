@@ -78,7 +78,9 @@ is versioned on its own (`chrome-extension/manifest.json`, tags `ext-v*`).
 8. **A linked tab is marked in Chrome's own tab strip** (`chrome-extension/marker.js`), because
    Chrome's debugging bar shows in every tab and says nothing about which one is linked: each
    agent's linked tabs share a tab group per window, "<workspace>/<agent tab>" (the human's choice,
-   2026-11-27; the tab name alone when the workspace is unknown), in a colour fixed
+   2026-11-27; the tab name alone when the workspace is unknown; an unrenamed tab's name is its
+   live title without the leading status glyph, and the title follows renames, title changes and
+   moves between workspaces through `relinked`), in a colour fixed
    per agent. Every way a link ends (unlink in the popup or maiTerm, Cancel on the bar, the
    feature off, the agent tab closed, a reconnect maiTerm doesn't accept) ungroups it and PUTS IT
    BACK after the tab it followed (else at its old index) — the human asked for exactly that.
@@ -156,7 +158,7 @@ maiTerm → extension:
 |---|---|---|
 | `command` | `{chromeTabId, action, args}` | action-specific, or `{error}` |
 | `unlinked` (notif) | `{chromeTabId, reason}` | maiTerm dropped a link: its tab closed (checked every 5 s while connected), the human unlinked it in maiTerm, or turned the feature off |
-| `relinked` (notif) | `{chromeTabId, maitermTabId, maitermTabName, maitermWorkspaceName}` | its maiTerm tab was reloaded under a new id (without this the next `hello` re-announces the old id and maiTerm refuses it as a closed tab), renamed by the human, or moved to another workspace (the prune tick compares the names it last sent). The tab name is sent only when the human chose it (or a Hive's "Queen"), else null and the extension keeps its own: an unrenamed tab's name is the terminal's live title, which an agent's spinner changes every second; the extension re-titles the group |
+| `relinked` (notif) | `{chromeTabId, maitermTabId, maitermTabName, maitermWorkspaceName}` | its maiTerm tab was reloaded under a new id (without this the next `hello` re-announces the old id and maiTerm refuses it as a closed tab), renamed by the human, or moved to another workspace (the prune tick compares the names it last sent). The tab name is the one `listTabs` gave at link time too (`group_tab_name`): a Hive's "Queen", a name the human chose, or else the terminal's live title without its leading status glyph (an agent animates it every second), so every link of one agent carries the same name; the extension re-titles the group |
 
 Every change the extension makes to its stored links goes through one queue (`mutateLinks`): each
 is read → await → write, and two interleaved lost the newer write (a re-link racing maiTerm's
