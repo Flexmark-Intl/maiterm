@@ -511,6 +511,8 @@ export interface Workspace {
   /** This workspace is a Hive (docs/hive.md §3.2); absent for an ordinary one. Never copied:
    *  duplicate and move-to-window are refused, a window duplicate skips it, share leaves it out. */
   hive?: Hive | null;
+  /** The workspace this one is shown under in the sidebar (one level; a dangling id = top level). */
+  parent_id?: string | null;
   archived_tabs: Tab[];
   import_highlight?: boolean;
   suspended?: boolean;

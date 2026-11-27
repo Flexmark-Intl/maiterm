@@ -482,8 +482,10 @@
   // A suspended workspace's stack shows too: its services can't start, but they can be read,
   // edited and added to, as they always could.
   const stackPanelWorkspace = $derived.by(() => {
-    const id = stackPanelHeld ?? stackPanelFor ?? workspacesStore.activeWorkspaceId;
-    const ws = workspacesStore.workspaces.find((w) => w.id === id);
+    const find = (id: string | null) => (id ? workspacesStore.workspaces.find((w) => w.id === id) : undefined);
+    // A shown workspace that has gone (deleted, moved to another window) falls back to the
+    // active one rather than leaving the panel empty.
+    const ws = find(stackPanelHeld) ?? find(stackPanelFor) ?? find(workspacesStore.activeWorkspaceId);
     if (!ws || ws.overlord) return null;
     return stackStore.services(ws.id).length > 0 || addingStackFor === ws.id || stackPanelHeld === ws.id ? ws : null;
   });
@@ -579,9 +581,38 @@
           dispatch("Can't move this project", why, 'error');
         }
       } },
+      ...showUnderItems(workspaceId),
       ...hiveItems(workspaceId),
       sep,
       { label: 'Delete workspace…', danger: true, action: () => askDelete(workspaceId) },
+    ];
+  }
+
+  /** "Show under ▸": nest this workspace under another in the sidebar (a Hive under the project
+   *  it works on), or bring it back to the top level. One level deep, so it isn't offered on a
+   *  workspace that has others under it, and only top-level workspaces are offered as parents. */
+  function showUnderItems(workspaceId: string): MenuItem[] {
+    const ws = workspacesStore.workspaces.find((w) => w.id === workspaceId);
+    if (!ws || ws.overlord || childrenOf(workspaceId).length) return [];
+    const ids = new Set(workspacesStore.workspaces.map((w) => w.id));
+    const nestedUnder = ws.parent_id && ids.has(ws.parent_id) ? ws.parent_id : null;
+    const set = (parentId: string | null) => {
+      workspacesStore.setWorkspaceParent(workspaceId, parentId).catch(async (e) => {
+        logError(`sidebar: show under: ${e}`);
+        const { dispatch } = await import('$lib/stores/notificationDispatch');
+        dispatch("Couldn't move it in the sidebar", String(e).replace(/^Error: /, ''), 'error');
+      });
+    };
+    const candidates = sortedWorkspaces.filter((w) =>
+      w.id !== workspaceId && w.id !== nestedUnder && !(w.parent_id && ids.has(w.parent_id)));
+    return [
+      { label: 'Show under', action: () => {}, submenu: [
+        ...(nestedUnder ? [
+          { label: 'Top level', action: () => set(null) },
+          ...(candidates.length ? [{ label: '', separator: true, action: () => {} }] : []),
+        ] : []),
+        ...candidates.map((w) => ({ label: w.name, action: () => set(w.id) })),
+      ] },
     ];
   }
 
@@ -678,6 +709,31 @@
   const liveWorkspaces = $derived(sortedWorkspaces.filter((w) => !w.suspended || w.id === workspacesStore.activeWorkspaceId));
   const suspendedWorkspaces = $derived(sortedWorkspaces.filter((w) => w.suspended && w.id !== workspacesStore.activeWorkspaceId));
   let suspendedOpen = $state(false);
+
+  /** A section's rows with each nested workspace right under its parent (one level). A
+   *  workspace nests only when its parent is in the same section: a live Hive under a
+   *  suspended project shows at the top level of the live list rather than hidden in the
+   *  suspended group. A parent id that names nothing here (deleted, another window) = top level. */
+  function nestRows(list: Workspace[]): { ws: Workspace; child: boolean }[] {
+    const byId = new Map(list.map((w) => [w.id, w]));
+    const parentIn = (w: Workspace): Workspace | null => {
+      const p = w.parent_id && w.parent_id !== w.id ? byId.get(w.parent_id) : undefined;
+      // One level only: a parent that is itself nested can't hold children (Rust refuses it;
+      // this keeps a hand-edited state from hiding rows).
+      return p && !(p.parent_id && byId.has(p.parent_id)) ? p : null;
+    };
+    const out: { ws: Workspace; child: boolean }[] = [];
+    for (const w of list) {
+      if (parentIn(w)) continue;
+      out.push({ ws: w, child: false });
+      for (const c of list) if (parentIn(c)?.id === w.id) out.push({ ws: c, child: true });
+    }
+    return out;
+  }
+  /** The workspaces shown under this one, anywhere in the window. */
+  function childrenOf(workspaceId: string): Workspace[] {
+    return workspacesStore.workspaces.filter((w) => w.parent_id === workspaceId && w.id !== workspaceId);
+  }
 
   // ── Filter ──
   let filterText = $state('');
@@ -820,9 +876,10 @@
 
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="workspace-list" bind:this={workspaceListEl} onkeydown={typeToFilter}>
-    {#snippet wsRow(workspace: Workspace)}
+    {#snippet wsRow(workspace: Workspace, child = false)}
       <div
         class="workspace-item"
+        class:child
         class:active={workspace.id === workspacesStore.activeWorkspaceId}
         class:suspended={!workspaceIsLive(workspace)}
         class:import-highlight={workspace.import_highlight}
@@ -937,8 +994,8 @@
         <p class="filter-empty">No workspace matches “{filterText.trim()}”. Escape clears the filter.</p>
       {/each}
     {:else}
-    {#each liveWorkspaces as workspace (workspace.id)}
-      {@render wsRow(workspace)}
+    {#each nestRows(liveWorkspaces) as row (row.ws.id)}
+      {@render wsRow(row.ws, row.child)}
     {/each}
     {/if}
     {#if !filteredWorkspaces && suspendedWorkspaces.length}
@@ -956,8 +1013,8 @@
         {/if}
       </button>
       {#if suspendedOpen}
-        {#each suspendedWorkspaces as workspace (workspace.id)}
-          {@render wsRow(workspace)}
+        {#each nestRows(suspendedWorkspaces) as row (row.ws.id)}
+          {@render wsRow(row.ws, row.child)}
         {/each}
       {/if}
     {/if}
@@ -987,9 +1044,10 @@
       {#key target.id}
         <WorkspaceDeleteConfirm
           workspace={target}
+          children={childrenOf(target.id)}
           anchor={deleteFor.anchor}
           remove={doDeleteWorkspace}
-          onclose={() => { deleteFor = null; }}
+          onclose={() => { if (deleteFor?.workspaceId === target.id) deleteFor = null; }}
         />
       {/key}
     {/if}
@@ -1371,6 +1429,26 @@
     column-gap: 6px;
   }
   .workspace-item .edit-input { grid-column: 1 / -1; }
+
+  /* A workspace shown under another: indented, with a tree line from its parent. */
+  .workspace-item.child .workspace-name {
+    position: relative;
+    padding-left: 14px;
+    font-size: 0.92em;
+    color: var(--fg-dim);
+  }
+  .workspace-item.child.active .workspace-name { color: var(--fg); }
+  .workspace-item.child .workspace-name::before {
+    content: '';
+    position: absolute;
+    left: 3px;
+    top: -9px;
+    width: 7px;
+    height: calc(50% + 9px);
+    border-left: 1px solid var(--bg-light);
+    border-bottom: 1px solid var(--bg-light);
+    border-bottom-left-radius: 3px;
+  }
 
   .ws-signals, .ws-kind {
     display: flex;

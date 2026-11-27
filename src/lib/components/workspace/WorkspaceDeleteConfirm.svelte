@@ -17,7 +17,7 @@
 
   interface Props {
     workspace: Workspace;
-    /** Hives nested under it: deleted with it. */
+    /** Workspaces shown under it (its Hives): deleted with it. */
     children?: Workspace[];
     /** The row's rectangle: the confirmation sits under it (over it, near the bottom). */
     anchor: DOMRect;
@@ -65,7 +65,7 @@
     if (working) out.push('Claude is working there right now.');
     if (archived) out.push(archived === 1 ? 'Its archived tab goes too.' : `Its ${archived} archived tabs go too.`);
     out.push('Its tasks and notes are deleted with it.');
-    if (children.length) out.push(`${children.length === 1 ? 'The Hive under it is' : 'The Hives under it are'} deleted too: ${children.map((c) => c.name).join(', ')}.`);
+    if (children.length) out.push(`${children.length === 1 ? 'The workspace under it is' : `The ${children.length} workspaces under it are`} deleted too: ${children.map((c) => c.name).join(', ')}.`);
     for (const h of hives) {
       const p = previews[h.id];
       if (!p || typeof p === 'string') continue;
@@ -142,8 +142,8 @@
     const h = el.offsetHeight;
     top = anchor.bottom + h + 8 > window.innerHeight ? Math.max(8, anchor.top - h - 4) : anchor.bottom + 4;
   });
-  // Focus Cancel once the menu that opened this has handed focus back (it restores focus to
-  // where it came from as it closes, a frame after the click).
+  // Focus Cancel two frames in: the menu that opened this is still unmounting on the first
+  // frame, and the click that chose Delete lands on it.
   $effect(() => {
     let inner = 0;
     const outer = requestAnimationFrame(() => {

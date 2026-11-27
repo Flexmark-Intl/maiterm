@@ -1338,6 +1338,50 @@ pub fn set_workspace_muted(
     save_state(&data_clone)
 }
 
+/// Show a workspace under another in the sidebar, or back at the top level (`parent_id`
+/// None). One level deep, in one window: the parent may not itself sit under something, and a
+/// workspace that has workspaces under it can't move under another.
+#[tauri::command]
+pub fn set_workspace_parent(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    parent_id: Option<String>,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    let mut app_data = state.app_data.write();
+    let win = app_data.window_mut(&label).ok_or("Window not found")?;
+    check_parent(&win.workspaces, &workspace_id, parent_id.as_deref())?;
+    let workspace = win
+        .workspaces
+        .iter_mut()
+        .find(|w| w.id == workspace_id)
+        .ok_or("Workspace not found")?;
+    workspace.parent_id = parent_id;
+    let data_clone = app_data.clone();
+    drop(app_data);
+    save_state(&data_clone)
+}
+
+/// Why `workspace_id` can't go under `parent_id` in these workspaces, if it can't.
+pub(crate) fn check_parent(workspaces: &[Workspace], workspace_id: &str, parent_id: Option<&str>) -> Result<(), String> {
+    let Some(parent_id) = parent_id else { return Ok(()) };
+    if parent_id == workspace_id {
+        return Err("A workspace can't be shown under itself".into());
+    }
+    let parent = workspaces.iter().find(|w| w.id == parent_id).ok_or("That workspace isn't in this window")?;
+    if parent.overlord {
+        return Err("Nothing can be shown under the Overlord".into());
+    }
+    if parent.parent_id.as_deref().is_some_and(|p| workspaces.iter().any(|w| w.id == p)) {
+        return Err(format!("{} is already shown under another workspace; nesting is one level deep", parent.name));
+    }
+    if workspaces.iter().any(|w| w.parent_id.as_deref() == Some(workspace_id)) {
+        return Err("Other workspaces are shown under this one; move them out first".into());
+    }
+    Ok(())
+}
+
 /// The frontend stack store publishes its runtime snapshot here on every change, so the
 /// SessionStart priming can name what is up without asking the webview. Whole-map replace
 /// per window's worth of rows is overkill; rows are keyed by copy key (`stack::copy_key`: the

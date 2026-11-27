@@ -1338,6 +1338,11 @@ export async function setWorkspaceMuted(workspaceId: string, muted: boolean): Pr
   return invoke('set_workspace_muted', { workspaceId, muted });
 }
 
+/** Show a workspace under another in the sidebar, or back at the top level (null). */
+export async function setWorkspaceParent(workspaceId: string, parentId: string | null): Promise<void> {
+  return invoke('set_workspace_parent', { workspaceId, parentId });
+}
+
 export async function setWorkspaceOverlordExempt(workspaceId: string, exempt: boolean): Promise<void> {
   return invoke('set_workspace_overlord_exempt', { workspaceId, exempt });
 }

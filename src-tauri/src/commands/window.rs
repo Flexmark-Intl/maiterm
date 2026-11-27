@@ -147,11 +147,14 @@ pub fn duplicate_window(
         if !skipped.is_empty() {
             log::info!("duplicate_window: skipped {} Hive workspace(s): {}", skipped.len(), skipped.join(", "));
         }
+        let mut ws_ids: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         for ws in &copied {
             let cloned = clone_workspace_with_new_ids(ws, &tab_contexts);
+            ws_ids.insert(ws.id.clone(), cloned.id.clone());
             new_win.workspaces.push(cloned);
         }
         remint_mesh_groups(&mut new_win.workspaces);
+        remap_parents(&mut new_win.workspaces, &ws_ids);
 
         // Set active workspace to the cloned version of the source's active
         if let Some(ref active_id) = source.active_workspace_id {
@@ -1255,6 +1258,15 @@ fn remint_mesh_groups(workspaces: &mut [Workspace]) {
     }
 }
 
+/// A duplicated window's sidebar nesting follows its copies: a parent that was copied is named
+/// by its new id; one that wasn't (a Hive is never copied) is dropped, so the copy shows at the
+/// top level rather than under a workspace in another window.
+fn remap_parents(workspaces: &mut [Workspace], ws_ids: &std::collections::HashMap<String, String>) {
+    for ws in workspaces {
+        ws.parent_id = ws.parent_id.take().and_then(|p| ws_ids.get(&p).cloned());
+    }
+}
+
 fn clone_workspace_with_new_ids(ws: &Workspace, tab_contexts: &[TabContext]) -> Workspace {
     let (cloned, _) = clone_workspace_with_id_mapping(ws, tab_contexts);
     cloned
@@ -1458,6 +1470,9 @@ pub(crate) fn clone_workspace_with_id_mapping(
         // copies stay linked to each other, never to their sources); `duplicate_workspace`
         // clears it, since a copy beside its source would put every role on the mesh twice.
         mesh_group: ws.mesh_group.clone(),
+        // Kept: a duplicated workspace sits beside its source, under the same parent. A whole
+        // duplicated window remaps it (`remap_parents`).
+        parent_id: ws.parent_id.clone(),
         tasks: new_tasks,
         workstreams: new_workstreams,
         // A copy of the project runs the same services; the definitions carry no tab ids.
@@ -1583,6 +1598,38 @@ mod clone_ids_tests {
         assert_eq!(g(0), g(1), "copies of one group stay linked to each other");
         assert!(g(2).is_some() && g(2) != Some("g2".to_string()) && g(2) != g(0));
         assert_eq!(g(3), None, "an unlinked workspace stays unlinked");
+    }
+
+    #[test]
+    fn a_duplicated_window_remaps_sidebar_parents_and_drops_ones_left_behind() {
+        let mut ws: Vec<Workspace> = (0..3).map(|i| Workspace::new(format!("w{i}"))).collect();
+        ws[1].parent_id = Some("old-proj".to_string());
+        ws[2].parent_id = Some("a-hive-not-copied".to_string());
+        let ids = std::collections::HashMap::from([("old-proj".to_string(), "new-proj".to_string())]);
+        super::remap_parents(&mut ws, &ids);
+        assert_eq!(ws[0].parent_id, None);
+        assert_eq!(ws[1].parent_id.as_deref(), Some("new-proj"), "a copied parent is named by its new id");
+        assert_eq!(ws[2].parent_id, None, "a parent in the other window is never named here");
+    }
+
+    #[test]
+    fn workspace_parents_are_one_level_deep_and_never_a_cycle() {
+        use crate::commands::workspace::check_parent;
+        let mut ws: Vec<Workspace> = ["proj", "hive", "other", "ov"].iter().map(|n| Workspace::new(n.to_string())).collect();
+        ws[3].overlord = true;
+        let id = |i: usize| ws[i].id.clone();
+        let (proj, hive, other, ov) = (id(0), id(1), id(2), id(3));
+        assert!(check_parent(&ws, &hive, Some(&proj)).is_ok());
+        assert!(check_parent(&ws, &hive, None).is_ok(), "back to the top level is always fine");
+        assert!(check_parent(&ws, &hive, Some(&hive)).is_err(), "not under itself");
+        assert!(check_parent(&ws, &hive, Some(&ov)).is_err(), "not under the Overlord");
+        assert!(check_parent(&ws, &hive, Some("gone")).is_err(), "only a workspace in this window");
+        ws[1].parent_id = Some(proj.clone());
+        assert!(check_parent(&ws, &other, Some(&hive)).is_err(), "not under one that is itself nested");
+        assert!(check_parent(&ws, &proj, Some(&other)).is_err(), "a parent can't move under another");
+        // A parent id naming nothing (its workspace was deleted) doesn't count as nested.
+        ws[1].parent_id = Some("deleted".to_string());
+        assert!(check_parent(&ws, &other, Some(&hive)).is_ok());
     }
 
     #[test]

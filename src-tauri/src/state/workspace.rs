@@ -1007,6 +1007,13 @@ pub struct Workspace {
     /// come back as plain shells with the Hive's folders left on disk (accepted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hive: Option<crate::hive::Hive>,
+    /// The workspace this one is shown under in the sidebar (a Hive under the project it works
+    /// on), in the same window; one level deep. Only the human sets it ("Show under ▸");
+    /// `set_workspace_parent` refuses a cycle or a second level. An id that no longer names a
+    /// workspace in the window just shows this one at the top level, so nothing has to clean
+    /// it up when the parent goes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
     #[serde(default)]
     pub archived_tabs: Vec<Tab>,
     /// Transient flag set after merge import — cleared on workspace activation.
@@ -2819,6 +2826,7 @@ impl Workspace {
             muted: false,
             file_tree_pin: None,
             hive: None,
+            parent_id: None,
             archived_tabs: Vec::new(),
             import_highlight: false,
             suspended: false,

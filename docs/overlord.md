@@ -2016,8 +2016,9 @@ session's name rather than a truncated id.
 `Tab.overlord_exempt` and `Workspace.overlord_exempt`, both persisted, both
 `false` by default. A tab is exempt when either is set. Set from the tab's
 context menu ("Exempt from Overlord" / "Supervise with Overlord", shown for
-agent tabs while Overlord is on) and from a per-workspace eye-off button in
-the sidebar, which stays visible while the exemption is on — an exemption you
+agent tabs while Overlord is on) and from the workspace row's right-click menu
+("Exempt from Overlord" / "Supervise with Overlord again"); an eye-off glyph on
+the row stays visible while the exemption is on — an exemption you
 can't see is one you forget you set, and then wonder why the fleet is missing
 a workspace. When the workspace is exempt the tab item is disabled and says so;
 the workspace flag wins.

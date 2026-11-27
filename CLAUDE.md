@@ -203,6 +203,7 @@ Workspace
 ├── overlord_exempt (bool — every tab in it is invisible to the Overlord engine and refused by its tools)
 ├── bridge_all (bool — Mesh Workspace) + mesh_topics; mesh_group (linked meshes: mesh workspaces IN ONE WINDOW sharing it are one mesh; topics persist on their owner's workspace — docs/mesh-workspace.md §17)
 ├── stack: Service[] (docs/stack.md — definitions only; which tab runs one is `Tab.service_id`, status is never persisted)
+├── parent_id (the workspace it's shown under in the sidebar — a Hive under its project; one level, same window, set only by the human's "Show under ▸"; a dangling id = top level; remapped on window duplicate)
 └── notes: WorkspaceNote[] (workspace-level notes)
 
 Pane

@@ -651,6 +651,15 @@ function createWorkspacesStore() {
       await commands.setWorkspaceOverlordExempt(workspaceId, exempt);
     },
 
+    /** Show a workspace under another in the sidebar, or back at the top level. Rust refuses
+     *  a cycle or a second level; the mirror changes only once it has agreed. */
+    async setWorkspaceParent(workspaceId: string, parentId: string | null) {
+      const ws = workspaces.find(w => w.id === workspaceId);
+      if (!ws || (ws.parent_id ?? null) === parentId) return;
+      await commands.setWorkspaceParent(workspaceId, parentId);
+      ws.parent_id = parentId;
+    },
+
     /** Mute every tab in a workspace, or unmute it (docs/mute.md). */
     async setWorkspaceMuted(workspaceId: string, muted: boolean) {
       const ws = workspaces.find(w => w.id === workspaceId);
