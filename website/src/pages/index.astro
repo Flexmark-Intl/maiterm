@@ -35,10 +35,13 @@ const description =
  * `blurb` runs to about six words. It is a signpost, not a summary; the band it
  * points at does the explaining.
  *
- * `row: true` marks the few that get a row with a blurb; the rest are a compact run of
- * links under them. The rail sits beside the hero shot and has to END about where the
- * shot does: fifteen full rows ran a screen and a half past it (2026-11-27). Keep the
- * rows to about five, and promote one only by demoting another.
+ * `shot` marks the few that get a row with a blurb. On a desktop those rows are a tab
+ * list for the picture beside them: pointing at one shows its screenshot, a one-line
+ * `caption` and a Read more link to its band. So a row needs a REAL screenshot of the
+ * feature to be one — a row that left the picture unchanged read as broken (Darryl,
+ * 2026-11-27). Below 64rem the rows are plain links to their bands, which carry the
+ * picture themselves. The rest are a compact run of links under the rows: the rail has to
+ * END about where the shot does (fifteen full rows ran a screen and a half past it).
  *
  * On the top entry, name the RUNTIME rather than "agent". Everywhere else on this
  * site an agent IS a CLI — Claude Code, Codex, Antigravity — so "two agent logins" reads as
@@ -63,7 +66,6 @@ const KEY_FEATURES = [
     // refuses queued jobs elsewhere; create.rs refuses Windows) — the band note says so.
     title: 'Hive',
     blurb: 'One goal, a Queen and her crew',
-    row: true,
   },
   {
     id: 'files',
@@ -72,6 +74,12 @@ const KEY_FEATURES = [
     // tool calls light a row (agents.ts, READ_LIGHT_MS); changes are hook evidence, never guesses.
     title: 'Files',
     blurb: 'See what every agent reads and changes',
+    shot: {
+      src: '/screenshots/files-column.webp',
+      alt: 'The Files column between the sidebar and an editor tab: the web-ui repository on branch main, its src folder open, session.ts marked as the file in front',
+      pos: 'left top',
+    },
+    caption: 'A project tree beside your terminals that follows the tab you are in, and marks what each agent read and changed.',
   },
   {
     id: 'browser',
@@ -113,7 +121,6 @@ const KEY_FEATURES = [
     // the terminal — the tab is still there — so don't say "never".
     title: 'Workstream Loom',
     blurb: 'Talk to every agent from one place',
-    row: true,
   },
   {
     id: 'accounts',
@@ -127,14 +134,48 @@ const KEY_FEATURES = [
     // app does not store. No number either: managed_accounts is unbounded.
     blurb: 'As many logins as you need, side by side',
   },
-  { id: 'stack', title: 'Workspace stack', blurb: 'One dev server, however many agents', row: true },
-  { id: 'board', title: 'Task board', blurb: 'A real kanban board, shared with them', row: true },
-  { id: 'overlord', title: 'Overlord', blurb: 'Rules that watch the whole window', row: true },
+  {
+    id: 'stack',
+    title: 'Workspace stack',
+    blurb: 'One dev server, however many agents',
+    shot: {
+      src: '/screenshots/stack-console.webp',
+      alt: "A workspace's three services as dots and a panel in the sidebar, with the web service's console open in a drawer over the terminal, showing the address it serves on",
+      pos: 'left bottom',
+    },
+    caption: 'The services a project runs, started in tabs maiTerm owns, watched, and shown to every agent so none starts a second copy.',
+  },
+  {
+    id: 'board',
+    title: 'Task board',
+    blurb: 'A real kanban board, shared with them',
+    shot: {
+      src: '/screenshots/tasks-panel.webp',
+      alt: "The task panel beside a terminal: the task active now, then a workstream's review and blocked tasks, each with its note",
+      pos: 'right top',
+    },
+    caption: 'Your agents keep their tasks on a board you can read and edit: workstreams, lanes, what is blocked and on whom.',
+  },
+  {
+    id: 'overlord',
+    title: 'Overlord',
+    blurb: 'Rules that watch the whole window',
+    shot: {
+      src: '/screenshots/overlord-board.webp',
+      alt: "maiTerm's Overlord deck on its Board view: workstreams from four workspaces down the left and their tasks across backlog, active and blocked lanes, beside a sidebar of workspaces with their services as dots",
+      pos: 'left top',
+    },
+    caption: 'One supervisor per window: rules you write watch every agent, and the board shows every workstream at once.',
+  },
   { id: 'mesh', title: 'Mesh workspace', blurb: 'Specialists that ask each other' },
   { id: 'mailink', title: 'maiLink companion', blurb: 'Your agents in your pocket, no cloud' },
   { id: 'comms', title: 'Chat threads', blurb: 'Answer where the report landed' },
   { id: 'follow-ups', title: 'Follow-ups', blurb: 'Agents that come back on their own' },
 ];
+
+/** The rows that are tabs for the hero picture, in page order, and the one shown first. */
+const SHOT_ROWS = KEY_FEATURES.filter((f) => f.shot);
+const DEFAULT_SHOT = 'overlord';
 
 const EVERYTHING = [
   {
@@ -232,12 +273,27 @@ const EVERYTHING = [
 
         Below 64rem it stacks, and the rail goes FIRST — it is the content, the
         screenshot is the atmosphere. */}
-    <div class="hero-lower">
+    <div class="hero-lower" data-hero-tabs>
       <nav class="hero-rail" aria-label="What maiTerm does">
         {
-          KEY_FEATURES.filter((f) => f.new || f.row).map((f) => (
-            <a class:list={['rail-item', { 'rail-item--new': f.new }]} href={`#${f.id}`}>
-              {f.new && <span class="rail-tag">New</span>}
+          KEY_FEATURES.filter((f) => f.new).map((f) => (
+            <a class="rail-item rail-item--new" href={`#${f.id}`}>
+              <span class="rail-tag">New</span>
+              <span class="rail-text">
+                <strong>{f.title}</strong>
+                <span class="rail-blurb">{f.blurb}</span>
+              </span>
+            </a>
+          ))
+        }
+        {
+          SHOT_ROWS.map((f) => (
+            <a
+              class="rail-item rail-item--shot"
+              href={`#${f.id}`}
+              data-shot={f.id}
+              aria-current={f.id === DEFAULT_SHOT ? 'true' : undefined}
+            >
               <span class="rail-text">
                 <strong>{f.title}</strong>
                 <span class="rail-blurb">{f.blurb}</span>
@@ -247,7 +303,7 @@ const EVERYTHING = [
         }
         <ul class="rail-more">
           {
-            KEY_FEATURES.filter((f) => !f.new && !f.row).map((f) => (
+            KEY_FEATURES.filter((f) => !f.new && !f.shot).map((f) => (
               <li><a href={`#${f.id}`}>{f.title}</a></li>
             ))
           }
@@ -256,16 +312,66 @@ const EVERYTHING = [
 
       <div class="hero-shot">
         <div class="ln-shot">
-          <img
-            src="/screenshots/overlord-board.webp"
-            alt="maiTerm's Overlord board: workstreams from four workspaces down the left, their tasks across backlog, active and blocked lanes, and the sidebar showing each workspace's running services as dots with a stack panel at its foot"
-            width="2400"
-            height="1500"
-            fetchpriority="high"
-          />
+          {
+            SHOT_ROWS.map((f) => (
+              <img
+                src={f.shot.src}
+                alt={f.shot.alt}
+                width="2400"
+                height="1500"
+                data-shot={f.id}
+                class:list={{ 'is-shown': f.id === DEFAULT_SHOT }}
+                style={`object-position: ${f.shot.pos}`}
+                fetchpriority={f.id === DEFAULT_SHOT ? 'high' : undefined}
+                loading={f.id === DEFAULT_SHOT ? undefined : 'lazy'}
+              />
+            ))
+          }
+        </div>
+        <div class="hero-caption" aria-live="polite">
+          {
+            SHOT_ROWS.map((f) => (
+              <p data-shot={f.id} hidden={f.id !== DEFAULT_SHOT}>
+                <span>{f.caption}</span>
+                <a class="ln-cta-link" href={`#${f.id}`}>Read more about {f.title}</a>
+              </p>
+            ))
+          }
         </div>
       </div>
     </div>
+    <script>
+      // Desktop only: beside the picture the rows are its tabs. Pointing at or focusing one
+      // shows its screenshot and caption; a click picks it rather than leaving the fold, and
+      // the caption's Read more is the way down. Below 64rem the rows stay plain links to
+      // their bands, which carry the pictures themselves.
+      const root = document.querySelector('[data-hero-tabs]');
+      if (root) {
+        const wide = window.matchMedia('(min-width: 64rem)');
+        const rows = [...root.querySelectorAll('.rail-item--shot')];
+        const show = (id) => {
+          for (const r of rows) {
+            if (r.dataset.shot === id) r.setAttribute('aria-current', 'true');
+            else r.removeAttribute('aria-current');
+          }
+          for (const img of root.querySelectorAll('img[data-shot]')) {
+            img.classList.toggle('is-shown', img.dataset.shot === id);
+          }
+          for (const p of root.querySelectorAll('.hero-caption p[data-shot]')) {
+            p.hidden = p.dataset.shot !== id;
+          }
+        };
+        for (const r of rows) {
+          r.addEventListener('pointerenter', () => { if (wide.matches) show(r.dataset.shot); });
+          r.addEventListener('focus', () => { if (wide.matches) show(r.dataset.shot); });
+          r.addEventListener('click', (e) => {
+            if (!wide.matches) return;
+            e.preventDefault();
+            show(r.dataset.shot);
+          });
+        }
+      }
+    </script>
   </section>
 
   {/* ---------------------------------------------------------- Antigravity */}
@@ -455,7 +561,7 @@ const EVERYTHING = [
         when you do — nothing re-flows a streaming agent behind your back.
       </p>
       <a class="ln-cta-link" href="/features/files/">How Files works</a>
-      <div class="ln-shot files-shot">
+      <div class="ln-shot band-shot">
         <img
           src="/screenshots/files-column.webp"
           alt="The Files column between the sidebar and an editor tab: the web-ui repository on branch main, the src folder open with session.ts — the file in front — marked, and the All, Changed, Turn and Session filters above"
@@ -1068,6 +1174,17 @@ const EVERYTHING = [
         </div>
       </div>
       <a class="ln-cta-link" href="/features/overlord/">How Overlord works</a>
+      {/* The hero's picture, again: below 64rem a rail row is a link to its band, and the band
+          has to carry the picture the desktop showed beside the row. */}
+      <div class="ln-shot band-shot">
+        <img
+          src="/screenshots/overlord-board.webp"
+          alt="maiTerm's Overlord deck on its Board view: workstreams from four workspaces down the left and their tasks across backlog, active and blocked lanes"
+          width="2400"
+          height="1500"
+          loading="lazy"
+        />
+      </div>
     </div>
   </section>
 
@@ -1544,6 +1661,67 @@ const EVERYTHING = [
     text-wrap: pretty;
   }
 
+  /* A row that is a tab for the picture: no arrow (it does not leave the fold on a desktop),
+     and the one shown carries an accent bar. Below 64rem it is a link like the others, so
+     the arrow comes back there. */
+  .rail-item--shot {
+    border-left: 2px solid transparent;
+    border-radius: 0 0.55rem 0.55rem 0;
+  }
+  .rail-item--shot[aria-current='true'] {
+    border-left-color: var(--ln-accent);
+    background: color-mix(in srgb, var(--ln-accent) 8%, transparent);
+  }
+  @media (min-width: 64rem) {
+    .rail-item--shot .rail-text strong::after {
+      content: none;
+    }
+  }
+
+  /* The shots stack in one frame and the chosen one fades in over the rest. */
+  .hero-shot .ln-shot {
+    position: relative;
+    display: grid;
+  }
+  .hero-shot .ln-shot img {
+    grid-area: 1 / 1;
+    opacity: 0;
+    transition: opacity 0.25s ease;
+  }
+  .hero-shot .ln-shot img.is-shown {
+    opacity: 1;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .hero-shot .ln-shot img {
+      transition: none;
+    }
+  }
+
+  .hero-caption p {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.35rem 1rem;
+    margin: 0.85rem 0 0;
+    font-size: 0.925rem;
+    line-height: 1.5;
+    color: var(--ln-fg-dim);
+  }
+  .hero-caption p[hidden] {
+    display: none;
+  }
+  .hero-caption span {
+    flex: 1 1 24rem;
+    min-width: 0;
+  }
+  /* Below 64rem the rows go to their bands; the caption under the one picture would only
+     ever describe the first. */
+  @media (max-width: 63.99rem) {
+    .hero-caption {
+      display: none;
+    }
+  }
+
   /* The rest of the bands, as plain links that wrap: an index you can still reach every
      band from, at a fraction of the height of a row each. */
   .rail-more {
@@ -1604,7 +1782,7 @@ const EVERYTHING = [
     text-transform: uppercase;
   }
 
-  .files-shot {
+  .band-shot {
     margin-top: 2.5rem;
   }
 
@@ -1627,30 +1805,34 @@ const EVERYTHING = [
     border-bottom: 0;
     border-radius: 0.75rem 0.75rem 0 0;
   }
-  /* Beside the rail the shot is ~930px wide, where the image's own aspect makes
-     it ~580px tall — under 62vh, so nothing would crop and it reverts to the
-     framed picture the full-width version existed to avoid. Cap it lower so the
-     crop survives the narrower column. */
-  /* So beside the rail the shot takes the RAIL's height: it runs down to the band's
-     edge with the rail, cropped at the bottom (and at the right, if the rail is the
-     taller), rather than stopping short and leaving the rail hanging below it. */
+  /* Beside the rail (64rem up) the shot takes the height the rail leaves it, less the
+     caption: the frame flexes, and each picture fills it, cropped from the corner its
+     feature lives in (`pos` on the row's shot) rather than always from the top left. The
+     frame is closed all round there, since the caption sits under it. */
   @media (min-width: 64rem) {
     .hero-lower {
       align-items: stretch;
     }
     .hero-shot {
-      position: relative;
+      display: flex;
+      flex-direction: column;
       min-height: 24rem;
+      padding-bottom: 1.5rem;
     }
     .hero-shot .ln-shot {
-      position: absolute;
-      inset: 0;
+      flex: 1 1 0;
+      min-height: 0;
       max-height: none;
+      display: block;
+      border-bottom: 1px solid var(--ln-border-strong);
+      border-radius: 0.75rem;
     }
     .hero-shot .ln-shot img {
+      position: absolute;
+      inset: 0;
+      width: 100%;
       height: 100%;
       object-fit: cover;
-      object-position: left top;
     }
   }
 
