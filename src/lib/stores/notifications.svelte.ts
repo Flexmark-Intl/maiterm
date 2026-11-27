@@ -4,9 +4,21 @@ import { workspacesStore } from './workspaces.svelte';
 import { hiveView } from './hiveView.svelte';
 import { terminalsStore } from './terminals.svelte';
 import { dispatch } from './notificationDispatch';
+import { isStripHidden } from '$lib/workspace/hiddenTabs';
+import type { Tab } from '$lib/tauri/types';
 
 /** Tracks when each tab's command started (for duration check). */
 const commandStartTimes = new Map<string, number>();
+
+function findTab(tabId: string): Tab | null {
+  for (const ws of workspacesStore.workspaces) {
+    for (const pane of ws.panes) {
+      const tab = pane.tabs.find(t => t.id === tabId);
+      if (tab) return tab;
+    }
+  }
+  return null;
+}
 
 /** On screen: the active pane's active tab, or a Hive tab whose column is open (docs/hive.md §4.7). */
 function isTabVisible(tabId: string): boolean {
@@ -18,40 +30,29 @@ function isTabVisible(tabId: string): boolean {
   return pane.id === ws.active_pane_id;
 }
 
-function getTabName(tabId: string): string {
+function getTabName(tabId: string, tab: Tab): string {
   const osc = terminalsStore.getOsc(tabId);
   if (osc?.title) return osc.title;
-  // Fall back to workspace tab name
-  for (const ws of workspacesStore.workspaces) {
-    for (const pane of ws.panes) {
-      const tab = pane.tabs.find(t => t.id === tabId);
-      if (tab) return tab.name;
-    }
-  }
-  return 'Terminal';
-}
-
-/** A Hive agent's tab (docs/hive.md §4): its shell runs the agent, maiTerm relaunches it, and the
- *  queen reports for it, so a "command completed" there is never the human's command. */
-function isHiveTab(tabId: string): boolean {
-  for (const ws of workspacesStore.workspaces) {
-    for (const pane of ws.panes) {
-      const tab = pane.tabs.find(t => t.id === tabId);
-      if (tab) return !!tab.hive_role;
-    }
-  }
-  return false;
+  return tab.name || 'Terminal';
 }
 
 async function handleCommandComplete(tabId: string, exitCode: number) {
-  if (preferencesStore.notificationMode === 'disabled') return;
-  if (isTabVisible(tabId) || isHiveTab(tabId)) {
+  if (preferencesStore.notificationMode === 'disabled') {
+    commandStartTimes.delete(tabId);
+    return;
+  }
+  const tab = findTab(tabId);
+  // Strip-hidden tabs (Hive agents, Hive run/serve/land jobs, and workspace stack services)
+  // are managed by maiTerm rather than direct human commands, so their shell exits are noise
+  // (docs/hive.md §4, docs/stack.md §7).
+  if (!tab || isStripHidden(tab) || isTabVisible(tabId)) {
     commandStartTimes.delete(tabId);
     return;
   }
 
   const startTime = commandStartTimes.get(tabId);
-  if (startTime) {
+  commandStartTimes.delete(tabId);
+  if (startTime !== undefined) {
     const elapsed = (Date.now() - startTime) / 1000;
     if (elapsed < preferencesStore.notifyMinDuration) return;
   } else {
@@ -59,9 +60,7 @@ async function handleCommandComplete(tabId: string, exitCode: number) {
     return;
   }
 
-  commandStartTimes.delete(tabId);
-
-  const name = getTabName(tabId);
+  const name = getTabName(tabId, tab);
   const body = exitCode === 0
     ? `"${name}" has finished`
     : `"${name}" has finished (exit code ${exitCode})`;
@@ -71,6 +70,11 @@ async function handleCommandComplete(tabId: string, exitCode: number) {
 }
 
 function handleCommandStart(tabId: string) {
+  const tab = findTab(tabId);
+  if (!tab || isStripHidden(tab)) {
+    commandStartTimes.delete(tabId);
+    return;
+  }
   commandStartTimes.set(tabId, Date.now());
 }
 
