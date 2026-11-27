@@ -113,17 +113,21 @@ const FACTS_TAIL_MAX_BYTES: u64 = TRANSCRIPT_TAIL_BYTES;
 struct TailFacts {
     last_turn_ts: Option<u64>,
     meta: Option<SessionMeta>,
-    /// Overlord signals (docs/overlord.md §5) — Claude-only today (Codex rollouts record
-    /// tool calls differently and have no TodoWrite; both stay None there).
-    /// Unix-ms of the newest assistant `Bash` tool_use whose command runs `git commit`.
+    /// Overlord signals (docs/overlord.md §5). Claude supplies all fields; Antigravity (`agy`)
+    /// supplies `last_commit_ts`, `last_compact_ts`, and `transcript_bytes`; Codex rollouts leave
+    /// commit/todo/compact None.
+    /// Unix-ms of the newest confirmed `git commit` (`Bash` on Claude, `run_command` on `agy`).
     last_commit_ts: Option<u64>,
     /// The newest TodoWrite `input.todos` array (the TodoWrite mirror), + its timestamp.
     todos: Option<Value>,
     todos_ts: Option<u64>,
-    /// Unix-ms of the newest compaction boundary (`isCompactSummary` / `compact_boundary`).
-    /// Lets the checkpoint ritual's context_below gate resolve immediately — a fresh usage
-    /// line only appears on the NEXT assistant turn after a /compact.
+    /// Unix-ms of the newest compaction boundary (`isCompactSummary` / `compact_boundary` on
+    /// Claude, `CHECKPOINT` on Antigravity `agy`). Lets the checkpoint ritual's `context_below`
+    /// gate resolve immediately — a fresh usage line only appears on the NEXT turn after /compact.
     last_compact_ts: Option<u64>,
+    /// Current byte length of the append-only transcript file (`md.len()`). Lets Overlord anchor
+    /// `agy` reply searches past existing turns even when a new turn lands in the same whole second.
+    transcript_bytes: Option<u64>,
 }
 
 static TAIL_FACTS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, (u64, u64, TailFacts)>>> =
@@ -150,7 +154,7 @@ fn tail_facts(path: &PathBuf, parse: fn(&str) -> TailFacts) -> TailFacts {
         }
     }
     let mut window = FACTS_TAIL_BYTES;
-    let facts = loop {
+    let mut facts = loop {
         let facts = read_tail(path, window).map(|tail| parse(&tail)).unwrap_or_default();
         let answered = facts.meta.is_some() && facts.last_turn_ts.is_some();
         if answered || window >= len || window >= FACTS_TAIL_MAX_BYTES {
@@ -158,6 +162,7 @@ fn tail_facts(path: &PathBuf, parse: fn(&str) -> TailFacts) -> TailFacts {
         }
         window = (window * 2).min(FACTS_TAIL_MAX_BYTES);
     };
+    facts.transcript_bytes = Some(len);
     if let Ok(mut c) = cache.lock() {
         c.insert(path.clone(), (mtime_ms, len, facts.clone()));
     }
@@ -791,6 +796,7 @@ fn claude_tail_facts(tail: &str) -> TailFacts {
         todos,
         todos_ts,
         last_compact_ts,
+        transcript_bytes: None,
     }
 }
 
@@ -1180,14 +1186,16 @@ pub fn claude_todo_store(session_id: &str) -> Option<Value> {
 }
 
 /// Overlord signals from a session's transcript tail (docs/overlord.md §5): commit
-/// detection + the TodoWrite mirror. Served from the same (mtime,len)-gated cache as the
-/// other tail facts. Claude supplies all fields; Antigravity (`agy`) supplies commit detection
-/// (`last_commit_ts`); Codex returns all-None fields.
+/// detection + the TodoWrite mirror + compaction boundary + file byte length. Served from the
+/// same (mtime,len)-gated cache as the other tail facts. Claude supplies all fields; Antigravity
+/// (`agy`) supplies commit detection (`last_commit_ts`), compaction detection (`last_compact_ts`),
+/// and `transcript_bytes`; Codex returns only `transcript_bytes`.
 pub struct OverlordTailFacts {
     pub last_commit_ts: Option<u64>,
     pub todos: Option<Value>,
     pub todos_ts: Option<u64>,
     pub last_compact_ts: Option<u64>,
+    pub transcript_bytes: Option<u64>,
 }
 
 pub fn overlord_facts_for(rt: AgentRuntime, session_id: &str) -> Option<OverlordTailFacts> {
@@ -1207,6 +1215,7 @@ pub fn overlord_facts_for(rt: AgentRuntime, session_id: &str) -> Option<Overlord
         todos: facts.todos,
         todos_ts: facts.todos_ts,
         last_compact_ts: facts.last_compact_ts,
+        transcript_bytes: facts.transcript_bytes,
     })
 }
 
@@ -1332,14 +1341,15 @@ fn extract_host_tab_from_tail(tail: &str) -> Option<String> {
 }
 
 /// The maiTerm tab id that most recently HOSTED a Claude or Antigravity (`agy`) session, read from
-/// the transcript itself: the SessionStart / PreInvocation hook echoes
-/// `Your maiTerm tab ID is $MAITERM_TAB_ID` into the session on every start/resume/compact, so the
-/// LAST occurrence names the tab the session last actually ran in. Used to resolve a CONTESTED
-/// session id (tab duplication copies the var on purpose — reload/fork workflows) to its one
-/// rightful renderer: ownership follows actual usage, and flips to the duplicate the moment it
-/// actually resumes the session there. `None` if the transcript can't be located or no marker
-/// falls within the scanned tail (a session that's run a long stretch since its last
-/// start/resume). (mtime, len)-cached — resolution paths hit this per ticker pass.
+/// the transcript itself: Claude's SessionStart hook echoes `Your maiTerm tab ID is $MAITERM_TAB_ID`
+/// on every start/resume/compact, and `agy`'s PreInvocation priming echoes the same marker on the
+/// first invocation for a `(tab, session_id)` in a maiTerm run. The LAST valid occurrence names the
+/// tab that most recently ran the session. Used to resolve a CONTESTED session id (tab duplication
+/// copies the var on purpose — reload/fork workflows) to its one rightful renderer: ownership
+/// follows actual usage, and flips to the duplicate once it resumes the session there. `None` if
+/// the transcript can't be located or no marker falls within the scanned tail (a session that's run
+/// a long stretch since its last priming). (mtime, len)-cached — resolution paths hit this per
+/// ticker pass.
 pub(crate) fn session_host_tab(rt: AgentRuntime, session_id: &str) -> Option<String> {
     static HOST_CACHE: std::sync::OnceLock<
         std::sync::Mutex<HashMap<PathBuf, (u64, u64, Option<String>)>>,

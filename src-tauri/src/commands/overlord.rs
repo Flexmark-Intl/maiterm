@@ -86,11 +86,12 @@ pub async fn get_agent_reply_after_prompt(
     tab_id: String,
     prompt: String,
     since_ms: i64,
+    min_offset: Option<u64>,
 ) -> Result<Value, String> {
     let app_state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let (prompt_ts, reply, has_response) =
-            crate::mailink::agent_reply_after_prompt(&app_state, &tab_id, &prompt, since_ms);
+            crate::mailink::agent_reply_after_prompt(&app_state, &tab_id, &prompt, since_ms, min_offset);
         serde_json::json!({ "prompt_ts": prompt_ts, "reply": reply, "has_response": has_response })
     })
     .await

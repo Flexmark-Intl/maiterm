@@ -5524,9 +5524,10 @@ fn persisted_session_for_tab(app: &AppState, tab_id: &str) -> Option<(AgentRunti
     // duplicate + close original; fork = duplicate + branch), so two tabs claiming one sid is a
     // legitimate transient state — but only ONE of them may render the conversation, or both
     // tabs show the same (possibly someone else's) transcript. The transcript itself names its
-    // rightful renderer: the SessionStart / PreInvocation hook echoes the hosting tab id into the
-    // JSONL on every start/resume/compact, so the last marker follows actual usage — the original
-    // keeps rendering until the duplicate actually resumes the session, then it flips. Unknown
+    // rightful renderer: Claude's SessionStart hook echoes the hosting tab id on every
+    // start/resume/compact, and `agy`'s PreInvocation priming echoes it on the first invocation
+    // for a `(tab, session_id)` in a maiTerm run, so the last marker follows actual usage — the
+    // original keeps rendering until the duplicate resumes the session, then it flips. Unknown
     // host (unlocatable transcript, marker out of tail range, unsupported runtime) → None for
     // every claimant: the snapshot fallback beats rendering someone else's conversation. A LIVE
     // registration (live_session_for_tab, tried before this fn) is unaffected.
@@ -6283,6 +6284,7 @@ pub(crate) fn agent_reply_after_prompt(
     tab_id: &str,
     prompt: &str,
     since_ms: i64,
+    min_offset: Option<u64>,
 ) -> (Option<i64>, Option<String>, bool) {
     let Some((rt, sid)) = resolved_session_for_tab(app, tab_id) else {
         return (None, None, false);
@@ -6292,7 +6294,16 @@ pub(crate) fn agent_reply_after_prompt(
     let Some(turns) = transcript::turns_for(rt, &sid, 200, transcript::ToolRender::Marker) else {
         return (None, None, false);
     };
-    extract_reply_after_prompt(&turns, rt, prompt, since_ms)
+    extract_reply_after_prompt(&turns, rt, prompt, since_ms, min_offset)
+}
+
+/// Parse the global byte offset baked into an `agy` turn's `msg_id` (`ag<offset>` or
+/// `ag<offset>:<suffix>`).
+fn agy_msg_offset(t: &Value) -> Option<u64> {
+    let id = t.get("msg_id").and_then(|v| v.as_str())?;
+    let rest = id.strip_prefix("ag")?;
+    let digits = rest.split(':').next()?;
+    digits.parse::<u64>().ok()
 }
 
 fn extract_reply_after_prompt(
@@ -6300,21 +6311,30 @@ fn extract_reply_after_prompt(
     rt: AgentRuntime,
     prompt: &str,
     since_ms: i64,
+    min_offset: Option<u64>,
 ) -> (Option<i64>, Option<String>, bool) {
     let ts = |t: &Value| t.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
     let text = |t: &Value| t.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
     // `agy` writes whole-second `created_at` timestamps (`.000Z`), so a millisecond `since_ms`
     // baseline (e.g. `Date.now()` fallback on a fresh tab) sits up to 999 ms ahead of a prompt
-    // written in the same second. Floor `since_ms` to whole seconds for Gemini.
+    // written in the same second. Floor `since_ms` to whole seconds for Gemini, and when a
+    // `min_offset` (the transcript byte length at send time) is supplied, require the matched
+    // user turn's byte offset to sit at or past `min_offset` so an already-completed prior turn
+    // in the same second can never be re-matched as the new directive.
     let floor_ms = if rt == AgentRuntime::Gemini {
         since_ms.div_euclid(1000) * 1000
     } else {
         since_ms
     };
+    let offset_ok = |t: &Value| match (rt, min_offset) {
+        (AgentRuntime::Gemini, Some(min_off)) => agy_msg_offset(t).is_some_and(|off| off >= min_off),
+        _ => true,
+    };
     // The LAST matching user turn: the same directive sent twice answers to the newer one.
     let Some(at) = turns.iter().rposition(|t| {
         t.get("role").and_then(|r| r.as_str()) == Some("user")
             && ts(t) >= floor_ms
+            && offset_ok(t)
             && prompt_matches(prompt, &text(t))
     }) else {
         return (None, None, false);
@@ -6392,6 +6412,9 @@ pub(crate) fn overlord_tab_facts(app: &AppState, tab_id: &str) -> Option<Value> 
         }
         if let Some(ts) = of.last_compact_ts {
             v["last_compact_ts"] = json!(ts);
+        }
+        if let Some(bytes) = of.transcript_bytes {
+            v["transcript_bytes"] = json!(bytes);
         }
         // Task lists, best source first. Claude Code's own store is authoritative and
         // COMPLETE; the transcript tail only ever saw whatever fit in its window. An SSH
@@ -8848,53 +8871,80 @@ mod tests {
         let prompt = "Give me a one-line status update.";
         let sec = 1_795_796_246_000_i64;
 
-        // 1. Prompt + agent reply share the exact same whole second; since_ms has ms precision
-        //    from a fresh-tab `Date.now()` fallback (+450 ms).
+        // 1. Fresh tab (min_offset = None): prompt + agent reply share the exact same whole second;
+        //    since_ms has ms precision from a fresh-tab `Date.now()` fallback (+450 ms).
         let turns = vec![
-            json!({ "role": "user", "text": prompt, "ts": sec }),
-            json!({ "role": "agent", "text": "All tests pass.", "ts": sec }),
+            json!({ "msg_id": "ag100", "role": "user", "text": prompt, "ts": sec }),
+            json!({ "msg_id": "ag240:text", "role": "agent", "text": "All tests pass.", "ts": sec }),
         ];
         assert_eq!(
-            extract_reply_after_prompt(&turns, AgentRuntime::Gemini, prompt, sec + 450),
+            extract_reply_after_prompt(&turns, AgentRuntime::Gemini, prompt, sec + 450, None),
             (Some(sec), Some("All tests pass.".to_string()), true)
         );
         // Claude keeps strict ms comparison (its transcripts carry millisecond timestamps).
         assert_eq!(
-            extract_reply_after_prompt(&turns, AgentRuntime::Claude, prompt, sec + 450),
+            extract_reply_after_prompt(&turns, AgentRuntime::Claude, prompt, sec + 450, None),
             (None, None, false)
         );
 
-        // 2. Prompt landed alone (no response yet) -> has_response is false.
-        let prompt_only = vec![json!({ "role": "user", "text": prompt, "ts": sec })];
+        // 2. Repeated identical directive on an existing `agy` tab (min_offset = 400 = transcript
+        //    byte length after the old turn): the already-completed turn at ag100 (< 400) MUST NOT
+        //    match, even when an unrelated busy turn later appends bytes.
+        let with_unrelated = vec![
+            json!({ "msg_id": "ag100", "role": "user", "text": prompt, "ts": sec }),
+            json!({ "msg_id": "ag240:text", "role": "agent", "text": "Old stale reply.", "ts": sec }),
+            json!({ "msg_id": "ag420:text", "role": "agent", "text": "Unrelated busy turn.", "ts": sec + 1000 }),
+        ];
         assert_eq!(
-            extract_reply_after_prompt(&prompt_only, AgentRuntime::Gemini, prompt, sec),
+            extract_reply_after_prompt(&with_unrelated, AgentRuntime::Gemini, prompt, sec, Some(400)),
+            (None, None, false)
+        );
+
+        // 3. Once the NEW directive lands at >= min_offset (even in the same whole second `sec`!),
+        //    only the new directive and its reply are returned.
+        let with_new_same_sec = vec![
+            json!({ "msg_id": "ag100", "role": "user", "text": prompt, "ts": sec }),
+            json!({ "msg_id": "ag240:text", "role": "agent", "text": "Old stale reply.", "ts": sec }),
+            json!({ "msg_id": "ag400", "role": "user", "text": prompt, "ts": sec }),
+            json!({ "msg_id": "ag520:text", "role": "agent", "text": "Fresh same-second reply.", "ts": sec }),
+        ];
+        assert_eq!(
+            extract_reply_after_prompt(&with_new_same_sec, AgentRuntime::Gemini, prompt, sec, Some(400)),
+            (Some(sec), Some("Fresh same-second reply.".to_string()), true)
+        );
+
+        // 4. Prompt landed alone (no response yet) -> has_response is false.
+        let prompt_only = vec![json!({ "msg_id": "ag400", "role": "user", "text": prompt, "ts": sec })];
+        assert_eq!(
+            extract_reply_after_prompt(&prompt_only, AgentRuntime::Gemini, prompt, sec, Some(400)),
             (Some(sec), None, false)
         );
 
-        // 3. Compaction divider alone is not an agent response.
+        // 5. Compaction divider alone is not an agent response.
         let with_divider = vec![
-            json!({ "role": "user", "text": prompt, "ts": sec }),
-            json!({ "role": "system", "text": "Context compacted · 500k → 6k", "ts": sec }),
+            json!({ "msg_id": "ag400", "role": "user", "text": prompt, "ts": sec }),
+            json!({ "msg_id": "ag500", "role": "system", "text": "Context compacted · 500k → 6k", "ts": sec }),
         ];
         assert_eq!(
-            extract_reply_after_prompt(&with_divider, AgentRuntime::Gemini, prompt, sec),
+            extract_reply_after_prompt(&with_divider, AgentRuntime::Gemini, prompt, sec, Some(400)),
             (Some(sec), None, false)
         );
 
-        // 4. Same-second tool-only response sets has_response=true with reply=None.
+        // 6. Same-second tool-only response sets has_response=true with reply=None.
         let tool_only = vec![
-            json!({ "role": "user", "text": prompt, "ts": sec }),
-            json!({ "role": "tool", "text": "replyToOverlord", "ts": sec }),
+            json!({ "msg_id": "ag400", "role": "user", "text": prompt, "ts": sec }),
+            json!({ "msg_id": "ag520:t0", "role": "tool", "text": "replyToOverlord", "ts": sec }),
         ];
         assert_eq!(
-            extract_reply_after_prompt(&tool_only, AgentRuntime::Gemini, prompt, sec),
+            extract_reply_after_prompt(&tool_only, AgentRuntime::Gemini, prompt, sec, Some(400)),
             (Some(sec), None, true)
         );
 
-        // 5. Same-second outgoing peer message also counts as a response.
+        // 7. Same-second outgoing peer message also counts as a response.
         let peer_out = vec![
-            json!({ "role": "user", "text": prompt, "ts": sec }),
+            json!({ "msg_id": "ag400", "role": "user", "text": prompt, "ts": sec }),
             json!({
+                "msg_id": "ag520:t0",
                 "role": "system",
                 "kind": "peer_message",
                 "peer": { "direction": "out", "name": "QA" },
@@ -8903,7 +8953,7 @@ mod tests {
             }),
         ];
         assert_eq!(
-            extract_reply_after_prompt(&peer_out, AgentRuntime::Gemini, prompt, sec),
+            extract_reply_after_prompt(&peer_out, AgentRuntime::Gemini, prompt, sec, Some(400)),
             (Some(sec), None, true)
         );
     }

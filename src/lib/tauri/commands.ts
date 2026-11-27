@@ -627,8 +627,12 @@ export interface OverlordTabFacts {
   last_turn_ts?: number;
   /** Unix-ms of the newest `git commit` tool call (Claude and Antigravity). */
   last_commit_ts?: number;
-  /** Unix-ms of the newest compaction boundary (isCompactSummary / compact_boundary). */
+  /** Unix-ms of the newest compaction boundary (isCompactSummary / compact_boundary on Claude,
+   *  CHECKPOINT on Antigravity). */
   last_compact_ts?: number;
+  /** Current byte length of the append-only transcript file, used to anchor whole-second
+   *  Antigravity (`agy`) reply lookups strictly past turns that already existed at send time. */
+  transcript_bytes?: number;
   /** Whether this session has a task list at all. Distinguishes "completed everything"
    *  (tracked, empty todos — Claude Code sweeps the files once all tasks are done) from
    *  "never tracked anything" (absent), which otherwise look identical. */
@@ -672,13 +676,21 @@ export async function getAgentReplySince(tabId: string, sinceMs: number): Promis
 /** The answer to a directive, anchored on the directive's own turn in the transcript (it may have
  *  been typed into a busy agent): `prompt_ts` null until it shows up, `reply` null until the agent
  *  says something after it, `has_response` true once any agent/tool turn follows the directive
- *  (even when its whole-second timestamp ties `prompt_ts`, as on Antigravity `agy`). */
+ *  (even when its whole-second timestamp ties `prompt_ts`, as on Antigravity `agy`). When
+ *  `minOffset` is provided, Antigravity turns before that byte offset are excluded so a repeated
+ *  directive never matches an already-completed turn from the same whole second. */
 export async function getAgentReplyAfterPrompt(
   tabId: string,
   prompt: string,
   sinceMs: number,
+  minOffset?: number,
 ): Promise<{ prompt_ts: number | null; reply: string | null; has_response: boolean }> {
-  return invoke('get_agent_reply_after_prompt', { tabId, prompt, sinceMs });
+  return invoke('get_agent_reply_after_prompt', {
+    tabId,
+    prompt,
+    sinceMs,
+    ...(minOffset !== undefined ? { minOffset } : {}),
+  });
 }
 
 /** One question's answer: chosen option labels, and/or free text via the Other row. */

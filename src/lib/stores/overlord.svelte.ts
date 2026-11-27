@@ -149,6 +149,9 @@ export interface OutstandingDirective {
   typedBusy?: boolean;
   /** The Overlord transcript baseline (`last_turn_ts`) when it was typed, for that search. */
   baseline?: number;
+  /** The transcript byte length at send time, anchoring whole-second Antigravity (`agy`)
+   *  searches strictly past turns that already existed when the directive was sent. */
+  baselineBytes?: number;
   /** The tab's `last_compact_ts` when the directive was typed, so whole-second compaction
    *  timestamps (`agy` `CHECKPOINT`) can distinguish a new compaction in the same second. */
   baselineCompactTs?: number;
@@ -708,9 +711,12 @@ function createOverlordStore() {
      *  first as the cause every time, whichever had happened. */
     reads: number;
     readErrors: number;
-    /** Last wall-clock time we probed a same-second Gemini candidate (`ts === floor(baseline)`),
-     *  throttling reads on an untouched tab whose prior turn fell in the same whole second. */
-    sameSecProbedAt?: number;
+    /** Transcript byte length at send time, anchoring whole-second Antigravity (`agy`) lookups
+     *  strictly past turns that already existed when the directive was sent. */
+    baselineBytes?: number;
+    /** Last `transcript_bytes` probed on a same-second Gemini candidate, avoiding repeat reads
+     *  while nothing new has been appended to the transcript. */
+    lastProbedBytes?: number;
   }
   const driveWatch = new Map<string, DriveWatch>();
   /** Give up harvesting after the same window driveTab's own directive cleanup uses. */
@@ -1132,10 +1138,22 @@ function createOverlordStore() {
           if (directive.typedBusy && directive.baseline !== undefined) {
             const f = facts.get(run.tabId);
             const ts = f?.last_turn_ts;
-            const minTs = f?.runtime === 'gemini' ? Math.floor(directive.baseline / 1000) * 1000 : directive.baseline + 1;
-            if (st === 'idle' && ts !== undefined && ts >= minTs) {
+            const isGemini = f?.runtime === 'gemini';
+            const grew =
+              isGemini &&
+              directive.baselineBytes !== undefined &&
+              f?.transcript_bytes !== undefined &&
+              f.transcript_bytes > directive.baselineBytes;
+            if (st === 'idle' && ts !== undefined && (ts > directive.baseline || grew)) {
+              const minOffset =
+                isGemini &&
+                directive.baselineBytes !== undefined &&
+                f?.transcript_bytes !== undefined &&
+                f.transcript_bytes >= directive.baselineBytes
+                  ? directive.baselineBytes
+                  : undefined;
               const read = await commands
-                .getAgentReplyAfterPrompt(run.tabId, directive.text, directive.baseline)
+                .getAgentReplyAfterPrompt(run.tabId, directive.text, directive.baseline, minOffset)
                 .catch(() => null);
               if (read?.prompt_ts != null && (read.has_response || ts > read.prompt_ts)) return 'ok';
             }
@@ -2200,6 +2218,7 @@ function createOverlordStore() {
         // keystrokes-since-idle fallback aborted Codex rituals on a recalled-then-cleared line.
         const typedBusy = mappedState(tabId) === 'active';
         const baseline = facts.get(tabId)?.last_turn_ts;
+        const baselineBytes = facts.get(tabId)?.transcript_bytes;
         const baselineCompactTs = facts.get(tabId)?.last_compact_ts;
         try {
           // And no dialog opened since the wait (read off the screen: the hooks lag it ~6 s).
@@ -2230,6 +2249,7 @@ function createOverlordStore() {
           acked: false,
           typedBusy,
           baseline,
+          baselineBytes,
           baselineCompactTs,
         };
         if (step.await) setOutstanding(tabId, directive);
@@ -3027,19 +3047,31 @@ function createOverlordStore() {
       const f = facts.get(tabId);
       const ts = f?.last_turn_ts;
       if (!ts) continue;
-      // Antigravity (`agy`) writes whole-second `created_at` timestamps (`.000Z`). A prompt +
-      // reply in the same whole second as `baseline` (either the prior turn's second, or a fresh
-      // tab's `Date.now()` fallback) leaves `ts === floor(w.baseline) <= w.baseline`. Allow
-      // anchored probing in that second so same-second `agy` replies are not missed.
+      // Antigravity (`agy`) writes whole-second `created_at` timestamps (`.000Z`). A new prompt
+      // + reply in the same whole second as `baseline` leaves `ts === floor(w.baseline) <= w.baseline`.
+      // Separate genuine new writes from pre-existing turns by requiring either transcript byte
+      // growth past `w.baselineBytes` (for an existing transcript) or a fresh-tab wall-clock
+      // fallback (`w.baselineBytes === undefined`) matching that exact second.
       const isGemini = f?.runtime === 'gemini';
-      const sameSecCandidate = isGemini && ts <= w.baseline && ts >= Math.floor(w.baseline / 1000) * 1000;
+      const curBytes = f?.transcript_bytes;
+      const sameSecGrew =
+        isGemini &&
+        ts <= w.baseline &&
+        w.baselineBytes !== undefined &&
+        curBytes !== undefined &&
+        curBytes > w.baselineBytes;
+      const sameSecFresh =
+        isGemini &&
+        w.baselineBytes === undefined &&
+        ts <= w.baseline &&
+        ts >= Math.floor(w.baseline / 1000) * 1000;
+      const sameSecCandidate = sameSecGrew || sameSecFresh;
       if (ts <= w.baseline && !sameSecCandidate) continue;
       // Mid-turn: the turn carrying the answer hasn't ended (harvesting now captures half a
       // thought). The directive may have been typed into this very turn — that is allowed now.
       if (st === 'active') continue;
       if (sameSecCandidate) {
-        if (w.sameSecProbedAt !== undefined && now - w.sameSecProbedAt < 5_000) continue;
-        w.sameSecProbedAt = now;
+        if (curBytes !== undefined && w.lastProbedBytes === curBytes) continue;
       }
 
       // Anchored on the directive's own turn, not on when it was typed: it can be typed into a
@@ -3050,15 +3082,22 @@ function createOverlordStore() {
       // when a time-based read would have taken the previous task's conclusion for the reply.
       //
       // Typed at an idle agent there is nothing before it to mistake, so the plain read since the
-      // baseline is used, with the directive's turn standing in as the anchor — except on a
-      // same-second Gemini candidate where timestamp ordering alone cannot separate turns.
+      // baseline is used, with the directive's turn standing in as the anchor — except on Gemini,
+      // where whole-second timestamps cannot separate turns without anchoring past `baselineBytes`.
       let read: { prompt_ts: number | null; reply: string | null; has_response: boolean } | null = null;
       const useAnchored = w.anchored || isGemini;
+      const minOffset =
+        isGemini && w.baselineBytes !== undefined && curBytes !== undefined && curBytes >= w.baselineBytes
+          ? w.baselineBytes
+          : undefined;
       if (!sameSecCandidate) w.reads++;
       try {
         if (useAnchored) {
-          read = await commands.getAgentReplyAfterPrompt(tabId, w.text, w.baseline);
-          if (sameSecCandidate && read.prompt_ts !== null) w.reads++;
+          read = await commands.getAgentReplyAfterPrompt(tabId, w.text, w.baseline, minOffset);
+          if (sameSecCandidate) {
+            w.lastProbedBytes = curBytes;
+            if (read.prompt_ts !== null) w.reads++;
+          }
           // Unanchored fallback when the runtime did not echo a matching user turn:
           if (!w.anchored && read.prompt_ts === null && ts > w.baseline) {
             const reply = await commands.getAgentReplySince(tabId, w.baseline);
@@ -4366,9 +4405,9 @@ function createOverlordStore() {
      *  An `unbound` tab is refused — something is running there, and a resume command typed
      *  into a live agent is a prompt, not a relaunch — with one exception: an SSH tab whose
      *  remote agent exited reads `unbound` too (`ssh` is the foreground job either way). For
-     *  a Claude tab the screen settles it: no Claude input box on screen means the far side
-     *  is a shell, so it is relaunched like a stopped one. Other runtimes have no box to
-     *  read, so their SSH tabs are refused rather than guessed.
+     *  Claude and Antigravity tabs the screen settles it: no input box on screen means the
+     *  far side is a shell, so it is relaunched like a stopped one. Other runtimes have no
+     *  box to read, so their SSH tabs are refused rather than guessed.
      *
      *  Deliberately does NOT go through driveTab, whose guards require a live REPL and an
      *  idle agent — both false here by definition. It keeps the quiescence rule (never
@@ -5380,6 +5419,7 @@ function createOverlordStore() {
         // a local tab, whose transcript clock is this machine's; for a remote tab there is no
         // readable transcript either way, and the expiry escalation covers it.
         baseline: facts.get(tabId)?.last_turn_ts ?? Date.now(),
+        baselineBytes: facts.get(tabId)?.transcript_bytes,
         sentAt: Date.now(),
         text,
         anchored: busy || r.status === 'held',
