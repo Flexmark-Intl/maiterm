@@ -5,7 +5,7 @@ description: Built-in CodeMirror 6 editor with click-to-open, remote file suppor
 
 maiTerm includes a full-featured code editor built on CodeMirror 6, living alongside your terminal tabs.
 
-![Editor tab](/screenshots/editor-tab.png)
+![An editor tab showing session.ts with syntax highlighting and folding, in a tab strip beside the terminal tabs](/screenshots/editor-tab.webp)
 
 ## Features
 

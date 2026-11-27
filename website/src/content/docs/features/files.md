@@ -5,6 +5,8 @@ description: A project tree beside your terminals that follows the tab you're in
 
 **Files** is a project tree in its own column, between the workspace sidebar and your terminals. It shows the folder of the tab you're in, and it shows what your agents are doing in it: a file lights up as an agent reads it, and the files an agent changed carry a mark in that agent's colour, so you can see what a turn touched without scrolling back through its transcript.
 
+![The Files column between the sidebar and an editor tab: the web-ui repository on branch main, the src folder open with session.ts — the file in front — marked, and the All, Changed, Turn and Session filters above](/screenshots/files-column.webp)
+
 ## Opening it
 
 Press `Cmd+Shift+B` (`Ctrl+Shift+B` on Windows and Linux), or click the folder button at the top of the sidebar, beside the collapse chevron. While the sidebar is collapsed, the same button sits in the titlebar.

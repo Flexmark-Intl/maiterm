@@ -455,6 +455,15 @@ const EVERYTHING = [
         when you do — nothing re-flows a streaming agent behind your back.
       </p>
       <a class="ln-cta-link" href="/features/files/">How Files works</a>
+      <div class="ln-shot files-shot">
+        <img
+          src="/screenshots/files-column.webp"
+          alt="The Files column between the sidebar and an editor tab: the web-ui repository on branch main, the src folder open with session.ts — the file in front — marked, and the All, Changed, Turn and Session filters above"
+          width="2400"
+          height="1500"
+          loading="lazy"
+        />
+      </div>
     </div>
   </section>
 
@@ -908,9 +917,9 @@ const EVERYTHING = [
     <div class="ln-shot">
       <img
         src="/screenshots/stack-console.webp"
-        alt="A maiTerm workspace running three services — web-ui on port 5173, api-gateway on 4000 and a worker — with one service's console open in a drawer over the terminal, showing the dev server's own line announcing its address"
+        alt="A maiTerm workspace running three services — web on port 5180, api on 4010 and a worker — with the web service's console open in a drawer over the terminal, showing the dev server's own line announcing its address"
         width="2400"
-        height="1220"
+        height="1500"
         loading="lazy"
       />
     </div>
@@ -998,7 +1007,7 @@ const EVERYTHING = [
       <div class="ln-shot">
         <img
           src="/screenshots/tasks-panel.webp"
-          alt="The maiTerm task panel docked beside a terminal, showing tasks grouped into lanes and attributed to the agent working them"
+          alt="The maiTerm task panel docked beside a terminal: the task active now, then a workstream's review and blocked tasks, each with its note"
           width="2400"
           height="1500"
           loading="lazy"
@@ -1593,6 +1602,10 @@ const EVERYTHING = [
     font-weight: 650;
     letter-spacing: 0.05em;
     text-transform: uppercase;
+  }
+
+  .files-shot {
+    margin-top: 2.5rem;
   }
 
   /* --- Band footnote (Accounts, Follow-ups) ------------------------------- */

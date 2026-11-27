@@ -91,7 +91,7 @@ Press `Cmd+Shift+E` — or click the lanes icon in the tab bar — to open the t
 
 The panel answers one question — *what am I doing here* — so it shows **this tab's work**, grouped by workstream with a count on each heading. Everything else is a pointer: the header carries collapsed counts for `N unclaimed`, `N parked`, `N done` and `N dropped`, and a closing line says how many tasks are in flight on other tabs.
 
-![The task panel beside a terminal, showing one workstream's rows with review, active and blocked lanes and a count of finished work in the header](/screenshots/tasks-panel.webp)
+![The task panel beside a terminal: the task active now at the top, then the Sign-in flow workstream's review and blocked tasks, each with its one-line note](/screenshots/tasks-panel.webp)
 
 Under each row's status chip is how long ago the task was created, so week-old leftovers stand out from what came up this morning; hover it for the exact time.
 

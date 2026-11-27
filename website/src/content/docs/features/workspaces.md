@@ -7,7 +7,7 @@ description: Organize terminals by project with independent pane layouts and con
 
 Group your terminals by project. Each workspace has its own pane layout, tabs, and context. Switch between "ACME Project" and "Production Server" without losing your place in either.
 
-![Workspaces and tabs](/screenshots/workspaces-tabs.png)
+![The web-ui workspace split into two panes: git history in one terminal and a passing test run in the other, with the sidebar listing seven workspaces — one shown under web-ui, a mesh, a muted one, service dots on each — and web-ui's three running services in the stack panel at its foot](/screenshots/workspaces-tabs.webp)
 
 ### Features
 
@@ -92,7 +92,7 @@ Panes are the containers within a workspace. Each pane holds one or more tabs (t
 
 Each tab has its own markdown notes panel. Track TODOs, paste connection strings, jot down what you're debugging — right next to the terminal doing the work.
 
-![Notes panel](/screenshots/notes-panel.png)
+![A terminal with its notes panel open beside it: dev notes in markdown with a checklist, next to curl output from the services the notes describe](/screenshots/notes-panel.webp)
 
 Your coding agent — Claude Code, Codex or Antigravity — shares the same panel. Ask it to write down what it just did, keep a running TODO list, or summarize a debugging session, and it edits the notes directly through MCP tools — no copy-paste. It can read, write, update, organize, merge, and clean up both tab and workspace notes, so your notes stay current while you work.
 

@@ -29,7 +29,7 @@ Other terminals give you tabs and splits. maiTerm gives you a system for managin
 
 Group your terminals by project. Each workspace has its own pane layout, tabs, and context. Switch between "ACME Project" and "Production Server" without losing your place in either.
 
-![Workspaces and tabs](screenshots/workspaces-tabs.png)
+![Workspaces and tabs](screenshots/workspaces-tabs.webp)
 
 ### Bridge two Claude agents together
 
@@ -39,13 +39,13 @@ Run two Claude Code sessions — say one local and one SSH'd into a related serv
 
 Each tab has its own markdown notes panel. Track TODOs, paste connection strings, jot down what you're debugging — right next to the terminal doing the work. Workspace-level notes too. Your Claude Code agent shares the same panel — ask it to write down what it just did, keep a running TODO, or tidy your notes, and it edits them directly via MCP.
 
-![Per-tab notes panel](screenshots/notes-panel.png)
+![Per-tab notes panel](screenshots/notes-panel.webp)
 
 ### Built-in editor, integrated with your terminal
 
 Click any file path in terminal output to open it in an editor tab. Works over SSH too — remote files load transparently via SCP. Syntax highlighting for 50+ languages, image/PDF preview, and Claude Code's diff review all live alongside your terminal tabs.
 
-![Code editor tab](screenshots/editor-tab.png)
+![Code editor tab](screenshots/editor-tab.webp)
 
 ### Deep clone everything
 
