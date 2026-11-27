@@ -5,7 +5,7 @@ description: A workspace declares the services its project runs — dev server, 
 
 Every project has a handful of things that have to be running before any of it works: a dev server, an API, a database, a queue worker. You start them by hand in four tabs, lose track of which one crashed, and then your agent starts a fifth copy of the dev server because nothing told it the first one was already up.
 
-The **stack** is a workspace saying what its project runs. maiTerm starts each service in a tab it owns, watches its exit code, restarts it when it crashes, and shows the whole set under the workspace in the sidebar — for you, and for every agent in the window.
+The **stack** is a workspace saying what its project runs. maiTerm starts each service in a tab it owns, watches its exit code, restarts it when it crashes, and shows the whole set in the sidebar — for you, and for every agent in the window.
 
 ## A service is a tab maiTerm owns
 
@@ -26,11 +26,11 @@ Right-click a workspace row and choose **Import from project…**. maiTerm reads
 
 The obviously-dev ones — `dev`, `start`, `serve`, `up` — come pre-ticked; the rest are yours to pick. Anything already in the stack is shown ticked and disabled, so re-importing after you add a script is a safe thing to do.
 
-**Add service…** does the same job by hand, from the workspace row's menu or the `+` in the Stack section. A service is a name, a command exactly as you'd type it, a directory, optional `KEY=value` environment lines, whether it starts with the workspace, and what to do if it crashes.
+**Add service…** does the same job by hand, from the workspace row's **Stack ›** menu or the `+` in the stack panel. A service is a name, a command exactly as you'd type it, a directory, optional `KEY=value` environment lines, whether it starts with the workspace, and what to do if it crashes.
 
 ## The sidebar
 
-Services live in a **Stack** section under their workspace row. Each line carries a status dot, the service's name, its last known address, and how long it's been up:
+Services live in the **stack panel** at the foot of the sidebar. It shows the active workspace's stack — or another workspace's, when you click that workspace's dots, with **Back to** to return — and its header says how many are running. Each line carries a status dot, the service's name, its last known address, and how long it's been up:
 
 | Status | Means |
 |--------|-------|
@@ -40,11 +40,11 @@ Services live in a **Stack** section under their workspace row. Each line carrie
 | **ready** | It announced an address, or an agent reported it ready |
 | **crashed** | It exited on its own with a failure code |
 
-The workspace row itself carries a **rollup dot**, with the same batch semantics as the agent indicator: red if anything crashed, amber while anything is starting, green only when *every* auto-start service is up, and amber for a partly-up stack. A green rollup means the project is actually running, not that something in it is.
+Every workspace row carries **a dot per service**: green up, amber starting, red crashed, hollow stopped. From seven services on they become a fixed-width bar with a segment each, so a big stack never widens the row and a crash still shows. Hover them for the list; click them to show that stack in the panel.
 
 Right-click a service for **Start** / **Restart**, **Stop**, **Show console**, **Run on**, **Edit…** and **Remove** (held while it's running — stop it first).
 
-**Run on** runs a service somewhere other than its own folder: in a worktree of the repository, or on **Other branch…**. A service whose command uses `{port}` gets a port of its own per copy, so up to three copies can run side by side, each a row under the service with **Close this copy** once it's stopped. One with a fixed port runs one copy at a time, and Run on moves it. A service can also be **Use the running service from another workspace**: it's started and stopped there, and its port fills `{port:<service>}` in this workspace's commands. Right-click the workspace row for **Start stack**, **Stop stack** and **Restart stack**, which walk the services in order.
+**Run on** runs a service somewhere other than its own folder: in a worktree of the repository, or on **Other branch…**. A service whose command uses `{port}` gets a port of its own per copy, so up to three copies can run side by side, each a row under the service with **Close this copy** once it's stopped. One with a fixed port runs one copy at a time, and Run on moves it. A service can also be **Use the running service from another workspace**: it's started and stopped there, and its port fills `{port:<service>}` in this workspace's commands. Right-click the workspace row and open **Stack ›** for **Start stack**, **Stop stack** and **Restart stack**, which walk the services in order.
 
 ## It reads the address off the service
 

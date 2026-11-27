@@ -116,7 +116,7 @@ With Overlord on, agents can also schedule a prompt back into their own tab — 
 Not everything in a window wants supervising: a scratch session, a demo window, a tab you're driving yourself step by step.
 
 - **A single tab** — right-click its tab and choose **Exempt from Overlord**. The same item reads **Supervise with Overlord** to put it back.
-- **A whole workspace** — the eye-off button on its row in the sidebar. It stays visible while the exemption is on rather than appearing on hover, because an exemption you can't see is one you forget you set. While a workspace is exempt, the per-tab item inside it is disabled and says so.
+- **A whole workspace** — right-click its row in the sidebar and choose **Exempt from Overlord**; **Supervise with Overlord again** puts it back. An eye-off mark stays on the row while the exemption is on, because an exemption you can't see is one you forget you set. While a workspace is exempt, the per-tab item inside it is disabled and says so.
 
 Exempt means the engine cannot see the tab **at all**: no rule evaluates against it, no proposal is raised for it, no rule can be fired at it by hand from either composer, and the supervisor agent's own tools refuse to touch it. It also **releases what the engine was already holding** — a sequence mid-flight, an outstanding directive still reading the tab's replies, a queued proposal — because you reach for "exempt" exactly while one of those is happening.
 
