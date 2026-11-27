@@ -6600,6 +6600,7 @@ async fn hooks_handler(
                     // DENIED, which fires no hook of its own. The main thread is idle, so none
                     // of its calls is in flight either.
                     if notification_type == "idle_prompt" {
+                        COMPACT_MANUAL_SESSIONS.lock().remove(&session_id);
                         session.claude_gate.prompt_closed();
                         session.claude_gate.agent_ended("");
                         // An ask cancelled with Esc is a denied call: no PostToolUse clears it,

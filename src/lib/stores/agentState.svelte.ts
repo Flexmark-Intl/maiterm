@@ -543,6 +543,7 @@ function createAgentStateStore() {
         let started: AgentState;
         let preserveUnread = false;
         if (source === 'compact') {
+          const cur = sessions.get(tab_id);
           const was = openBeforeCompact.get(tab_id);
           const wasRead = readBeforeCompact.get(tab_id);
           openBeforeCompact.delete(tab_id);
@@ -552,10 +553,17 @@ function createAgentStateStore() {
           clearStaleTimer(tab_id);
           const stillOpen = was !== undefined ? was : (active === true);
           started = stillOpen ? 'active' : 'idle';
-          preserveUnread = !stillOpen && wasRead === false;
+          // Preserve unread when PreCompact recorded it, or when PreCompact was missed / a
+          // duplicate SessionStart(compact) arrives while the tab is already idle+unread.
+          const priorUnread = wasRead !== undefined
+            ? wasRead === false
+            : (cur?.state === 'idle' && cur.read === false);
+          preserveUnread = !stillOpen && priorUnread;
           if (stillOpen) mainTurnOpen.set(tab_id, true);
           else closeMainTurn(tab_id);
         } else {
+          openBeforeCompact.delete(tab_id);
+          readBeforeCompact.delete(tab_id);
           started = 'idle';
           mainTurnOpen.set(tab_id, false);
         }
@@ -637,6 +645,9 @@ function createAgentStateStore() {
           setState(tab_id, session_id, 'permission', undefined, undefined, runtime);
           dispatch(getDescriptor(runtime).displayName, 'Needs permission approval', 'info', { tabId: tab_id, kind: 'permission' });
         } else if (notification_type === 'idle_prompt') {
+          openBeforeCompact.delete(tab_id);
+          readBeforeCompact.delete(tab_id);
+          closeMainTurn(tab_id);
           setState(tab_id, session_id, 'idle', undefined, undefined, runtime);
           // Notification disabled — the Stop hook already notifies when Claude finishes,
           // and this fires at awkward moments (e.g. between tool calls). Re-enable if we
@@ -749,6 +760,9 @@ function createAgentStateStore() {
       const u10 = await listen<{ session_id: string; tab_id: string | null; runtime?: string }>('agent-hook-interrupt', (e) => {
         const { session_id, tab_id } = e.payload;
         if (!tab_id) return;
+        openBeforeCompact.delete(tab_id);
+        readBeforeCompact.delete(tab_id);
+        closeMainTurn(tab_id);
         clearAsks(tab_id);
         setState(tab_id, session_id, 'idle', undefined, undefined, runtimeOf(e.payload));
         markReadInternal(tab_id);
@@ -792,11 +806,13 @@ function createAgentStateStore() {
           const cur = sessions.get(tab_id);
           const wasOpen = trigger === 'manual'
             ? false
-            : (mainTurnOpen.get(tab_id) ?? (cur?.state === 'active'));
+            : cur?.state === 'idle'
+              ? false
+              : (mainTurnOpen.get(tab_id) ?? (cur?.state === 'active'));
           openBeforeCompact.set(tab_id, wasOpen);
           readBeforeCompact.set(tab_id, cur?.state === 'idle' ? (cur.read ?? true) : true);
           mainTurnOpen.set(tab_id, true);
-          setState(tab_id, session_id, 'active', undefined, undefined, runtime);
+          setState(tab_id, session_id, 'active', undefined, undefined, runtime, wasOpen);
           // A compaction that fails or is cancelled with Esc sends nothing after it — no
           // SessionStart(compact), and Claude has no Interrupt hook — so without an expiry the
           // tab read busy until its next prompt, and Overlord refused it (`agent_busy`) and
@@ -810,7 +826,7 @@ function createAgentStateStore() {
               openBeforeCompact.delete(tab_id);
               readBeforeCompact.delete(tab_id);
               closeMainTurn(tab_id);
-              setState(tab_id, session_id, 'idle', undefined, undefined, runtime);
+              setState(tab_id, session_id, 'idle', undefined, undefined, runtime, false);
               if (wasRead !== false) markReadInternal(tab_id);
             }
           }, COMPACT_STALE_MS));
