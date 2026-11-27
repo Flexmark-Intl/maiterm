@@ -91,7 +91,9 @@ is versioned on its own (`chrome-extension/manifest.json`, tags `ext-v*`).
    after 600 ms (checked on `onCreated` too — a tab created inside a group reports no change);
    and at worker start a group no link owns is ungrouped if its title is one we gave a group
    (`groupTitles` in `chrome.storage.local`, matched by title since a browser restart renumbers
-   groups; a group the human titled themselves is never touched) or the pre-0.2.5 "maiTerm · ", because
+   groups; the last 100 are kept, and a title is not dropped when no group has it, since a window
+   reopened from History brings its group back later; a group the human titled themselves is
+   never touched unless they gave it one of those exact titles) or the pre-0.2.5 "maiTerm · ", because
    `chrome.storage.session` (the links and their placements) is cleared by an extension reload or
    update and a browser restart while Chrome keeps the groups. Putting a tab back between two
    tabs still in the group would make Chrome regroup it, so it is then taken out to the group's
@@ -154,7 +156,7 @@ maiTerm → extension:
 |---|---|---|
 | `command` | `{chromeTabId, action, args}` | action-specific, or `{error}` |
 | `unlinked` (notif) | `{chromeTabId, reason}` | maiTerm dropped a link: its tab closed (checked every 5 s while connected), the human unlinked it in maiTerm, or turned the feature off |
-| `relinked` (notif) | `{chromeTabId, maitermTabId, maitermTabName}` | its maiTerm tab was reloaded under a new id; without this the next `hello` re-announces the old id and maiTerm refuses it as a closed tab |
+| `relinked` (notif) | `{chromeTabId, maitermTabId, maitermTabName, maitermWorkspaceName}` | its maiTerm tab was reloaded under a new id (without this the next `hello` re-announces the old id and maiTerm refuses it as a closed tab), renamed, or moved to another workspace (the prune tick compares the names it last sent); the extension re-titles the group |
 
 Every change the extension makes to its stored links goes through one queue (`mutateLinks`): each
 is read → await → write, and two interleaved lost the newer write (a re-link racing maiTerm's

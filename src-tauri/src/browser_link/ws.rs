@@ -134,8 +134,9 @@ async fn run(socket: WebSocket, state: Arc<AppState>, app: AppHandle) {
     }
     {
         let reg = REG.lock();
-        for l in &renamed {
-            super::notify_relinked(&reg, l, super::tab_name(&state, &l.maiterm_tab_id).as_deref());
+        for l in &mut renamed {
+            let names = super::tab_names(&state, &l.maiterm_tab_id);
+            super::notify_relinked(l, &reg.conns, names.as_ref());
         }
     }
     emit_changed(&app);
@@ -196,6 +197,7 @@ fn parse_link(v: &Value, conn_id: &str, browser: &str) -> Option<Link> {
         title: v.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
         url: v.get("url").and_then(|t| t.as_str()).unwrap_or("").to_string(),
         purpose: super::clean_purpose(v.get("purpose").and_then(|t| t.as_str()).unwrap_or("")),
+        told_label: String::new(),
     })
 }
 

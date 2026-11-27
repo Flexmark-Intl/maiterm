@@ -236,8 +236,9 @@ async function onFrame(host, raw) {
       return links.filter((l) => !gone.includes(l));
     });
   } else if (msg.method === 'relinked') {
-    // Its maiTerm tab was reloaded under a new id; the link follows it.
-    const { chromeTabId, maitermTabId, maitermTabName } = msg.params ?? {};
+    // Its maiTerm tab was reloaded under a new id, renamed, or moved to another workspace: the
+    // link follows it, and so does its group's title. (maiTerm before 0.2.5's sends no workspace.)
+    const { chromeTabId, maitermTabId, maitermTabName, maitermWorkspaceName } = msg.params ?? {};
     await mutateLinks(async (links) => {
       const l = links.find((x) => x.host === host && x.chromeTabId === chromeTabId);
       if (!l) return null;
@@ -251,6 +252,7 @@ async function onFrame(host, raw) {
       }
       l.maitermTabId = maitermTabId;
       if (maitermTabName) l.maitermTabName = maitermTabName;
+      if (typeof maitermWorkspaceName === 'string') l.maitermWorkspaceName = maitermWorkspaceName;
       await retitle(l);
       return links;
     });

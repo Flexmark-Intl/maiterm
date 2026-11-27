@@ -147,6 +147,10 @@ pub struct Link {
     /// admin, signed in as support"). Empty when they wrote none. The human's own words, unlike
     /// the title: it may go into what an agent is told unasked.
     pub purpose: String,
+    /// The "<workspace>/<tab>" the extension last heard for this link, so its Chrome group's title
+    /// follows a rename or a move between workspaces (`prune` sends `relinked` when it differs).
+    #[serde(skip)]
+    told_label: String,
 }
 
 impl Link {
@@ -250,7 +254,7 @@ fn emit_changed(app: &AppHandle) {
 /// rename is remembered even when no link holds it now, for a link that is re-announced later.
 pub fn remap_tab(app: &AppHandle, from: &str, to: &str) {
     use tauri::Manager;
-    let name = app.try_state::<Arc<AppState>>().and_then(|s| tab_name(&s, to));
+    let names = app.try_state::<Arc<AppState>>().and_then(|s| tab_names(&s, to));
     let mut reg = REG.lock();
     if reg.renamed.len() >= RENAMED_KEEP {
         reg.renamed.clear();
@@ -268,8 +272,9 @@ pub fn remap_tab(app: &AppHandle, from: &str, to: &str) {
     let mut moved = false;
     for i in 0..reg.links.len() {
         if reg.links[i].maiterm_tab_id == from {
-            reg.links[i].maiterm_tab_id = to.to_string();
-            notify_relinked(&reg, &reg.links[i], name.as_deref());
+            let r = &mut *reg;
+            r.links[i].maiterm_tab_id = to.to_string();
+            notify_relinked(&mut r.links[i], &r.conns, names.as_ref());
             moved = true;
         }
     }
@@ -279,15 +284,28 @@ pub fn remap_tab(app: &AppHandle, from: &str, to: &str) {
     }
 }
 
-/// Tell the extension a link now belongs to its maiTerm tab's new id.
-fn notify_relinked(reg: &Registry, link: &Link, name: Option<&str>) {
-    if let Some(c) = reg.conns.get(&link.conn_id) {
+/// Tell the extension a link's maiTerm tab id or names: after a reload (a new id), a rename, or a
+/// move to another workspace. The extension re-titles the Chrome group from the names.
+fn notify_relinked(link: &mut Link, conns: &HashMap<String, Conn>, names: Option<&(String, String)>) {
+    if let Some((tab, ws)) = names {
+        link.told_label = label(tab, ws);
+    }
+    if let Some(c) = conns.get(&link.conn_id) {
         let frame = serde_json::json!({
             "method": "relinked",
-            "params": { "chromeTabId": link.chrome_tab_id, "maitermTabId": link.maiterm_tab_id, "maitermTabName": name },
+            "params": {
+                "chromeTabId": link.chrome_tab_id,
+                "maitermTabId": link.maiterm_tab_id,
+                "maitermTabName": names.map(|n| &n.0),
+                "maitermWorkspaceName": names.map(|n| &n.1),
+            },
         });
         let _ = c.tx.send(frame.to_string());
     }
+}
+
+fn label(tab: &str, ws: &str) -> String {
+    format!("{ws}/{tab}")
 }
 
 /// The live tab an id now names: itself, or where its reloads led. None for a closed tab.
@@ -343,11 +361,20 @@ fn prune(state: &Arc<AppState>, app: &AppHandle) {
     let mut kept = Vec::new();
     for mut l in std::mem::take(&mut reg.links) {
         match current_id(state, &reg, &l.maiterm_tab_id) {
-            Some(id) if id == l.maiterm_tab_id => kept.push(l),
+            Some(id) if id == l.maiterm_tab_id => {
+                // Renamed, or moved to another workspace: the group's title follows.
+                if let Some(names) = tab_names(state, &id) {
+                    if label(&names.0, &names.1) != l.told_label {
+                        notify_relinked(&mut l, &reg.conns, Some(&names));
+                    }
+                }
+                kept.push(l);
+            }
             // Reloaded while this link missed the remap: follow it.
             Some(id) => {
                 l.maiterm_tab_id = id;
-                notify_relinked(&reg, &l, tab_name(state, &l.maiterm_tab_id).as_deref());
+                let names = tab_names(state, &l.maiterm_tab_id);
+                notify_relinked(&mut l, &reg.conns, names.as_ref());
                 kept.push(l);
                 changed = true;
             }
@@ -747,6 +774,15 @@ pub fn touch_window(state: &Arc<AppState>, label: &str) {
     }
 }
 
+/// A tab's name and its workspace's name.
+fn tab_names(state: &Arc<AppState>, tab_id: &str) -> Option<(String, String)> {
+    let data = state.app_data.read();
+    data.windows.iter().flat_map(|w| w.workspaces.iter()).find_map(|ws| {
+        let t = ws.panes.iter().flat_map(|p| p.tabs.iter()).find(|t| t.id == tab_id)?;
+        Some((t.name.clone(), ws.name.clone()))
+    })
+}
+
 fn tab_name(state: &Arc<AppState>, tab_id: &str) -> Option<String> {
     let data = state.app_data.read();
     data.windows
@@ -820,6 +856,7 @@ mod tests {
             title: String::new(),
             url: String::new(),
             purpose: String::new(),
+            told_label: String::new(),
         }
     }
 

@@ -114,7 +114,7 @@ Tells the extension which tab opened a new tab or popup, so a sign-in popup open
 `storage`
 
 ```
-Keeps the user's links (tab ids, titles, addresses, and the maiTerm agent tab each is linked to) in session storage, so a link survives Chrome restarting the extension's background worker. It is cleared when the browser closes.
+Keeps the user's links (tab ids, titles, addresses, and the maiTerm agent tab each is linked to) in session storage, so a link survives Chrome restarting the extension's background worker. It is cleared when the browser closes. Local storage keeps only the names of the tab groups the extension made (the last 100), so it can ungroup ones a browser restart left behind without touching the user's own groups.
 ```
 
 `alarms`

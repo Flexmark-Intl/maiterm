@@ -267,6 +267,7 @@ mod tests {
             title: String::new(),
             url: url.into(),
             purpose: purpose.into(),
+            told_label: String::new(),
         }
     }
 

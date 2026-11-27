@@ -37,10 +37,16 @@ async function recordedTitles() {
   return titles;
 }
 
+/** How many titles are remembered, newest kept. A title is not forgotten when no group has it:
+ *  a window reopened from History brings its group back later, and must still be swept. */
+const TITLES_KEEP = 100;
+
 /** Remember a title we gave a group, so a sweep can tell it from one of the human's. */
 async function record(title) {
   const titles = await recordedTitles();
-  if (!titles.includes(title)) await chrome.storage.local.set({ [TITLES]: [...titles, title] });
+  if (titles[titles.length - 1] === title) return;
+  const kept = [...titles.filter((t) => t !== title), title].slice(-TITLES_KEEP);
+  await chrome.storage.local.set({ [TITLES]: kept });
 }
 
 /** Title a group and remember it. */
@@ -183,15 +189,12 @@ export async function sweepOrphans(links) {
       const tabs = await chrome.tabs.query({ groupId: g.id });
       if (tabs.length) await chrome.tabs.ungroup(tabs.map((t) => t.id));
     }
-    // Forget the titles no group has any more.
-    const live = new Set((await chrome.tabGroups.query({})).map((g) => g.title));
-    await chrome.storage.local.set({ [TITLES]: [...ours].filter((t) => live.has(t)) });
   } catch {
     // No tab groups here.
   }
 }
 
-/** Its agent tab was renamed or reloaded: the group's title follows. */
+/** Its agent tab was reloaded, renamed or moved to another workspace: the group's title follows. */
 export async function retitle(link) {
   const id = link.placement?.groupId;
   if (id == null) return;
