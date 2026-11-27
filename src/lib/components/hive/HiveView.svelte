@@ -11,8 +11,10 @@
   no transcript: Rust's worker records are fetched when this window hears `hive-workers-changed`
   or its tasks change, diff stats and meta are pushed (hiveFeed), and the rest (lane, blocker,
   note, agent state and the activity line) comes live from the stores. A card's newest assets come
-  with its record, refetched when the gallery changes (§4.3). The header's top row is the name and goal,
-  the crew strip (one segment per worker in its card's colour), the status (what an active Hive is doing: Working, Waiting on you, Stalled? or Idle; Paused; or
+  with its record, refetched when the gallery changes (§4.3). The header's top row is the name and goal
+  (under it the queen's progress estimate, §4.1.1: her number, her note and when she set it; Complete
+  only once Done), the crew gauge (one bar of four groups and words, naming anything that needs a
+  look, §4.1.1), the status (what an active Hive is doing: Working, Waiting on you, Stalled? or Idle; Paused; or
   while done its Done time and Report, §11.4), Pause or Resume, Settings, and a ⋯ menu with the
   land log and Delete. Notices (throttled, usage limit, a land undone since Done, a suspect repo)
   get a line of their own. The bar under them holds the views and the readouts: slots, budget,
@@ -75,6 +77,7 @@
   import HiveWorkersModal from './HiveWorkersModal.svelte';
   import { autonomyLabel } from '$lib/hive/autonomy';
   import { allHivesLabel, budgetFill, budgetLabel, budgetLevel } from '$lib/hive/budget';
+  import { crewSummary, progressView } from '$lib/hive/progress';
   import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
   import { hivePrompts } from '$lib/stores/hivePrompts.svelte';
   import HiveMemoryView from './HiveMemoryView.svelte';
@@ -488,11 +491,15 @@
     return [...n].sort((a, b) => STATE_ORDER[a[0]] - STATE_ORDER[b[0]]).map(([s, k]) => `${k} ${STATE_LABEL[s].toLowerCase()}`);
   });
   const workers = $derived(board?.workers.length ?? 0);
-  /** The header's crew strip: one segment per worker, in the board's state order. */
-  // A quiet worker (idle past 10 minutes with nothing on its way) reads apart from a plain idle one.
-  const crew = $derived(
-    [...cards].sort((a, b) => STATE_ORDER[a.state.state] - STATE_ORDER[b.state.state]).map((c) => (c.activity.tone === 'stalled' ? 'quiet' : c.state.state)),
-  );
+  /** The header's crew gauge (§4.1.1): four groups and words, whatever the crew's size. A quiet
+   *  worker (idle past 10 minutes with nothing on its way) is named apart from a plain idle one. */
+  const crew = $derived(crewSummary(cards.map((c) => ({ state: c.state.state, quiet: c.activity.tone === 'stalled' }))));
+  /** The queen's estimate (docs/hive.md §4.1.1). Read against the clock on each board refresh, so
+   *  an estimate she stopped keeping up turns stale without a timer of its own. */
+  const progress = $derived.by(() => {
+    void board;
+    return hive ? progressView(hive.progress, hive.status, Date.now()) : null;
+  });
   const room = $derived(board?.headroom ?? null);
   /** Slot pips only while they fit at a glance; past that the numbers say it. */
   const PIP_MAX = 10;
@@ -969,15 +976,32 @@
             {/if}
           </div>
         {/if}
+        {#if progress}
+          <div class="progress" class:stale={progress.stale} class:done={progress.done}>
+            <Tooltip text={progress.done ? 'The queen called hiveFinish and maiTerm checked every criterion' : `The queen's estimate, ${progress.when}${progress.stale ? ': she hasn’t updated it in over an hour' : ''}. She sets it with hiveSetProgress as the work moves; only Done means complete`}>
+              <span class="pmeter" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.percent} aria-label="The queen's progress estimate">
+                <span style="width: {progress.percent}%"></span>
+              </span>
+            </Tooltip>
+            <span class="ppct">{progress.done ? 'Complete' : `${progress.percent}%`}</span>
+            {#if progress.note}<span class="pnote">{progress.note}</span>{/if}
+            {#if !progress.done}<span class="pwhen">Queen's estimate, {progress.when}</span>{/if}
+          </div>
+        {:else if hive && workers}
+          <div class="progress none">No progress estimate from the queen yet</div>
+        {/if}
       </div>
       <div class="controls">
         {#if workers}
-          <Tooltip text={counts.join(', ')}>
+          <Tooltip text="{workers} worker{workers === 1 ? '' : 's'}: {counts.join(', ')}">
             <div class="crew" role="img" aria-label="{workers} worker{workers === 1 ? '' : 's'}: {counts.join(', ')}">
-              <span class="segs" aria-hidden="true">
-                {#each crew as s, i (i)}<span class="seg" data-state={s}></span>{/each}
+              <span class="crew-bar" aria-hidden="true">
+                {#each crew.segments as s (s.group)}<span class="cseg" data-group={s.group} style="flex-grow: {s.n}"></span>{/each}
               </span>
-              <span class="crew-n">{workers} worker{workers === 1 ? '' : 's'}</span>
+              <span class="crew-words">
+                {#each crew.attention as a (a.key)}<b class="crew-alert" data-key={a.key}>{a.text}</b>{/each}
+                <span class="crew-n">{crew.line || `${workers} worker${workers === 1 ? '' : 's'}`}</span>
+              </span>
             </div>
           </Tooltip>
         {:else if board}
@@ -1482,20 +1506,34 @@
   .goal-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 2px; }
   .controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px 10px; min-width: 0; }
 
-  /* The crew strip: one segment per worker in its card's colour, the Hive at a glance. */
-  .crew { display: inline-flex; align-items: center; gap: 8px; padding-right: 4px; cursor: default; }
-  .segs { display: inline-flex; gap: 2px; max-width: 220px; flex-wrap: wrap; }
-  .seg { width: 9px; height: 14px; border-radius: 2px; background: color-mix(in srgb, var(--fg-dim) 45%, transparent); }
-  .seg[data-state='working'] { background: var(--green); }
-  .seg[data-state='starting'], .seg[data-state='landing'] { background: color-mix(in srgb, var(--accent) 75%, transparent); }
-  .seg[data-state='needs_you'] { background: var(--orange, #ff9e64); }
-  .seg[data-state='blocked'] { background: var(--yellow); }
-  .seg[data-state='quiet'] { background: transparent; box-shadow: inset 0 0 0 1.5px var(--yellow); }
-  .seg[data-state='failed'] { background: var(--red); }
-  .seg[data-state='reported'] { background: color-mix(in srgb, var(--accent) 35%, transparent); box-shadow: inset 0 0 0 1px var(--accent); }
-  .seg[data-state='idle'], .seg[data-state='suspended'], .seg[data-state='stopped'] { background: transparent; box-shadow: inset 0 0 0 1px var(--fg-dim); }
-  .seg[data-state='landed'], .seg[data-state='retired'] { background: color-mix(in srgb, var(--fg-dim) 25%, transparent); }
-  .crew-n { font-size: 12px; color: var(--fg-dim); white-space: nowrap; }
+  /* The queen's progress estimate, under the goal: the bar, the number, her note, and when. */
+  .progress { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 6px; font-size: 12px; color: var(--fg); min-width: 0; }
+  .progress.none { color: var(--fg-dim); font-style: italic; }
+  .pmeter { display: inline-block; width: 180px; max-width: 40vw; height: 6px; border-radius: 3px; background: color-mix(in srgb, var(--fg-dim) 25%, transparent); overflow: hidden; vertical-align: middle; }
+  .pmeter > span { display: block; height: 100%; border-radius: 3px; background: var(--accent); transition: width 0.4s ease; }
+  .progress.done .pmeter > span { background: var(--green); }
+  .progress.stale .pmeter > span { background: color-mix(in srgb, var(--accent) 45%, transparent); }
+  .ppct { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .pnote { overflow-wrap: anywhere; min-width: 0; }
+  .pwhen { color: var(--fg-dim); font-size: 11px; }
+  .progress.stale .pwhen { color: var(--yellow); }
+  @media (prefers-reduced-motion: reduce) { .pmeter > span { transition: none; } }
+
+  /* The crew gauge (§4.1.1): one bar of four groups, the same size at 4 workers or 180, and words.
+     A group needing a look keeps a visible width however small its share. */
+  .crew { display: inline-flex; align-items: center; gap: 8px; padding-right: 4px; cursor: default; min-width: 0; }
+  .crew-bar { display: inline-flex; gap: 2px; width: 120px; height: 8px; flex: none; }
+  .cseg { flex-basis: 0; min-width: 2px; border-radius: 2px; }
+  .cseg[data-group='landed'] { background: var(--green); }
+  .cseg[data-group='active'] { background: var(--accent); }
+  .cseg[data-group='attention'] { background: var(--orange, #ff9e64); min-width: 6px; }
+  .cseg[data-group='waiting'] { background: color-mix(in srgb, var(--fg-dim) 35%, transparent); }
+  .crew-words { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; font-size: 12px; min-width: 0; }
+  .crew-alert { font-weight: 600; white-space: nowrap; }
+  .crew-alert[data-key='needs_you'] { color: var(--orange, #ff9e64); }
+  .crew-alert[data-key='failed'] { color: var(--red); }
+  .crew-alert[data-key='blocked'], .crew-alert[data-key='quiet'] { color: var(--yellow); }
+  .crew-n { color: var(--fg-dim); white-space: nowrap; }
 
   .status { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px; border-radius: 11px; font-size: 11.5px; font-weight: 500; white-space: nowrap; }
   .status .pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }

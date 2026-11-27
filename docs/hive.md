@@ -576,6 +576,32 @@ This is not an overlay. The Loom left the terminal area because a heavy drawer f
 terminal for paint and keyboard (`docs/loom.md`). A Hive has no visible terminal, so its
 columns are the whole main area, and nothing fights.
 
+#### 4.1.1 Where a Hive stands: the progress estimate and the crew gauge
+
+Built 2026-11-26. The human needs to tell at a glance how far a Hive has come, and a Hive can
+spread to 180 workers, so the header carries two gauges (`lib/hive/progress.ts`):
+
+- **The queen's progress estimate**, under the goal: a bar, her percentage, her one-line note
+  ("Auth and checkout landed; payments in review, then admin") and "Queen's estimate, as of
+  14:32". She sets it with `hiveSetProgress { percent, note }` (`hive/progress.rs`), stored on the
+  Hive as `progress: { percent, note, at }`. It is a **claim, labelled as hers**, never a
+  measure: 100 is still her estimate, and its result tells her to call `hiveFinish`. Only Done
+  says **Complete**, whatever she last set. An estimate older than an hour reads as stale (a
+  dimmed bar, the time in yellow), judged on each board refresh, with no timer of its own. New
+  goal clears it. A Done Hive refuses the tool (it isn't in `DONE_TOOLS`).
+  - **Getting her to keep it up.** Her brief has a Progress section (when to set it, weigh it
+    by work landed and proven against the criteria, not workers started, the note must stand on
+    its own) and step 4 of Starting work sets the first one. A queen briefed before the tool
+    existed never reads that, so the results of her milestone tools (`hiveProposePlan`,
+    `hiveLand`, `hiveLandBranch`, `hiveUndoLand`, `hiveResolve`) carry a `progress` line while her
+    estimate is missing or over 20 minutes old (`progress::reminder`).
+  - Not on the phone yet: `Chat.hive` doesn't carry it (a maiLink wire change, a follow-up).
+- **The crew gauge**, in the top row: one bar in four groups (landed, in flight, needs a look,
+  waiting) and the words "4 landed · 6 in flight · 169 waiting". Anything that needs a look is
+  named apart in colour ("1 needs you", "2 failed", "3 blocked", "3 quiet"), with a minimum
+  width on its bar segment, so one stuck worker among 180 is still seen. It replaced one tile per
+  worker, which past a few dozen was a grid of grey (most of a big Hive is queued).
+
 ### 4.2 The chat column: one component, three places
 
 `FocusView.svelte` today is one 1138-line component holding both the chat list and the open

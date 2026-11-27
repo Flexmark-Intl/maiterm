@@ -559,6 +559,18 @@ export interface Hive {
   /** Earlier goals, oldest first, each archived by New goal under `chapters/<n>/` (n = index + 1).
    *  Absent on a Hive that never had a new goal. */
   chapters?: HiveChapter[];
+  /** The queen's progress estimate (`hiveSetProgress`); absent until she sets one, and after New goal. */
+  progress?: HiveProgress;
+}
+
+/** hive/record.rs `HiveProgress`: the queen's estimate, never a measure (docs/hive.md §4.1.1). */
+export interface HiveProgress {
+  /** 0 to 100. */
+  percent: number;
+  /** One line: what's done and what's next. */
+  note: string;
+  /** When she set it, epoch milliseconds. */
+  at: number;
 }
 
 /** hive/new_goal.rs `HiveChapter`: one finished goal, as New goal archived it. */
