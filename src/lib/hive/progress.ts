@@ -41,7 +41,7 @@ export function progressView(progress: HiveProgress | null | undefined, status: 
 
 /** A card's place in the crew bar. `quiet` is a worker idle past 10 minutes with nothing on its way
  *  (the card's activity tone), whatever its state. */
-export type CrewGroup = 'landed' | 'active' | 'attention' | 'waiting' | 'retired';
+export type CrewGroup = 'landed' | 'active' | 'attention' | 'waiting' | 'undone' | 'retired';
 
 /** A retired worker never landed: the queen gave up on it (stopped, failed, waiting or reported,
  *  `retire.rs` `RETIRABLE`), so it is its own group, never counted as landed. */
@@ -74,30 +74,31 @@ const ATTENTION: readonly { key: CrewAlert; label: string }[] = [
 
 export interface CrewSummary {
   total: number;
-  /** The bar, in order landed → active → attention → waiting → retired; empty groups left out. */
+  /** The bar, in order landed → active → attention → waiting → undone → retired; empty groups left out. */
   segments: { group: CrewGroup; n: number }[];
-  /** "4 landed · 6 in flight · 59 waiting · 2 retired" (empty groups left out). */
+  /** "4 landed · 6 in flight · 59 waiting · 1 undone · 2 retired" (empty groups left out). */
   line: string;
   /** "1 needs you", "2 failed"…: shown apart, coloured. */
   attention: { key: CrewAlert; text: string }[];
 }
 
-/** The crew gauge from each worker's card state, whether it's quiet, and whether its land is
- *  suspect (the card's `qualifier`: it sorts with Needs you, so it is named here too). */
-export function crewSummary(cards: readonly { state: CardStateName; quiet: boolean; suspect?: boolean }[]): CrewSummary {
-  const groups: Record<CrewGroup, number> = { landed: 0, active: 0, attention: 0, waiting: 0, retired: 0 };
+/** The crew gauge from each worker's card state, whether it's quiet, and its land's qualifier (the
+ *  card's): a suspect land sorts with Needs you, so it is named; an undone one was reverted (its
+ *  phase stays landed, `hiveUndoLand` never reopens it), so it is never counted as landed. */
+export function crewSummary(cards: readonly { state: CardStateName; quiet: boolean; suspect?: boolean; undone?: boolean }[]): CrewSummary {
+  const groups: Record<CrewGroup, number> = { landed: 0, active: 0, attention: 0, waiting: 0, undone: 0, retired: 0 };
   const named = new Map<string, number>();
   for (const c of cards) {
-    const base = GROUP[c.state];
+    const base = c.state === 'landed' && c.undone ? 'undone' : GROUP[c.state];
     const key: CrewAlert =
-      c.state === 'landed' && c.suspect ? 'suspect' : c.quiet && (base === 'active' || base === 'waiting') ? 'quiet' : c.state;
+      base === 'landed' && c.suspect ? 'suspect' : c.quiet && (base === 'active' || base === 'waiting') ? 'quiet' : c.state;
     const group = key === 'quiet' || key === 'suspect' ? 'attention' : base;
     groups[group] += 1;
     if (group === 'attention') named.set(key, (named.get(key) ?? 0) + 1);
   }
-  const order: CrewGroup[] = ['landed', 'active', 'attention', 'waiting', 'retired'];
+  const order: CrewGroup[] = ['landed', 'active', 'attention', 'waiting', 'undone', 'retired'];
   const segments = order.filter((g) => groups[g] > 0).map((group) => ({ group, n: groups[group] }));
-  const words: [CrewGroup, string][] = [['landed', 'landed'], ['active', 'in flight'], ['waiting', 'waiting'], ['retired', 'retired']];
+  const words: [CrewGroup, string][] = [['landed', 'landed'], ['active', 'in flight'], ['waiting', 'waiting'], ['undone', 'undone'], ['retired', 'retired']];
   const line = words.filter(([g]) => groups[g] > 0).map(([g, w]) => `${groups[g]} ${w}`).join(' · ');
   const attention = ATTENTION.filter((a) => named.get(a.key)).map((a) => {
     const n = named.get(a.key)!;

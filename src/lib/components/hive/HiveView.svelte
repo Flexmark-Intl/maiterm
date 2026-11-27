@@ -13,7 +13,7 @@
   note, agent state and the activity line) comes live from the stores. A card's newest assets come
   with its record, refetched when the gallery changes (§4.3). The header's top row is the name and goal
   (under it the queen's progress estimate, §4.1.1: her number, her note and when she set it; Complete
-  only once Done), the crew gauge (one bar of four groups and words, naming anything that needs a
+  only once Done), the crew gauge (one bar of groups and words, naming anything that needs a
   look, §4.1.1), the status (what an active Hive is doing: Working, Waiting on you, Stalled? or Idle; Paused; or
   while done its Done time and Report, §11.4), Pause or Resume, Settings, and a ⋯ menu with the
   land log and Delete. Notices (throttled, usage limit, a land undone since Done, a suspect repo)
@@ -491,10 +491,10 @@
     return [...n].sort((a, b) => STATE_ORDER[a[0]] - STATE_ORDER[b[0]]).map(([s, k]) => `${k} ${STATE_LABEL[s].toLowerCase()}`);
   });
   const workers = $derived(board?.workers.length ?? 0);
-  /** The header's crew gauge (§4.1.1): four groups and words, whatever the crew's size. A quiet
+  /** The header's crew gauge (§4.1.1): groups and words, whatever the crew's size. A quiet
    *  worker (idle past 10 minutes with nothing on its way) is named apart from a plain idle one. */
   const crew = $derived(
-    crewSummary(cards.map((c) => ({ state: c.state.state, quiet: c.activity.tone === 'stalled', suspect: c.state.qualifier === 'suspect' }))),
+    crewSummary(cards.map((c) => ({ state: c.state.state, quiet: c.activity.tone === 'stalled', suspect: c.state.qualifier === 'suspect', undone: c.state.qualifier === 'undone' }))),
   );
   /** The queen's estimate (docs/hive.md §4.1.1). Read against the clock on each board refresh, so
    *  an estimate she stopped keeping up turns stale without a timer of its own. */
@@ -1521,7 +1521,7 @@
   .progress.stale .pwhen { color: var(--yellow); }
   @media (prefers-reduced-motion: reduce) { .pmeter > span { transition: none; } }
 
-  /* The crew gauge (§4.1.1): one bar of four groups, the same size at 4 workers or 180, and words.
+  /* The crew gauge (§4.1.1): one bar of groups, the same size at 4 workers or 180, and words.
      A group needing a look keeps a visible width however small its share. */
   .crew { display: inline-flex; align-items: center; gap: 8px; padding-right: 4px; cursor: default; min-width: 0; }
   .crew-bar { display: inline-flex; gap: 2px; width: 120px; height: 8px; flex: none; }
@@ -1530,7 +1530,7 @@
   .cseg[data-group='active'] { background: var(--accent); }
   .cseg[data-group='attention'] { background: var(--orange, #ff9e64); min-width: 6px; }
   .cseg[data-group='waiting'] { background: color-mix(in srgb, var(--fg-dim) 35%, transparent); }
-  .cseg[data-group='retired'] { background: transparent; box-shadow: inset 0 0 0 1px var(--fg-dim); }
+  .cseg[data-group='undone'], .cseg[data-group='retired'] { background: transparent; box-shadow: inset 0 0 0 1px var(--fg-dim); }
   .crew-words { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; font-size: 12px; min-width: 0; }
   .crew-alert { font-weight: 600; white-space: nowrap; }
   .crew-alert[data-key='needs_you'] { color: var(--orange, #ff9e64); }

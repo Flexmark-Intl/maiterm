@@ -70,6 +70,16 @@ describe('crewSummary', () => {
     expect(s.line).toBe('2 landed · 10 retired');
   });
 
+  it('never counts an undone land as landed', () => {
+    const s = crewSummary([{ state: 'landed', quiet: true, undone: true }, ...many('landed', 2)]);
+    expect(s.segments).toEqual([
+      { group: 'landed', n: 2 },
+      { group: 'undone', n: 1 },
+    ]);
+    expect(s.line).toBe('2 landed · 1 undone');
+    expect(s.attention).toEqual([]);
+  });
+
   it('names a suspect land as needing a look', () => {
     const s = crewSummary([{ state: 'landed', quiet: false, suspect: true }, ...many('landed', 3)]);
     expect(s.attention).toEqual([{ key: 'suspect', text: '1 suspect land' }]);
