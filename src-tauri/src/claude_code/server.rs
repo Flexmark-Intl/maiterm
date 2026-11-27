@@ -7336,15 +7336,19 @@ async fn hooks_handler(
         // Antigravity (`agy`) reads injected context from `injectSteps[].systemMessage.systemMessage`
         // on BOTH `SessionStart` (fresh sessions) and `PreInvocation` (`invocationNum == 0`, which
         // covers resumed `agy --conversation` sessions where `SessionStart` never fires, plus
-        // per-turn Browser Link tab updates). Track primed `(tab, session_id)` pairs so full
-        // standing priming is injected once per session per maiTerm run.
+        // post-compaction re-priming and per-turn Browser Link tab updates). Track each primed
+        // `(tab, session_id)` along with the newest `CHECKPOINT` timestamp already primed so full
+        // standing priming is injected once at start/resume AND re-injected after every compaction
+        // (matching Claude Code's `SessionStart` on start/resume/compact).
         if params.get("format").map(String::as_str) == Some("agy") {
             static PRIMED_AGY: std::sync::LazyLock<
-                parking_lot::Mutex<std::collections::HashSet<String>>,
+                parking_lot::Mutex<std::collections::HashMap<String, u64>>,
             > = std::sync::LazyLock::new(Default::default);
 
             let key = format!("{tab}:{session_id}");
             let is_session_start = hook_event_name == "SessionStart";
+            let is_compact_start = is_session_start
+                && event.get("source").and_then(|v| v.as_str()) == Some("compact");
             let is_turn_start = hook_event_name == "PreInvocation"
                 && event.get("invocationNum").and_then(|v| v.as_u64()).unwrap_or(0) == 0;
 
@@ -7352,12 +7356,34 @@ async fn hooks_handler(
                 return axum::Json(serde_json::json!({})).into_response();
             }
 
+            let current_compact_ts = if !session_id.is_empty() {
+                let sid = session_id.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::mailink::transcript::overlord_facts_for(
+                        crate::state::AgentRuntime::Gemini,
+                        &sid,
+                    )
+                    .and_then(|f| f.last_compact_ts)
+                    .unwrap_or(0)
+                })
+                .await
+                .unwrap_or(0)
+            } else {
+                0
+            };
+
             let needs_full_prime = {
                 let mut primed = PRIMED_AGY.lock();
                 if primed.len() > 512 {
                     primed.clear();
                 }
-                primed.insert(key)
+                let prev = primed.get(&key).copied();
+                let reprime = should_reprime_agy(prev, current_compact_ts, is_compact_start);
+                if reprime {
+                    let next_ts = prev.unwrap_or(0).max(current_compact_ts);
+                    primed.insert(key, next_ts);
+                }
+                reprime
             };
 
             if needs_full_prime {
@@ -8458,5 +8484,29 @@ mod tests {
         let pending = state.ide_pending.read();
         assert!(!pending.contains_key("req-drop"), "uncompleted guard must remove pending entry on drop");
         assert!(pending.contains_key("req-keep"), "disarmed guard must leave pending entry alone");
+    }
+
+    #[test]
+    fn agy_reprime_fires_on_first_turn_and_each_new_compaction_only() {
+        // First invocation (fresh or resumed): always primes regardless of prior checkpoint ts.
+        assert!(super::should_reprime_agy(None, 0, false));
+        assert!(super::should_reprime_agy(None, 1_795_000_000_000, false));
+        // Subsequent turns without a newer compaction: do not re-prime.
+        assert!(!super::should_reprime_agy(Some(0), 0, false));
+        assert!(!super::should_reprime_agy(Some(1_795_000_000_000), 1_795_000_000_000, false));
+        // Transient unreadable transcript (current_compact_ts drops back to 0): do not re-prime.
+        assert!(!super::should_reprime_agy(Some(1_795_000_000_000), 0, false));
+        // New CHECKPOINT compaction landed: re-prime!
+        assert!(super::should_reprime_agy(Some(0), 1_795_000_000_000, false));
+        assert!(super::should_reprime_agy(Some(1_795_000_000_000), 1_795_000_005_000, false));
+        // Explicit SessionStart(compact): always re-prime even if CHECKPOINT hasn't flushed yet.
+        assert!(super::should_reprime_agy(Some(1_795_000_000_000), 1_795_000_000_000, true));
+    }
+}
+
+fn should_reprime_agy(prev: Option<u64>, current_compact_ts: u64, is_compact_start: bool) -> bool {
+    match prev {
+        None => true,
+        Some(prev_ts) => is_compact_start || current_compact_ts > prev_ts,
     }
 }

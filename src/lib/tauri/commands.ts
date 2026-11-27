@@ -637,22 +637,24 @@ export interface OverlordTabFacts {
    *  (tracked, empty todos — Claude Code sweeps the files once all tasks are done) from
    *  "never tracked anything" (absent), which otherwise look identical. */
   tracked?: boolean;
-  /** The tab's task list (Claude-only). Read from Claude Code's own task store when
-   *  available — the complete current list — else reconstructed from the transcript tail.
-   *  Empty with `tracked: true` means every task was finished and swept. */
+  /** The tab's runtime task/checklist list (Claude's task store / TodoWrite, or Antigravity's
+   *  `update_steps`). Read from Claude Code's own task store when available — the complete
+   *  current list — else reconstructed from the transcript tail. Empty with `tracked: true`
+   *  means every task was finished and swept. */
   todos?: OverlordTodoItem[];
   /** Where `todos` came from: 'store' is authoritative and complete; 'transcript' is
-   *  whatever fit in the tail window (SSH tabs, whose store lives on the remote host). */
+   *  whatever fit in the tail window (SSH tabs, whose store lives on the remote host, and
+   *  Antigravity `update_steps` checklists). */
   todos_source?: 'store' | 'transcript';
   todos_ts?: number;
 }
 
-/** One TodoWrite item as recorded in the transcript. */
+/** One TodoWrite / update_steps item as recorded in the store or transcript. */
 export interface OverlordTodoItem {
   content: string;
-  status: 'pending' | 'in_progress' | 'completed';
+  status: 'pending' | 'in_progress' | 'completed' | 'dropped';
   activeForm?: string;
-  /** Task store only: waiting on an unfinished dependency (`blockedBy`). */
+  /** Blocked on an unfinished dependency (`blockedBy`) or a failed step. */
   blocked?: boolean;
 }
 /** Batched facts poll; tabs with no resolvable agent session are absent from the map. */

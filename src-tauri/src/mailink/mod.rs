@@ -5526,8 +5526,9 @@ fn persisted_session_for_tab(app: &AppState, tab_id: &str) -> Option<(AgentRunti
     // tabs show the same (possibly someone else's) transcript. The transcript itself names its
     // rightful renderer: Claude's SessionStart hook echoes the hosting tab id on every
     // start/resume/compact, and `agy`'s PreInvocation priming echoes it on the first invocation
-    // for a `(tab, session_id)` in a maiTerm run, so the last marker follows actual usage — the
-    // original keeps rendering until the duplicate resumes the session, then it flips. Unknown
+    // for a `(tab, session_id)` in a maiTerm run and after each `CHECKPOINT` compaction, so the
+    // last marker follows actual usage — the original keeps rendering until the duplicate
+    // resumes the session, then it flips. Unknown
     // host (unlocatable transcript, marker out of tail range, unsupported runtime) → None for
     // every claimant: the snapshot fallback beats rendering someone else's conversation. A LIVE
     // registration (live_session_for_tab, tried before this fn) is unaffected.

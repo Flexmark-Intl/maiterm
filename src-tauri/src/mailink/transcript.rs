@@ -114,11 +114,11 @@ struct TailFacts {
     last_turn_ts: Option<u64>,
     meta: Option<SessionMeta>,
     /// Overlord signals (docs/overlord.md §5). Claude supplies all fields; Antigravity (`agy`)
-    /// supplies `last_commit_ts`, `last_compact_ts`, and `transcript_bytes`; Codex rollouts leave
-    /// commit/todo/compact None.
+    /// supplies `last_commit_ts`, `todos`/`todos_ts` (from `update_steps`), `last_compact_ts`,
+    /// and `transcript_bytes`; Codex rollouts leave commit/todo/compact None.
     /// Unix-ms of the newest confirmed `git commit` (`Bash` on Claude, `run_command` on `agy`).
     last_commit_ts: Option<u64>,
-    /// The newest TodoWrite `input.todos` array (the TodoWrite mirror), + its timestamp.
+    /// The newest runtime checklist array (`TodoWrite` on Claude, `update_steps` on `agy`), + its timestamp.
     todos: Option<Value>,
     todos_ts: Option<u64>,
     /// Unix-ms of the newest compaction boundary (`isCompactSummary` / `compact_boundary` on
@@ -1186,10 +1186,11 @@ pub fn claude_todo_store(session_id: &str) -> Option<Value> {
 }
 
 /// Overlord signals from a session's transcript tail (docs/overlord.md §5): commit
-/// detection + the TodoWrite mirror + compaction boundary + file byte length. Served from the
-/// same (mtime,len)-gated cache as the other tail facts. Claude supplies all fields; Antigravity
-/// (`agy`) supplies commit detection (`last_commit_ts`), compaction detection (`last_compact_ts`),
-/// and `transcript_bytes`; Codex returns only `transcript_bytes`.
+/// detection + runtime checklist mirror + compaction boundary + file byte length. Served from
+/// the same (mtime,len)-gated cache as the other tail facts. Claude supplies all fields;
+/// Antigravity (`agy`) supplies commit detection (`last_commit_ts`), checklist mirroring
+/// (`todos`/`todos_ts` from `update_steps`), compaction detection (`last_compact_ts`), and
+/// `transcript_bytes`; Codex returns only `transcript_bytes`.
 pub struct OverlordTailFacts {
     pub last_commit_ts: Option<u64>,
     pub todos: Option<Value>,
@@ -1343,13 +1344,13 @@ fn extract_host_tab_from_tail(tail: &str) -> Option<String> {
 /// The maiTerm tab id that most recently HOSTED a Claude or Antigravity (`agy`) session, read from
 /// the transcript itself: Claude's SessionStart hook echoes `Your maiTerm tab ID is $MAITERM_TAB_ID`
 /// on every start/resume/compact, and `agy`'s PreInvocation priming echoes the same marker on the
-/// first invocation for a `(tab, session_id)` in a maiTerm run. The LAST valid occurrence names the
-/// tab that most recently ran the session. Used to resolve a CONTESTED session id (tab duplication
-/// copies the var on purpose — reload/fork workflows) to its one rightful renderer: ownership
-/// follows actual usage, and flips to the duplicate once it resumes the session there. `None` if
-/// the transcript can't be located or no marker falls within the scanned tail (a session that's run
-/// a long stretch since its last priming). (mtime, len)-cached — resolution paths hit this per
-/// ticker pass.
+/// first invocation for a `(tab, session_id)` in a maiTerm run and after each `CHECKPOINT`
+/// compaction. The LAST valid occurrence names the tab that most recently ran the session. Used to
+/// resolve a CONTESTED session id (tab duplication copies the var on purpose — reload/fork
+/// workflows) to its one rightful renderer: ownership follows actual usage, and flips to the
+/// duplicate once it resumes the session there. `None` if the transcript can't be located or no
+/// marker falls within the scanned tail (a session that's run a long stretch since its last
+/// priming). (mtime, len)-cached — resolution paths hit this per ticker pass.
 pub(crate) fn session_host_tab(rt: AgentRuntime, session_id: &str) -> Option<String> {
     static HOST_CACHE: std::sync::OnceLock<
         std::sync::Mutex<HashMap<PathBuf, (u64, u64, Option<String>)>>,
@@ -2092,13 +2093,81 @@ fn agy_session_last_turn_ts(session_id: &str) -> Option<u64> {
 }
 
 fn agy_tail_facts(tail: &str) -> TailFacts {
+    let (todos, todos_ts) = agy_todos_from_tail(tail);
     TailFacts {
         last_turn_ts: agy_last_turn_from_tail(tail),
         meta: agy_meta_from_tail(tail),
         last_commit_ts: agy_last_commit_from_tail(tail),
+        todos,
+        todos_ts,
         last_compact_ts: agy_last_compact_from_tail(tail),
         ..TailFacts::default()
     }
+}
+
+/// Extract the newest Antigravity (`agy`) `update_steps` checklist from a transcript tail and
+/// normalize it into the same `[{ content, status, blocked? }]` shape as Claude's `TodoWrite`,
+/// so Overlord's `syncMirrorTasks` mirrors `agy` steps onto the maiTerm task board even when
+/// the agent uses its built-in checklist instead of `createTasks`.
+fn agy_todos_from_tail(tail: &str) -> (Option<Value>, Option<u64>) {
+    for line in tail.lines().rev() {
+        if !line.contains("update_steps\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if v.get("type").and_then(|t| t.as_str()) != Some("PLANNER_RESPONSE") {
+            continue;
+        }
+        let Some(calls) = v.get("tool_calls").and_then(|c| c.as_array()) else {
+            continue;
+        };
+        for call in calls.iter().rev() {
+            let raw_name = call.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let bare = raw_name
+                .rsplit('/')
+                .next()
+                .unwrap_or(raw_name)
+                .rsplit(':')
+                .next()
+                .unwrap_or(raw_name);
+            if bare != "update_steps" {
+                continue;
+            }
+            let Some(args) = call.get("args").map(unquote_agy_args) else { continue };
+            let Some(steps) = args.get("steps").and_then(|s| s.as_array()) else { continue };
+            let mut items: Vec<Value> = Vec::with_capacity(steps.len());
+            for step in steps {
+                let Some(title) = step
+                    .get("title")
+                    .and_then(|t| t.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                else {
+                    continue;
+                };
+                let raw_status = step.get("status").and_then(|s| s.as_str()).unwrap_or("pending");
+                let item = match raw_status {
+                    "done" => json!({ "content": title, "status": "completed" }),
+                    "in_progress" => json!({ "content": title, "status": "in_progress" }),
+                    "skipped" => json!({ "content": title, "status": "dropped" }),
+                    "failed" => json!({ "content": title, "status": "in_progress", "blocked": true }),
+                    _ => json!({ "content": title, "status": "pending" }),
+                };
+                items.push(item);
+            }
+            if items.is_empty() {
+                continue;
+            }
+            let ts = v
+                .get("created_at")
+                .and_then(|t| t.as_str())
+                .map(rfc3339_to_ms)
+                .filter(|&t| t > 0)
+                .map(|t| t as u64);
+            return (Some(Value::Array(items)), ts);
+        }
+    }
+    (None, None)
 }
 
 fn agy_last_compact_from_tail(tail: &str) -> Option<u64> {
@@ -4351,5 +4420,65 @@ mod tests {
             Some("5a64552a-4cc2-4a93-b90e-151249157e0b")
         );
         assert_eq!(extract_host_tab_from_tail("const MARKER = \"maiTerm tab ID is \";"), None);
+    }
+
+    #[test]
+    fn agy_update_steps_mirrors_newest_checklist_into_todos() {
+        let older = json!({
+            "step_index": 5,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "created_at": "2026-11-27T16:10:00Z",
+            "tool_calls": [
+                {
+                    "name": "update_steps",
+                    "args": {
+                        "steps": "[{\"title\":\"Old step\",\"status\":\"pending\"}]"
+                    }
+                }
+            ]
+        });
+        let newer = json!({
+            "step_index": 9,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "created_at": "2026-11-27T16:15:30Z",
+            "tool_calls": [
+                {
+                    "name": "default_api:update_steps",
+                    "args": {
+                        "steps": "[{\"title\":\"Inspect code\",\"status\":\"done\"},{\"title\":\"Apply fix\",\"status\":\"in_progress\"},{\"title\":\"Run tests\",\"status\":\"pending\"},{\"title\":\"Optional cleanup\",\"status\":\"skipped\"},{\"title\":\"Deploy check\",\"status\":\"failed\"},{\"title\":\"   \",\"status\":\"pending\"}]"
+                    }
+                }
+            ]
+        });
+        let empty_call = json!({
+            "step_index": 10,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "created_at": "2026-11-27T16:16:00Z",
+            "tool_calls": [
+                {
+                    "name": "update_steps",
+                    "args": { "steps": "[]" }
+                }
+            ]
+        });
+
+        let tail = [&older, &newer, &empty_call]
+            .iter()
+            .map(|v| serde_json::to_string(v).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let facts = agy_tail_facts(&tail);
+        let todos = facts.todos.expect("update_steps mirrored into todos");
+        let arr = todos.as_array().expect("array");
+        assert_eq!(arr.len(), 5, "blank title skipped, empty newer call ignored: {arr:#?}");
+        assert_eq!(arr[0], json!({ "content": "Inspect code", "status": "completed" }));
+        assert_eq!(arr[1], json!({ "content": "Apply fix", "status": "in_progress" }));
+        assert_eq!(arr[2], json!({ "content": "Run tests", "status": "pending" }));
+        assert_eq!(arr[3], json!({ "content": "Optional cleanup", "status": "dropped" }));
+        assert_eq!(arr[4], json!({ "content": "Deploy check", "status": "in_progress", "blocked": true }));
+        assert_eq!(facts.todos_ts, Some(rfc3339_to_ms("2026-11-27T16:15:30Z") as u64));
     }
 }
