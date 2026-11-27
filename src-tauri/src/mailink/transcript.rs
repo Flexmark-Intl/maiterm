@@ -2135,6 +2135,18 @@ fn agy_todos_from_tail(tail: &str) -> (Option<Value>, Option<u64>) {
             }
             let Some(args) = call.get("args").map(unquote_agy_args) else { continue };
             let Some(steps) = args.get("steps").and_then(|s| s.as_array()) else { continue };
+            let ts = v
+                .get("created_at")
+                .and_then(|t| t.as_str())
+                .map(rfc3339_to_ms)
+                .filter(|&t| t > 0)
+                .map(|t| t as u64);
+            // An explicit empty `steps: []` clears the checklist — return `Some([])` so
+            // `overlord_tab_facts` emits `tracked: true, todos: []` and Overlord closes out
+            // mirrored rows (`closeOutMirrorRows`) instead of resurrecting an older checklist.
+            if steps.is_empty() {
+                return (Some(Value::Array(Vec::new())), ts);
+            }
             let mut items: Vec<Value> = Vec::with_capacity(steps.len());
             for step in steps {
                 let Some(title) = step
@@ -2158,12 +2170,6 @@ fn agy_todos_from_tail(tail: &str) -> (Option<Value>, Option<u64>) {
             if items.is_empty() {
                 continue;
             }
-            let ts = v
-                .get("created_at")
-                .and_then(|t| t.as_str())
-                .map(rfc3339_to_ms)
-                .filter(|&t| t > 0)
-                .map(|t| t as u64);
             return (Some(Value::Array(items)), ts);
         }
     }
@@ -2785,7 +2791,7 @@ fn is_system_noise(text: &str) -> bool {
 /// chrono dependency — the format is fixed, so a tiny civil-days computation suffices.
 pub(crate) fn rfc3339_to_ms(s: &str) -> i64 {
     let bytes = s.as_bytes();
-    if bytes.len() < 19 {
+    if !s.is_ascii() || bytes.len() < 19 {
         return 0;
     }
     let num = |a: usize, b: usize| -> i64 { s[a..b].parse::<i64>().unwrap_or(0) };
@@ -4452,7 +4458,7 @@ mod tests {
                 }
             ]
         });
-        let empty_call = json!({
+        let blank_call = json!({
             "step_index": 10,
             "source": "MODEL",
             "type": "PLANNER_RESPONSE",
@@ -4460,12 +4466,12 @@ mod tests {
             "tool_calls": [
                 {
                     "name": "update_steps",
-                    "args": { "steps": "[]" }
+                    "args": { "steps": "[{\"title\":\"   \",\"status\":\"pending\"}]" }
                 }
             ]
         });
 
-        let tail = [&older, &newer, &empty_call]
+        let tail = [&older, &newer, &blank_call]
             .iter()
             .map(|v| serde_json::to_string(v).unwrap())
             .collect::<Vec<_>>()
@@ -4473,12 +4479,30 @@ mod tests {
         let facts = agy_tail_facts(&tail);
         let todos = facts.todos.expect("update_steps mirrored into todos");
         let arr = todos.as_array().expect("array");
-        assert_eq!(arr.len(), 5, "blank title skipped, empty newer call ignored: {arr:#?}");
+        assert_eq!(arr.len(), 5, "blank title skipped, all-blank malformed call ignored: {arr:#?}");
         assert_eq!(arr[0], json!({ "content": "Inspect code", "status": "completed" }));
         assert_eq!(arr[1], json!({ "content": "Apply fix", "status": "in_progress" }));
         assert_eq!(arr[2], json!({ "content": "Run tests", "status": "pending" }));
         assert_eq!(arr[3], json!({ "content": "Optional cleanup", "status": "dropped" }));
         assert_eq!(arr[4], json!({ "content": "Deploy check", "status": "in_progress", "blocked": true }));
         assert_eq!(facts.todos_ts, Some(rfc3339_to_ms("2026-11-27T16:15:30Z") as u64));
+
+        // An explicit empty `steps: []` clears the checklist rather than resurrecting `newer`.
+        let cleared_call = json!({
+            "step_index": 11,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "created_at": "2026-11-27T16:17:00Z",
+            "tool_calls": [
+                {
+                    "name": "update_steps",
+                    "args": { "steps": "[]" }
+                }
+            ]
+        });
+        let cleared_tail = format!("{tail}\n{}", serde_json::to_string(&cleared_call).unwrap());
+        let cleared_facts = agy_tail_facts(&cleared_tail);
+        assert_eq!(cleared_facts.todos, Some(json!([])));
+        assert_eq!(cleared_facts.todos_ts, Some(rfc3339_to_ms("2026-11-27T16:17:00Z") as u64));
     }
 }

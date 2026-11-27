@@ -7342,7 +7342,7 @@ async fn hooks_handler(
         // (matching Claude Code's `SessionStart` on start/resume/compact).
         if params.get("format").map(String::as_str) == Some("agy") {
             static PRIMED_AGY: std::sync::LazyLock<
-                parking_lot::Mutex<std::collections::HashMap<String, u64>>,
+                parking_lot::Mutex<std::collections::HashMap<String, AgyPrimeState>>,
             > = std::sync::LazyLock::new(Default::default);
 
             let key = format!("{tab}:{session_id}");
@@ -7356,7 +7356,19 @@ async fn hooks_handler(
                 return axum::Json(serde_json::json!({})).into_response();
             }
 
-            let current_compact_ts = if !session_id.is_empty() {
+            // Prefer `compact_at` sent by `agy-hook.sh` directly from the host running `agy`
+            // (so remote SSH tabs re-prime on turn 1 after compaction even without transcript
+            // mirroring). Fall back to local/mirrored `overlord_facts_for` for older shims or
+            // compactions further back than the shim's 256 KiB tail check.
+            let hook_compact_ts = params
+                .get("compact_at")
+                .map(|s| crate::mailink::transcript::rfc3339_to_ms(s))
+                .filter(|&t| t > 0)
+                .map(|t| t as u64)
+                .unwrap_or(0);
+            let current_compact_ts = if hook_compact_ts > 0 {
+                hook_compact_ts
+            } else if !session_id.is_empty() {
                 let sid = session_id.clone();
                 tokio::task::spawn_blocking(move || {
                     crate::mailink::transcript::overlord_facts_for(
@@ -7378,11 +7390,9 @@ async fn hooks_handler(
                     primed.clear();
                 }
                 let prev = primed.get(&key).copied();
-                let reprime = should_reprime_agy(prev, current_compact_ts, is_compact_start);
-                if reprime {
-                    let next_ts = prev.unwrap_or(0).max(current_compact_ts);
-                    primed.insert(key, next_ts);
-                }
+                let (reprime, next_state) =
+                    update_agy_prime_state(prev, current_compact_ts, is_compact_start);
+                primed.insert(key, next_state);
                 reprime
             };
 
@@ -8488,25 +8498,106 @@ mod tests {
 
     #[test]
     fn agy_reprime_fires_on_first_turn_and_each_new_compaction_only() {
+        let t1 = 1_795_000_000_000_u64;
+        let t2 = 1_795_000_005_000_u64;
+        let t3 = 1_795_000_010_000_u64;
+
         // First invocation (fresh or resumed): always primes regardless of prior checkpoint ts.
-        assert!(super::should_reprime_agy(None, 0, false));
-        assert!(super::should_reprime_agy(None, 1_795_000_000_000, false));
+        let (reprime, st0) = super::update_agy_prime_state(None, 0, false);
+        assert!(reprime);
+        let (reprime, st1) = super::update_agy_prime_state(None, t1, false);
+        assert!(reprime);
+
         // Subsequent turns without a newer compaction: do not re-prime.
-        assert!(!super::should_reprime_agy(Some(0), 0, false));
-        assert!(!super::should_reprime_agy(Some(1_795_000_000_000), 1_795_000_000_000, false));
-        // Transient unreadable transcript (current_compact_ts drops back to 0): do not re-prime.
-        assert!(!super::should_reprime_agy(Some(1_795_000_000_000), 0, false));
-        // New CHECKPOINT compaction landed: re-prime!
-        assert!(super::should_reprime_agy(Some(0), 1_795_000_000_000, false));
-        assert!(super::should_reprime_agy(Some(1_795_000_000_000), 1_795_000_005_000, false));
-        // Explicit SessionStart(compact): always re-prime even if CHECKPOINT hasn't flushed yet.
-        assert!(super::should_reprime_agy(Some(1_795_000_000_000), 1_795_000_000_000, true));
+        assert!(!super::update_agy_prime_state(Some(st0), 0, false).0);
+        assert!(!super::update_agy_prime_state(Some(st1), t1, false).0);
+
+        // Transient unreadable transcript (current_compact_ts drops back to 0): do not re-prime,
+        // and preserve the high-water compact_ts.
+        let (reprime, st1_keep) = super::update_agy_prime_state(Some(st1), 0, false);
+        assert!(!reprime);
+        assert_eq!(st1_keep.compact_ts, t1);
+
+        // New CHECKPOINT compaction landed: re-prime once, then stay quiet.
+        let (reprime, st_after_t1) = super::update_agy_prime_state(Some(st0), t1, false);
+        assert!(reprime);
+        assert!(!super::update_agy_prime_state(Some(st_after_t1), t1, false).0);
+
+        // Explicit SessionStart(compact) arriving BEFORE CHECKPOINT flushes: re-primes once,
+        // then absorbs the flushed CHECKPOINT on the next PreInvocation without double-priming,
+        // and still re-primes on a subsequent compaction t3.
+        let (reprime, st_pending) = super::update_agy_prime_state(Some(st1), t1, true);
+        assert!(reprime);
+        let (reprime, st_absorbed) = super::update_agy_prime_state(Some(st_pending), t2, false);
+        assert!(!reprime, "flushed CHECKPOINT after SessionStart(compact) must not double-prime");
+        assert_eq!(st_absorbed.compact_ts, t2);
+        let (reprime, _) = super::update_agy_prime_state(Some(st_absorbed), t3, false);
+        assert!(reprime, "later compaction after absorption must re-prime");
+
+        // If a normal turn runs after SessionStart(compact) without seeing a newer CHECKPOINT,
+        // `absorb_next_compact` disarms so a later unrelated compaction is not swallowed.
+        let (reprime, st_disarmed) = super::update_agy_prime_state(Some(st_pending), t1, false);
+        assert!(!reprime);
+        let (reprime, _) = super::update_agy_prime_state(Some(st_disarmed), t3, false);
+        assert!(reprime, "later compaction after disarmed absorb flag must re-prime");
     }
 }
 
-fn should_reprime_agy(prev: Option<u64>, current_compact_ts: u64, is_compact_start: bool) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AgyPrimeState {
+    compact_ts: u64,
+    absorb_next_compact: bool,
+}
+
+fn update_agy_prime_state(
+    prev: Option<AgyPrimeState>,
+    current_compact_ts: u64,
+    is_compact_start: bool,
+) -> (bool, AgyPrimeState) {
     match prev {
-        None => true,
-        Some(prev_ts) => is_compact_start || current_compact_ts > prev_ts,
+        None => (
+            true,
+            AgyPrimeState {
+                compact_ts: current_compact_ts,
+                absorb_next_compact: is_compact_start && current_compact_ts == 0,
+            },
+        ),
+        Some(p) if is_compact_start => (
+            true,
+            AgyPrimeState {
+                compact_ts: p.compact_ts.max(current_compact_ts),
+                // If CHECKPOINT hasn't flushed to disk yet, absorb the single newer timestamp
+                // when it appears on the next PreInvocation so we don't double-prime.
+                absorb_next_compact: current_compact_ts <= p.compact_ts,
+            },
+        ),
+        Some(p) if current_compact_ts > p.compact_ts => {
+            if p.absorb_next_compact {
+                (
+                    false,
+                    AgyPrimeState {
+                        compact_ts: current_compact_ts,
+                        absorb_next_compact: false,
+                    },
+                )
+            } else {
+                (
+                    true,
+                    AgyPrimeState {
+                        compact_ts: current_compact_ts,
+                        absorb_next_compact: false,
+                    },
+                )
+            }
+        }
+        Some(p) => (
+            false,
+            AgyPrimeState {
+                compact_ts: p.compact_ts,
+                // A normal turn ran without a flushed CHECKPOINT appearing — disarm so a later
+                // unrelated compaction is never swallowed.
+                absorb_next_compact: false,
+            },
+        ),
     }
 }

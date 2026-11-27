@@ -92,11 +92,29 @@ reply=""
 if [ -n "$port" ] && [ "$port" != "0" ] && [ -n "$token" ]; then
   # Pipe payload over stdin (`--data-binary @-`) rather than argv to avoid Linux 128 KiB E2BIG.
   if [ "$event_kind" = "prime_capable" ]; then
+    # Report the newest CHECKPOINT timestamp from the transcript on THIS host so remote SSH
+    # sessions re-prime on the first turn after compaction (even when Overlord/maiLink mirroring
+    # is disabled or still catching up).
+    compact_param=""
+    cid="$(printf '%s' "$payload" | LC_ALL=C sed -nE 's/.*"conversationId"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -n 1)"
+    if [ -n "$cid" ]; then
+      case "$cid" in
+        */*|*\\*|*..*) ;;
+        *)
+          tfile="$HOME/.gemini/antigravity-cli/brain/${cid}/.system_generated/logs/transcript.jsonl"
+          [ -f "$tfile" ] || tfile="$HOME/.gemini/antigravity-cli/brain/${cid}/.system_generated/logs/transcript_full.jsonl"
+          if [ -f "$tfile" ]; then
+            c_at="$(tail -c 262144 "$tfile" 2>/dev/null | LC_ALL=C grep -aE '"type"[[:space:]]*:[[:space:]]*"CHECKPOINT"' | tail -n 1 | LC_ALL=C sed -nE 's/.*"created_at"[[:space:]]*:[[:space:]]*"([0-9T:Z.-]+)".*/\1/p')"
+            [ -n "$c_at" ] && compact_param="&compact_at=${c_at}"
+          fi
+          ;;
+      esac
+    fi
     reply="$(printf '%s' "$payload" | curl -fsS -m 3 \
       -H "Authorization: Bearer ${token}" \
       -H "Content-Type: application/json" \
       --data-binary @- \
-      "http://127.0.0.1:${port}/hooks?runtime=gemini&tab_id=${tab}&prime=1&format=agy" \
+      "http://127.0.0.1:${port}/hooks?runtime=gemini&tab_id=${tab}&prime=1&format=agy${compact_param}" \
       2>/dev/null)" || reply=""
   else
     printf '%s' "$payload" | curl -fsS -m 2 \
