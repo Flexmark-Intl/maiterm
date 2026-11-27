@@ -188,8 +188,9 @@ fn is_attn(key: &str) -> bool {
 /// every resumed tab rang "Agent finished".
 ///
 /// Nothing real is suppressed. A genuine finish happens on a tab whose row already existed (the
-/// agent had to be running to finish anything), and a compaction writes Active onto an existing
-/// row, so it is not a registration edge either. The one case this does swallow is a row dropped
+/// agent had to be running to finish anything), and a compaction updates an existing row (keeping
+/// an idle compaction idle, and a mid-turn compaction Active), so it is not a registration edge
+/// either. The one case this does swallow is a row dropped
 /// and recreated mid-work — which arrives as "the process just came up" and should stay silent.
 ///
 /// Sibling guard: `tab_looks_live_despite_no_session` reports "active" rather than "idle" for the

@@ -3940,17 +3940,50 @@ fn refuse_on_inferred_identity(
 /// this event could only name its tab through `initSession`, which happens mid-turn — on a restore
 /// the hook carried no tab id and the handler returned before touching state. Now the SessionStart
 /// command hook names its tab, so this fires for every tab at process start, and an unconditional
-/// `Active` reported a whole restored window as busy. Compaction is the exception: it fires DURING
-/// a turn, so the agent really is working, and anything else would be undone by the next tool
-/// event. Mirrors the desktop verdict in `agentState.svelte.ts` — change the two together.
-fn session_start_state(source: &str) -> crate::state::app_state::AgentSessionState {
+/// `Active` reported a whole restored window as busy.
+///
+/// Compaction (`source == "compact"`) fires in two distinct situations:
+/// - Mid-turn auto-compaction (`prior == Active` and not a manual `/compact`): the turn resumes
+///   after compaction and will end with a `Stop` hook, so stay `Active`.
+/// - Idle compaction (manual `/compact`, Overlord checkpoint `/compact`, or Claude's idle
+///   auto-compaction): NO `Stop` hook follows `SessionStart(compact)`. Unconditionally returning
+///   `Active` stranded maiLink and the desktop dot in "Working" until the next prompt. Preserve
+///   idle (`Stopped` / `WaitingInput`), and for a manual `/compact` always resolve to idle even
+///   if a stale `Active` lingered (e.g. an Esc-cancelled turn or a background subagent tool).
+///   When no prior row exists, default to `WaitingInput` — a mid-turn continuation immediately
+///   flips back to `Active` on its next tool, whereas `Active` would stick forever on idle.
+///
+/// Mirrors the desktop verdict in `agentState.svelte.ts` — change the two together.
+fn session_start_state(
+    source: &str,
+    prior: Option<crate::state::app_state::AgentSessionState>,
+    manual_compact: bool,
+) -> crate::state::app_state::AgentSessionState {
     use crate::state::app_state::AgentSessionState;
     if source == "compact" {
-        AgentSessionState::Active
+        if manual_compact {
+            return match prior {
+                Some(AgentSessionState::Stopped) => AgentSessionState::Stopped,
+                _ => AgentSessionState::WaitingInput,
+            };
+        }
+        match prior {
+            Some(AgentSessionState::Active) => AgentSessionState::Active,
+            Some(AgentSessionState::Stopped) => AgentSessionState::Stopped,
+            Some(AgentSessionState::WaitingInput)
+            | Some(AgentSessionState::WaitingPermission)
+            | None => AgentSessionState::WaitingInput,
+        }
     } else {
         AgentSessionState::WaitingInput
     }
 }
+
+/// Sessions currently running a `PreCompact(trigger="manual")` compaction. A manual `/compact`
+/// only runs at an idle prompt and sends no `Stop` afterwards, so `SessionStart(source="compact")`
+/// consumes this to guarantee an idle verdict even if `agent_sessions` still held a stale `Active`.
+static COMPACT_MANUAL_SESSIONS: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
 
 /// Session IDs seeded provisionally by `seed_session_from_mcp_init` (before any real hook
 /// arrived for them). Tracked separately from `connection_id` so `drop_mcp_seeded_placeholders`
@@ -6276,9 +6309,12 @@ async fn hooks_handler(
             // Read up here because the session row below needs it: `source` is what separates a
             // process that just came up from a compaction that fires mid-turn.
             let source = event.get("source").and_then(|v| v.as_str()).unwrap_or("");
+            let mut started_active = false;
 
             if !session_id.is_empty() && !tab_id.is_empty() {
                 use crate::state::app_state::{AgentSessionInfo, AgentSessionState};
+                let manual_compact = source == "compact"
+                    && COMPACT_MANUAL_SESSIONS.lock().remove(&session_id);
                 let mut sessions = srv.state.agent_sessions.write();
                 if matches!(runtime, crate::state::AgentRuntime::Gemini | crate::state::AgentRuntime::Codex) {
                     drop_mcp_seeded_placeholders(&mut sessions, &tab_id, &session_id);
@@ -6306,11 +6342,13 @@ async fn hooks_handler(
                     }
                 }
                 // A restart left maiLink reporting "Working" for a whole window of agents
-                // sitting at an empty prompt. The desktop tab dot had the identical bug from
-                // the identical cause and was fixed in 8340e90 — but that fix landed in the
-                // Svelte mirror only, and maiLink reads THIS row. See session_start_state.
-                let started = session_start_state(source);
-                // A compaction fires on a LIVE row mid-turn, so a result this session already
+                // sitting at an empty prompt, and an idle compaction (manual `/compact`, Overlord
+                // checkpoint, or Claude's idle auto-compaction) did the same because no Stop hook
+                // follows `SessionStart(compact)`. See `session_start_state`.
+                let prior_state = sessions.get(&session_id).map(|s| s.state);
+                let started = session_start_state(source, prior_state, manual_compact);
+                started_active = matches!(started, AgentSessionState::Active);
+                // A compaction fires on a LIVE row, so a result this session already
                 // produced must survive it — this insert replaces the row wholesale.
                 let had_result = sessions.get(&session_id).is_some_and(|s| s.finished_a_turn);
                 sessions.insert(
@@ -6450,6 +6488,7 @@ async fn hooks_handler(
                 "tab_id": if tab_id.is_empty() { None } else { Some(&tab_id) },
                 "cwd": event.get("cwd"),
                 "source": source,
+                "active": started_active,
             }));
 
             // The SessionStart hook carries both the resumable session id and (since the
@@ -6504,6 +6543,7 @@ async fn hooks_handler(
                 };
                 if may_clear {
                     MCP_SEEDED_SESSIONS.lock().remove(&session_id);
+                    COMPACT_MANUAL_SESSIONS.lock().remove(&session_id);
                     sessions.remove(&session_id).map(|s| s.tab_id)
                 } else {
                     log::info!("Claude hook: session {} ended, but it is claimed by more than one tab{} — leaving the mapping to the live claimant",
@@ -6648,6 +6688,7 @@ async fn hooks_handler(
             // Update session state to stopped + clear tool
             let mut subagent_gate = false;
             if !session_id.is_empty() {
+                COMPACT_MANUAL_SESSIONS.lock().remove(&session_id);
                 use crate::state::app_state::AgentSessionState;
                 let mut sessions = srv.state.agent_sessions.write();
                 if let Some(session) = sessions.get_mut(&session_id) {
@@ -6780,6 +6821,7 @@ async fn hooks_handler(
 
             // Update session state to processing
             if !session_id.is_empty() {
+                COMPACT_MANUAL_SESSIONS.lock().remove(&session_id);
                 use crate::state::app_state::AgentSessionState;
                 let mut sessions = srv.state.agent_sessions.write();
                 if let Some(session) = sessions.get_mut(&session_id) {
@@ -6825,6 +6867,7 @@ async fn hooks_handler(
             .or(tab_id_from_param);
 
             if !session_id.is_empty() {
+                COMPACT_MANUAL_SESSIONS.lock().remove(&session_id);
                 use crate::state::app_state::AgentSessionState;
                 let mut sessions = srv.state.agent_sessions.write();
                 if let Some(session) = sessions.get_mut(&session_id) {
@@ -6954,6 +6997,9 @@ async fn hooks_handler(
             let mut approvals_open = 0usize;
             let mut gate_held = false;
             if !session_id.is_empty() {
+                if crate::claude_code::gate::agent_key(&event).is_empty() {
+                    COMPACT_MANUAL_SESSIONS.lock().remove(&session_id);
+                }
                 use crate::state::app_state::AgentSessionState;
                 let mut sessions = srv.state.agent_sessions.write();
                 if let Some(session) = sessions.get_mut(&session_id) {
@@ -7183,6 +7229,13 @@ async fn hooks_handler(
                         }))
                         .into_response();
                     }
+                }
+            }
+            if !session_id.is_empty() && hook_event_name == "PreCompact" {
+                if trigger == "manual" {
+                    COMPACT_MANUAL_SESSIONS.lock().insert(session_id.clone());
+                } else {
+                    COMPACT_MANUAL_SESSIONS.lock().remove(&session_id);
                 }
             }
             emit_dual(&srv.app_handle, "agent-hook-pre-compact", "claude-hook-pre-compact", serde_json::json!({
@@ -8008,14 +8061,46 @@ mod tests {
         // a whole window at once on a maiTerm restart, which is what made every maiLink chat
         // read "Working" while its agent sat at an empty prompt.
         for source in ["startup", "resume", "clear", ""] {
-            assert!(
-                matches!(session_start_state(source), AgentSessionState::WaitingInput),
-                "source {source:?} means the agent is up and waiting, not mid-turn"
-            );
+            for prior in [None, Some(AgentSessionState::Active), Some(AgentSessionState::Stopped)] {
+                assert!(
+                    matches!(session_start_state(source, prior, false), AgentSessionState::WaitingInput),
+                    "source {source:?} means the agent is up and waiting, not mid-turn"
+                );
+            }
         }
-        // Compaction is the one source that fires DURING a turn — the agent really is working,
-        // and calling it idle would only be undone by the next tool event.
-        assert!(matches!(session_start_state("compact"), AgentSessionState::Active));
+        // Mid-turn auto-compaction: the session was Active and will continue working until Stop.
+        assert!(matches!(
+            session_start_state("compact", Some(AgentSessionState::Active), false),
+            AgentSessionState::Active
+        ));
+        // Idle auto-compaction (Claude's idle compaction) or compaction with no prior row: no
+        // Stop follows SessionStart(compact), so it must NOT flip to Active.
+        assert!(matches!(
+            session_start_state("compact", Some(AgentSessionState::Stopped), false),
+            AgentSessionState::Stopped
+        ));
+        assert!(matches!(
+            session_start_state("compact", Some(AgentSessionState::WaitingInput), false),
+            AgentSessionState::WaitingInput
+        ));
+        assert!(matches!(
+            session_start_state("compact", Some(AgentSessionState::WaitingPermission), false),
+            AgentSessionState::WaitingInput
+        ));
+        assert!(matches!(
+            session_start_state("compact", None, false),
+            AgentSessionState::WaitingInput
+        ));
+        // Manual `/compact` always runs at an idle prompt and sends no Stop afterwards — even if
+        // a stale Active lingered (e.g. Esc-cancelled turn or a background subagent tool).
+        assert!(matches!(
+            session_start_state("compact", Some(AgentSessionState::Active), true),
+            AgentSessionState::WaitingInput
+        ));
+        assert!(matches!(
+            session_start_state("compact", Some(AgentSessionState::Stopped), true),
+            AgentSessionState::Stopped
+        ));
     }
 
     #[test]

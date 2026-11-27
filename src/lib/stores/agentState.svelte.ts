@@ -215,9 +215,12 @@ function createAgentStateStore() {
   // When the main turn last closed (Stop, or a manual compaction finishing): a turn queued behind
   // it starts a few ms later, and its UserPromptSubmit reaches us later still.
   const mainTurnClosedAt = new Map<string, number>();
-  // A compaction holds the turn open; this is whether one was open before it. Auto-compaction
-  // runs mid-turn (still open after), a manual /compact at idle sends no Stop (closed after).
+  // A compaction holds the turn open while it runs; this is whether a turn was open before it
+  // (mid-turn auto-compaction stays open; manual `/compact` and idle auto-compaction send no
+  // Stop after SessionStart(compact), so they return to idle). `readBeforeCompact` preserves an
+  // unread idle dot across an idle compaction so a completed turn isn't silently marked read.
   const openBeforeCompact = new Map<string, boolean>();
+  const readBeforeCompact = new Map<string, boolean>();
   function closeMainTurn(tabId: string) {
     mainTurnOpen.set(tabId, false);
     mainTurnClosedAt.set(tabId, Date.now());
@@ -527,29 +530,39 @@ function createAgentStateStore() {
         });
       });
 
-      const u1 =await listen<{ session_id: string; tab_id: string; source?: string; runtime?: string; cwd?: unknown }>('agent-hook-session-start', (e) => {
-        const { session_id, tab_id, source, cwd } = e.payload;
+      const u1 = await listen<{ session_id: string; tab_id: string; source?: string; runtime?: string; cwd?: unknown; active?: boolean }>('agent-hook-session-start', (e) => {
+        const { session_id, tab_id, source, cwd, active } = e.payload;
         if (!tab_id) return;
         const runtime = runtimeOf(e.payload);
         // A session that has just STARTED is up and waiting for input — idle, not active.
-        // This used to be unreachable on a restore (the hook could not name its tab, so the
-        // handler returned above) and only fired via initSession, which happens mid-turn, so
-        // 'active' was right. Now the SessionStart hook names its tab, so every restored tab
-        // hit this: a window full of blue pulsing "Claude is working" dots for agents sitting
-        // at an empty prompt. Compaction is the exception — it fires DURING a turn, so the
-        // agent really is working, and the next tool event would only have to undo it.
-        const started: AgentState = source === 'compact' ? 'active' : 'idle';
+        // Compaction (`source === 'compact'`) fires either mid-turn (auto-compaction while active)
+        // or at an idle prompt (manual `/compact`, Overlord checkpoint, or Claude's idle
+        // auto-compaction). Only a mid-turn compaction continues working afterwards; an idle
+        // compaction sends no Stop hook, so setting 'active' there stranded the tab dot and
+        // Overlord in busy until the next prompt. Mirrors `session_start_state` in server.rs.
+        let started: AgentState;
+        let preserveUnread = false;
         if (source === 'compact') {
-          // Back to what it was before the compaction (unknown: assume still open).
           const was = openBeforeCompact.get(tab_id);
+          const wasRead = readBeforeCompact.get(tab_id);
           openBeforeCompact.delete(tab_id);
-          if (was === false) closeMainTurn(tab_id);
-          else mainTurnOpen.set(tab_id, true);
+          readBeforeCompact.delete(tab_id);
+          // Always drop PreCompact's COMPACT_STALE_MS timer even if `setState` short-circuits
+          // (e.g. staying 'active' after a mid-turn compaction).
+          clearStaleTimer(tab_id);
+          const stillOpen = was !== undefined ? was : (active === true);
+          started = stillOpen ? 'active' : 'idle';
+          preserveUnread = !stillOpen && wasRead === false;
+          if (stillOpen) mainTurnOpen.set(tab_id, true);
+          else closeMainTurn(tab_id);
         } else {
+          started = 'idle';
           mainTurnOpen.set(tab_id, false);
         }
-        // Only a compaction is activity; a start or resume is not (see `updatedAt`).
-        setState(tab_id, session_id, started, undefined, undefined, runtime, source === 'compact', started === 'idle');
+        // Only a mid-turn compaction is activity; a start, resume, or idle compaction is not
+        // (see `updatedAt`). `freshStart` is false on idle compaction so an already-idle tab keeps
+        // its stretch, while an active→idle return clears the temporary compaction state.
+        setState(tab_id, session_id, started, undefined, undefined, runtime, started === 'active', started === 'idle' && source !== 'compact');
         // Keep the folder the hook reported (the field is the runtime's, so check its type).
         if (typeof cwd === 'string' && cwd) {
           const s = sessions.get(tab_id);
@@ -559,8 +572,9 @@ function createAgentStateStore() {
         }
         // ...and mark that idle READ: "idle + unread" is the finished-something-you-have-not-
         // seen signal that fills the tab dot and drives the workspace all-done indicator.
-        // Coming up at startup is not a result the human missed.
-        if (started === 'idle') markReadInternal(tab_id);
+        // Coming up at startup (or finishing an idle compaction on an already-read tab) is not a
+        // new result the human missed; preserve unread if an idle tab already held one.
+        if (started === 'idle' && !preserveUnread) markReadInternal(tab_id);
         // Tag the tab's runtime live so getTabRuntime (bridge adapter, resume) is right
         // even when the agent never calls initSession (e.g. Codex via the hook path).
         workspacesStore.setTabRuntimeLocal(tab_id, runtime);
@@ -575,6 +589,7 @@ function createAgentStateStore() {
         mainTurnOpen.delete(tab_id);
         mainTurnClosedAt.delete(tab_id);
         openBeforeCompact.delete(tab_id);
+        readBeforeCompact.delete(tab_id);
         setVariable(tab_id, 'claudeAction', '');
         logInfo(`Claude state: session ended → tab ${tab_id.slice(0, 8)} removed`);
       });
@@ -583,6 +598,8 @@ function createAgentStateStore() {
       const u3 = await listen<{ session_id: string; tab_id: string | null; runtime?: string; gate_held?: boolean; error?: string | null }>('agent-hook-stop', (e) => {
         const { session_id, tab_id, gate_held, error: failure } = e.payload;
         if (!tab_id) return;
+        openBeforeCompact.delete(tab_id);
+        readBeforeCompact.delete(tab_id);
         closeMainTurn(tab_id);
         // A background subagent's permission prompt outlives the parent's turn ending
         // (claude_code/gate.rs). Rust keeps the tab in permission; so does this mirror.
@@ -602,6 +619,8 @@ function createAgentStateStore() {
       const u4 = await listen<{ session_id: string; tab_id: string | null; runtime?: string }>('agent-hook-user-prompt', (e) => {
         const { session_id, tab_id } = e.payload;
         if (!tab_id) return;
+        openBeforeCompact.delete(tab_id);
+        readBeforeCompact.delete(tab_id);
         mainTurnOpen.set(tab_id, true);
         clearAsks(tab_id);
         // Clear tool state — new prompt means previous operation ended (possibly interrupted)
@@ -759,17 +778,23 @@ function createAgentStateStore() {
       // PreCompact: context compaction starting. The agent is working from here — a manual
       // `/compact` fires no UserPromptSubmit, so without this the tab read `idle` for the whole
       // compaction (~60s observed) and anything gated on idle typed into it: Overlord's
-      // driveTab, once a slash send stopped holding the tab's outstanding slot. The
-      // SessionStart(compact) that ends it already sets `active`; this just starts it on time.
-      // Only on the START: Codex's PostCompact arrives on this same event, and marking a tab
-      // working after its compaction finished would leave it reading busy.
+      // driveTab, once a slash send stopped holding the tab's outstanding slot. When compaction
+      // ends, SessionStart(compact) (Claude) or PostCompact (Codex) restores the pre-compaction
+      // state (`active` if mid-turn, `idle` if it started from an idle prompt).
       const u9 = await listen<{ session_id: string; tab_id: string | null; trigger: string; runtime?: string; event?: string }>('agent-hook-pre-compact', (e) => {
-        const { session_id, tab_id, event } = e.payload;
+        const { session_id, tab_id, trigger, event } = e.payload;
         if (!tab_id) return;
         const runtime = runtimeOf(e.payload);
         if (event === 'PreCompact') {
           // The compaction is the agent's turn as far as anything typed is concerned.
-          openBeforeCompact.set(tab_id, mainTurnOpen.get(tab_id) ?? false);
+          // Manual `/compact` always starts from an idle prompt; auto-compaction may be mid-turn
+          // or idle. Preserve whether an idle tab already had an unread result.
+          const cur = sessions.get(tab_id);
+          const wasOpen = trigger === 'manual'
+            ? false
+            : (mainTurnOpen.get(tab_id) ?? (cur?.state === 'active'));
+          openBeforeCompact.set(tab_id, wasOpen);
+          readBeforeCompact.set(tab_id, cur?.state === 'idle' ? (cur.read ?? true) : true);
           mainTurnOpen.set(tab_id, true);
           setState(tab_id, session_id, 'active', undefined, undefined, runtime);
           // A compaction that fails or is cancelled with Esc sends nothing after it — no
@@ -781,12 +806,27 @@ function createAgentStateStore() {
             staleTimers.delete(tab_id);
             const s = sessions.get(tab_id);
             if (s?.sessionId === session_id && s.state === 'active' && !s.toolName) {
+              const wasRead = readBeforeCompact.get(tab_id);
               openBeforeCompact.delete(tab_id);
+              readBeforeCompact.delete(tab_id);
               closeMainTurn(tab_id);
               setState(tab_id, session_id, 'idle', undefined, undefined, runtime);
-              markReadInternal(tab_id);
+              if (wasRead !== false) markReadInternal(tab_id);
             }
           }, COMPACT_STALE_MS));
+        } else if (event === 'PostCompact') {
+          // Codex ends compaction with PostCompact (no SessionStart(compact)). Clear the
+          // temporary compaction busy state immediately when compaction started from idle.
+          const was = openBeforeCompact.get(tab_id);
+          const wasRead = readBeforeCompact.get(tab_id);
+          openBeforeCompact.delete(tab_id);
+          readBeforeCompact.delete(tab_id);
+          clearStaleTimer(tab_id);
+          if (was === false) {
+            closeMainTurn(tab_id);
+            setState(tab_id, session_id, 'idle', undefined, undefined, runtime, false, false);
+            if (wasRead !== false) markReadInternal(tab_id);
+          }
         }
       });
       unlisteners.push(u9);
