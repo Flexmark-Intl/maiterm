@@ -31,9 +31,12 @@
     onsettled?: () => void;
     /** Set while the panel shows a workspace other than the active one: the way back. */
     back?: { name: string; onclick: () => void } | null;
+    /** A form (add, edit, import, Run on) opened or closed: the sidebar holds the panel on this
+     *  workspace while one is open, so a workspace switch doesn't unmount it mid-typing. */
+    onformchange?: (open: boolean) => void;
   }
 
-  let { workspace, expanded, ontoggle, onsettled, back = null }: Props = $props();
+  let { workspace, expanded, ontoggle, onsettled, back = null, onformchange }: Props = $props();
 
   // A queued run's row is the run queue's, never a service here (it reaches the mirror only on
   // a window reload mid-run).
@@ -48,6 +51,14 @@
   let importing = $state(false);
   /** "Other branch…": the picker over every branch Rust listed. */
   let picking = $state<{ service: Service; from: string; targets: CopyTarget[] } | null>(null);
+
+  const formOpen = $derived(!!editing || adding || importing || !!picking);
+  $effect(() => {
+    const open = formOpen;
+    untrack(() => onformchange?.(open));
+  });
+  // Unmounted with a form open (the panel closed by other means): let the hold go.
+  $effect(() => () => { untrack(() => onformchange?.(false)); });
 
   /** Re-render uptime once a second while anything is running. */
   let now = $state(Date.now());

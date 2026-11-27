@@ -5,6 +5,8 @@
     action: () => void;
     disabled?: boolean;
     separator?: boolean;
+    /** Shown in red: the item destroys something (it should still ask before it does). */
+    danger?: boolean;
     /** Opens a flyout on hover instead of acting; `action` is not called. An empty list
      *  shows the item disabled. */
     submenu?: MenuItem[];
@@ -174,6 +176,7 @@
         <button
           class="menu-item"
           class:disabled={item.disabled || emptySub}
+          class:danger={item.danger}
           class:open={openSub?.index === i}
           onclick={(e) => handleItemClick(item, i, e.currentTarget)}
           onmouseenter={(e) => showSub(item, i, e.currentTarget)}
@@ -242,6 +245,11 @@
 
   .menu-label {
     flex: 1;
+  }
+
+  .menu-item.danger:not(:disabled) { color: var(--red); }
+  .menu-item.danger:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--red) 18%, transparent);
   }
 
   .menu-item.open:not(:disabled) {

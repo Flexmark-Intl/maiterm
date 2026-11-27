@@ -28,6 +28,7 @@
   import HiveCreateSheet from '$lib/components/hive/HiveCreateSheet.svelte';
   import StackSection from '$lib/components/stack/StackSection.svelte';
   import StackDots from '$lib/components/stack/StackDots.svelte';
+  import WorkspaceDeleteConfirm from './WorkspaceDeleteConfirm.svelte';
   import { stackStore } from '$lib/stores/stack.svelte';
   import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
   import { error as logError } from '@tauri-apps/plugin-log';
@@ -262,15 +263,8 @@
     await workspacesStore.createWorkspace(`Workspace ${count}`);
   }
 
-  let confirmingDeleteId = $state<string | null>(null);
-
-  function handleDeleteWorkspace(id: string, e: MouseEvent) {
-    e.stopPropagation();
-    confirmingDeleteId = id;
-  }
-
+  /** Delete one workspace that is already suspended (the confirmation suspends it first). */
   async function doDeleteWorkspace(id: string) {
-    confirmingDeleteId = null;
     if (workspacesStore.workspaces.length > 1) {
       await workspacesStore.deleteWorkspace(id);
     } else {
@@ -279,11 +273,6 @@
       await commands.resetWindow();
       workspacesStore.reset();
     }
-  }
-
-  async function handleSuspendWorkspace(id: string, e: MouseEvent) {
-    e.stopPropagation();
-    await workspacesStore.suspendWorkspace(id);
   }
 
   async function handleSuspendAllOthers(e: MouseEvent) {
@@ -311,7 +300,7 @@
 
   function handlePointerDown(e: PointerEvent, workspaceId: string) {
     if (e.button !== 0 || editingId === workspaceId) return;
-    if ((e.target as HTMLElement).closest('.tooltip-wrapper, .confirm-delete, .confirm-cancel')) return;
+    if ((e.target as HTMLElement).closest('.tooltip-wrapper')) return;
     pendingDragWorkspaceId = workspaceId;
     dragStartX = e.clientX;
     dragStartY = e.clientY;
@@ -485,21 +474,30 @@
   /** A workspace with an empty stack has no panel to add from; the row's menu asks for
    *  one here so the panel mounts and can open its modal. */
   let addingStackFor = $state<string | null>(null);
+  /** Set while one of the panel's forms (add, edit, import, Run on) is open: the panel stays on
+   *  that workspace until it closes, so a workspace switch can't unmount the form under the
+   *  human's typing. */
+  let stackPanelHeld = $state<string | null>(null);
+  // A suspended workspace's stack shows too: its services can't start, but they can be read,
+  // edited and added to, as they always could.
   const stackPanelWorkspace = $derived.by(() => {
-    const id = stackPanelFor ?? workspacesStore.activeWorkspaceId;
+    const id = stackPanelHeld ?? stackPanelFor ?? workspacesStore.activeWorkspaceId;
     const ws = workspacesStore.workspaces.find((w) => w.id === id);
-    if (!ws || ws.overlord || ws.suspended) return null;
-    return stackStore.services(ws.id).length > 0 || addingStackFor === ws.id ? ws : null;
+    if (!ws || ws.overlord) return null;
+    return stackStore.services(ws.id).length > 0 || addingStackFor === ws.id || stackPanelHeld === ws.id ? ws : null;
   });
   /** Show a workspace's stack in the panel (its row's dots; the menu's Add / Import). */
   function showStack(workspaceId: string) {
     stackPanelFor = workspaceId === workspacesStore.activeWorkspaceId ? null : workspaceId;
     stackPanelOpen = true;
   }
-  function addToStack(workspaceId: string, how: 'add' | 'import') {
+  async function addToStack(workspaceId: string, how: 'add' | 'import') {
     addingStackFor = workspaceId;
     showStack(workspaceId);
-    requestAnimationFrame(() => { if (how === 'add') stackSection?.openAdd(); else stackSection?.openImport(); });
+    // Once the panel has mounted (or re-keyed) on that workspace: a DOM update, not a frame,
+    // so it doesn't wait on a window that isn't being painted.
+    await tick();
+    if (how === 'add') stackSection?.openAdd(); else stackSection?.openImport();
   }
   let workspaceMenu = $state<{ x: number; y: number; workspaceId: string } | null>(null);
   /** The workspace the Share dialog is open for (docs/workspace-share.md §3). */
@@ -529,28 +527,47 @@
     // Any copy, on any checkout (docs/hive.md §6.9): Stop stack stops them all.
     const anyLive = stackStore.anyLive(workspaceId);
     const run = (label: string, p: Promise<unknown>) => p.catch((e) => logError(`stack: ${label}: ${e}`));
-    const muted = !!workspacesStore.workspaces.find((w) => w.id === workspaceId)?.muted;
+    const ws = workspacesStore.workspaces.find((w) => w.id === workspaceId);
+    const muted = !!ws?.muted;
+    const sep: MenuItem = { label: '', separator: true, action: () => {} };
     return [
+      { label: 'Rename', action: () => { if (ws) void startEditing(ws.id, ws.name); } },
+      ws?.suspended
+        ? { label: 'Resume workspace', action: () => run('resume', handleItemClick(workspaceId)) }
+        : { label: 'Suspend workspace', action: () => run('suspend', workspacesStore.suspendWorkspace(workspaceId)) },
+      // Overlord exemption (docs/overlord.md §11). A Hive's tabs are never the engine's anyway
+      // (docs/hive.md §7.3), so it isn't offered there; but one already set (before "Make this
+      // a Hive", say) still turns off its watch scripts, stack tools and follow-up relaunches,
+      // so it stays clearable.
+      ...(preferencesStore.overlordEnabled && ws && !ws.overlord && (!ws.hive || ws.overlord_exempt)
+        ? [{
+            label: ws.overlord_exempt ? 'Supervise with Overlord again' : 'Exempt from Overlord',
+            action: () => run('exempt', workspacesStore.setWorkspaceOverlordExempt(workspaceId, !ws.overlord_exempt)),
+          }]
+        : []),
       // Mute (docs/mute.md): nothing from any tab in it notifies — toast, OS, sound, phone push.
       { label: muted ? 'Unmute notifications' : 'Mute notifications', action: () => run(muted ? 'unmute' : 'mute', workspacesStore.setWorkspaceMuted(workspaceId, !muted)) },
-      { label: '', separator: true, action: () => {} },
-      { label: 'Start stack', disabled: services.length === 0, action: () => run('start stack', stackStore.startStack(workspaceId)) },
-      { label: 'Stop stack', disabled: !anyLive, action: () => run('stop stack', stackStore.stopStack(workspaceId)) },
-      { label: 'Restart stack', disabled: !anyLive, action: () => run('restart stack', stackStore.stopStack(workspaceId).then(() => stackStore.startStack(workspaceId))) },
-      { label: '', separator: true, action: () => {} },
-      { label: 'Add service…', action: () => addToStack(workspaceId, 'add') },
-      { label: 'Import from project…', action: () => addToStack(workspaceId, 'import') },
-      { label: '', separator: true, action: () => {} },
-      workspacesStore.workspaces.find((w) => w.id === workspaceId)?.bridge_all
-        ? { label: 'Disable mesh', action: () => run('disable mesh', agentMeshStore.setMeshEnabled(workspaceId, false)) }
-        : { label: 'Enable mesh…', action: async () => {
-            // The setup modal opens the cockpit on success, and the cockpit shows the ACTIVE
-            // workspace — so switch first, as the MESH badge does.
-            if (workspaceId !== workspacesStore.activeWorkspaceId) await handleItemClick(workspaceId);
-            window.dispatchEvent(new CustomEvent('open-mesh-setup', { detail: workspaceId }));
-          } },
-      ...meshLinkItems(workspaceId),
-      { label: '', separator: true, action: () => {} },
+      sep,
+      { label: 'Stack', action: () => {}, submenu: [
+        { label: 'Start stack', disabled: services.length === 0, action: () => run('start stack', stackStore.startStack(workspaceId)) },
+        { label: 'Stop stack', disabled: !anyLive, action: () => run('stop stack', stackStore.stopStack(workspaceId)) },
+        { label: 'Restart stack', disabled: !anyLive, action: () => run('restart stack', stackStore.stopStack(workspaceId).then(() => stackStore.startStack(workspaceId))) },
+        sep,
+        { label: 'Add service…', action: () => addToStack(workspaceId, 'add') },
+        { label: 'Import from project…', action: () => addToStack(workspaceId, 'import') },
+      ] },
+      { label: 'Mesh', action: () => {}, submenu: [
+        ws?.bridge_all
+          ? { label: 'Disable mesh', action: () => run('disable mesh', agentMeshStore.setMeshEnabled(workspaceId, false)) }
+          : { label: 'Enable mesh…', action: async () => {
+              // The setup modal opens the cockpit on success, and the cockpit shows the ACTIVE
+              // workspace — so switch first, as the mesh glyph does.
+              if (workspaceId !== workspacesStore.activeWorkspaceId) await handleItemClick(workspaceId);
+              window.dispatchEvent(new CustomEvent('open-mesh-setup', { detail: workspaceId }));
+            } },
+        ...meshLinkItems(workspaceId),
+      ] },
+      sep,
       workspaceMoveItem(moveTargets, workspaceId),
       { label: 'Share workspace…', action: () => { shareExportFor = workspaceId; } },
       { label: 'Move project…', action: async () => {
@@ -562,7 +579,17 @@
         }
       } },
       ...hiveItems(workspaceId),
+      sep,
+      { label: 'Delete workspace…', danger: true, action: () => askDelete(workspaceId) },
     ];
+  }
+
+  /** The hold-to-delete confirmation, anchored under the row it deletes. */
+  let deleteFor = $state<{ workspaceId: string; anchor: DOMRect } | null>(null);
+  function askDelete(workspaceId: string) {
+    const row = workspaceListEl?.querySelector<HTMLElement>(`.workspace-item[data-workspace-id="${workspaceId}"]`);
+    if (!row) return;
+    deleteFor = { workspaceId, anchor: row.getBoundingClientRect() };
   }
 
   /** Linked meshes (docs/mesh-workspace.md §17): "Link mesh with ›" any other workspace in
@@ -603,9 +630,12 @@
   let moveTargets = $state<MoveTargetWindow[] | null>(null);
   function openWorkspaceMenu(e: MouseEvent, workspaceId: string) {
     e.preventDefault();
+    openWorkspaceMenuAt(e.clientX, e.clientY, workspaceId);
+  }
+  function openWorkspaceMenuAt(x: number, y: number, workspaceId: string) {
     moveTargets = null;
     commands.listMoveTargets().then((t) => { moveTargets = t; }).catch((err) => logError(`listMoveTargets: ${err}`));
-    workspaceMenu = { x: e.clientX, y: e.clientY, workspaceId };
+    workspaceMenu = { x, y, workspaceId };
   }
 
   // Counts what is ON THE DECK, not what the agent has yet to read. `read` is the Overlord
@@ -766,13 +796,22 @@
         data-workspace-id={workspace.id}
         onclick={() => handleItemClick(workspace.id)}
         oncontextmenu={(e) => openWorkspaceMenu(e, workspace.id)}
-        ondblclick={() => { if (!confirmingDeleteId) startEditing(workspace.id, workspace.name); }}
-        onpointerdown={(e) => { if (!confirmingDeleteId) handlePointerDown(e, workspace.id); }}
+        ondblclick={() => startEditing(workspace.id, workspace.name)}
+        onpointerdown={(e) => handlePointerDown(e, workspace.id)}
         onpointermove={handlePointerMove}
         onpointerup={handlePointerUp}
         role="button"
         tabindex="0"
-        onkeydown={(e) => e.key === 'Enter' && handleItemClick(workspace.id)}
+        onkeydown={(e) => {
+          if (e.target !== e.currentTarget) return;
+          if (e.key === 'Enter') handleItemClick(workspace.id);
+          // The menu from the keyboard, as everywhere on macOS and Windows.
+          else if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+            e.preventDefault();
+            const r = e.currentTarget.getBoundingClientRect();
+            openWorkspaceMenuAt(r.left + 24, r.bottom, workspace.id);
+          }
+        }}
       >
         {#if editingId === workspace.id}
           <!-- svelte-ignore a11y_autofocus -->
@@ -803,21 +842,27 @@
                 <StatusDot color="green" tooltip="Claude finished" />
               {:else if wsClaude === 'idle-read'}
                 <StatusDot color="green" hollow tooltip="Claude finished (seen)" />
-              {:else if workspace.id === workspacesStore.activeWorkspaceId}
-                >
               {:else if wsActivity}
                 <StatusDot color="dim" />
               {/if}
             </span>
           {/if}
-          {#if confirmingDeleteId === workspace.id}
-            <button class="confirm-delete" onclick={(e) => { e.stopPropagation(); doDeleteWorkspace(workspace.id); }}>Delete?</button>
-            <button class="confirm-cancel" onclick={(e) => { e.stopPropagation(); confirmingDeleteId = null; }}>Cancel</button>
-          {:else}
-            <span class="workspace-name">{workspace.name}</span>
+          <!-- Fixed columns, the same on every row: status · name · stack · flags · kind. Every
+               action is in the right-click menu, so nothing appears or moves under the pointer. -->
+          <span class="workspace-name">{workspace.name}</span>
+          <!-- Flags sit left of the dots in one right-aligned column, so the dots end at the same
+               x on every row without a column reserved for flags most rows don't have. -->
+          <span class="ws-signals">
+            {#if workspace.overlord_exempt}
+              <!-- Always shown while set: an exemption you can't see is one you forget you set,
+                   and then wonder why the fleet is missing a workspace (docs/overlord.md §11). -->
+              <Tooltip text="Exempt from Overlord. Right-click → Supervise with Overlord again">
+                <span class="ws-flag exempt"><Icon name="eye-off" size={11} /></span>
+              </Tooltip>
+            {/if}
             {#if workspace.muted}
               <Tooltip text="Muted: no tab here sends notifications. Right-click → Unmute notifications">
-                <span class="ws-muted"><Icon name="bell-off" size={11} /></span>
+                <span class="ws-flag"><Icon name="bell-off" size={11} /></span>
               </Tooltip>
             {/if}
             <StackDots
@@ -825,58 +870,26 @@
               shown={stackPanelOpen && stackPanelWorkspace?.id === workspace.id}
               onclick={() => showStack(workspace.id)}
             />
-            {#if workspace.bridge_all}
-              <button
-                class="mesh-badge"
-                title="Mesh Workspace — open cockpit (⌘⇧M)"
-                aria-label="Open mesh cockpit"
-                onclick={(e) => { e.stopPropagation(); if (workspace.id !== workspacesStore.activeWorkspaceId) handleItemClick(workspace.id); window.dispatchEvent(new CustomEvent('open-mesh-cockpit')); }}
-              >{agentMeshStore.isLinkedMesh(workspace.id) ? 'MESH ⇄' : 'MESH'}</button>
-            {/if}
+          </span>
+          <span class="ws-kind">
             {#if workspace.hive}
               <!-- Not a button: opening the workspace already opens its Hive (docs/hive.md §4.1). -->
               <Tooltip text="Hive: a coordinator and its workers">
-                <span class="hive-badge">HIVE</span>
+                <span class="ws-glyph hive"><Icon name="hive" size={12} /></span>
+              </Tooltip>
+            {:else if workspace.bridge_all}
+              {@const linked = agentMeshStore.isLinkedMesh(workspace.id)}
+              <Tooltip text={`${linked ? 'Linked mesh' : 'Mesh workspace'}: open the cockpit (${modSymbol}⇧M)`}>
+                <button
+                  type="button"
+                  class="ws-glyph mesh"
+                  class:linked
+                  aria-label="Open mesh cockpit"
+                  onclick={(e) => { e.stopPropagation(); if (workspace.id !== workspacesStore.activeWorkspaceId) handleItemClick(workspace.id); window.dispatchEvent(new CustomEvent('open-mesh-cockpit')); }}
+                ><Icon name={linked ? 'mesh-linked' : 'mesh'} size={12} /></button>
               </Tooltip>
             {/if}
-            <!-- A Hive's tabs are never the engine's anyway (docs/hive.md §7.3), so it isn't
-                 offered there; but one already set (before "Make this a Hive", say) still turns
-                 off its watch scripts, stack tools and follow-up relaunches, so it stays shown
-                 and clearable. -->
-            {#if preferencesStore.overlordEnabled && !workspace.overlord && (!workspace.hive || workspace.overlord_exempt)}
-              <!-- Overlord exemption for the whole workspace (docs/overlord.md §11). Stays
-                   visible while exempt, not hover-only: an exemption you can't see is one
-                   you forget you set, and then wonder why the fleet is missing a workspace. -->
-              <IconButton
-                tooltip={workspace.overlord_exempt ? 'Exempt from Overlord — click to supervise again' : 'Exempt this workspace from Overlord'}
-                class="workspace-close-btn {workspace.overlord_exempt ? 'ws-exempt-on' : ''}"
-                active={!!workspace.overlord_exempt}
-                style="--icon-btn-hover: var(--bg-dark)"
-                onclick={(e) => { e.stopPropagation(); workspacesStore.setWorkspaceOverlordExempt(workspace.id, !workspace.overlord_exempt); }}
-              >
-                <Icon name="eye-off" size={10} />
-              </IconButton>
-            {/if}
-            {#if workspace.suspended}
-              <IconButton
-                tooltip="Delete workspace"
-                class="workspace-close-btn"
-                style="--icon-btn-hover: var(--bg-dark)"
-                onclick={(e) => handleDeleteWorkspace(workspace.id, e)}
-              >
-                &times;
-              </IconButton>
-            {:else}
-              <IconButton
-                tooltip="Suspend workspace"
-                class="workspace-close-btn"
-                style="--icon-btn-hover: var(--bg-dark)"
-                onclick={(e) => handleSuspendWorkspace(workspace.id, e)}
-              >
-                <Icon name="pause" size={10} />
-              </IconButton>
-            {/if}
-          {/if}
+          </span>
         {/if}
       </div>
     {/snippet}
@@ -915,6 +928,7 @@
         expanded={stackPanelOpen}
         ontoggle={() => { stackPanelOpen = !stackPanelOpen; }}
         onsettled={() => { if (addingStackFor === panelWs.id) addingStackFor = null; }}
+        onformchange={(open) => { stackPanelHeld = open ? panelWs.id : null; }}
         back={stackPanelFor && activeWs && !activeWs.overlord && stackStore.services(activeWs.id).length > 0
           ? { name: activeWs.name, onclick: () => { stackPanelFor = null; } }
           : null}
@@ -922,6 +936,19 @@
     {/key}
   {/if}
 
+  {#if deleteFor}
+    {@const target = workspacesStore.workspaces.find((w) => w.id === deleteFor?.workspaceId)}
+    {#if target}
+      {#key target.id}
+        <WorkspaceDeleteConfirm
+          workspace={target}
+          anchor={deleteFor.anchor}
+          remove={doDeleteWorkspace}
+          onclose={() => { deleteFor = null; }}
+        />
+      {/key}
+    {/if}
+  {/if}
   {#if workspaceMenu}
     <ContextMenu items={workspaceMenuItems(workspaceMenu.workspaceId)} x={workspaceMenu.x} y={workspaceMenu.y} onclose={() => (workspaceMenu = null)} />
   {/if}
@@ -1284,15 +1311,47 @@
     white-space: nowrap;
   }
 
+  /* The same columns on every row — status · name · flags and stack dots · kind — so each kind
+     of signal sits in the same place down the list and nothing reflows on hover. */
   .workspace-item {
-    display: flex;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto 18px;
     align-items: center;
-    /* Less on the right: the last button's own 22px box already pads its 10px icon. */
-    padding: 8px 10px 8px 16px;
+    padding: 6px 10px 6px 16px;
+    min-height: 32px;
+    box-sizing: border-box;
     cursor: pointer;
     transition: background 0.1s;
-    gap: 8px;
+    column-gap: 6px;
   }
+  .workspace-item .edit-input { grid-column: 1 / -1; }
+
+  .ws-signals, .ws-kind {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+  }
+  .ws-signals { gap: 4px; }
+  .ws-flag { display: flex; color: var(--fg-dim); }
+  .ws-flag.exempt { color: var(--yellow); }
+
+  .ws-glyph {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: none;
+    color: var(--fg-dim);
+  }
+  .ws-glyph.mesh { cursor: pointer; }
+  .ws-glyph.mesh:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 10%, transparent); }
+  .ws-glyph.mesh.linked { color: var(--cyan, var(--accent)); }
+  .ws-glyph.hive { color: var(--yellow, #e0af68); }
+  .ws-glyph:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
   .workspace-item:hover {
     background: var(--bg-light);
@@ -1353,47 +1412,10 @@
   }
 
   .workspace-name {
-    flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .ws-muted {
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    margin-left: 4px;
-    color: var(--fg-dim);
-  }
-
-  .mesh-badge {
-    flex-shrink: 0;
-    font-size: 0.55rem;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    line-height: 1;
-    padding: 2px 4px;
-    border-radius: 3px;
-    border: none;
-    cursor: pointer;
-    color: var(--bg-dark);
-    background: var(--accent);
-    opacity: 0.85;
-  }
-  .mesh-badge:hover { opacity: 1; }
-  /* The mesh tag's shape, in the yellow of honey so the two read apart at a glance. */
-  .hive-badge {
-    flex-shrink: 0;
-    font-size: 0.55rem;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    line-height: 1;
-    padding: 2px 4px;
-    border-radius: 3px;
-    color: var(--bg-dark);
-    background: var(--yellow, #e0af68);
-    opacity: 0.85;
   }
 
   .tab-count-badge {
@@ -1440,47 +1462,8 @@
     border-color: var(--fg-dim);
   }
 
-  .confirm-delete, .confirm-cancel {
-    font-size: 0.846rem;
-    padding: 2px 8px;
-    border: none;
-    border-radius: 3px;
-    cursor: pointer;
-    transition: background 0.1s;
-    -webkit-app-region: no-drag;
-  }
-
-  .confirm-delete {
-    color: #f7768e;
-    background: color-mix(in srgb, #f7768e 15%, transparent);
-  }
-
-  .confirm-delete:hover {
-    background: color-mix(in srgb, #f7768e 30%, transparent);
-  }
-
-  .confirm-cancel {
-    color: var(--fg);
-    background: var(--bg-dark);
-  }
-
-  .confirm-cancel:hover {
-    background: var(--bg-medium);
-  }
-
-  .workspace-item :global(.workspace-close-btn) {
-    opacity: 0;
-    flex-shrink: 0;
-  }
-
-  .workspace-item:hover :global(.workspace-close-btn),
-  .workspace-item.active :global(.workspace-close-btn),
-  .workspace-item :global(.workspace-close-btn.ws-exempt-on) {
-    opacity: 1;
-  }
-
   .edit-input {
-    flex: 1;
+    min-width: 0;
     background: var(--bg-dark);
   }
 

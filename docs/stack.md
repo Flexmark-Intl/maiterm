@@ -33,7 +33,7 @@ Workspace.stack[]                  ← source of truth (a workspace IS a project
   ├─ Service tabs                  ← one live tab per running service, shell intact
   ├─ MCP: listStack / *Service / updateService / waitForService   ← agents, every runtime
   ├─ Priming line at SessionStart  ← "this workspace runs: web (ready :5173), api (crashed)"
-  ├─ Sidebar section + rollup dot  ← humans
+  ├─ Sidebar stack panel + row dots ← humans
   ├─ System triggers               ← readiness / port capture on the service tab
   ├─ Overlord                      ← one consumer: service_crashed → Restart
   └─ maiLink                       ← deferred (§10)
@@ -340,21 +340,27 @@ the reason **not** to implement `start` through the auto-resume path.
 
 ## 7. UI
 
-**Sidebar.** A collapsible **Stack** section under the workspace row (the workstream rail
-is the pattern): one line per service — status dot, name, `:port` when known, uptime.
-Click → show it in the console drawer, click again → hide. Right-click → Start/Restart ·
-Stop · Show/Hide console · Edit… · Remove. `ContextMenu.svelte` already existed as a shared component
-(`TerminalTabs.svelte` uses it); the sidebar simply had never used it.
+**Sidebar stack panel** (2026-11-27; before that, a collapsible section under each workspace
+row, which pushed the rows below it down under the pointer). ONE panel at the foot of the
+sidebar shows one workspace's stack: the active workspace's, or the one whose row dots were
+clicked (with "Back to <active>") until the active workspace changes. It is sized to its rows
+up to ~40% of the sidebar, the rows scrolling inside it; its header names the workspace and
+says "2 of 5 running", with a collapse chevron and `+` (Add service…). One line per copy of
+each service — status dot, name, `:port` when known, uptime. Click → show it in the console
+drawer, click again → hide. Right-click → Start/Restart · Stop · Show/Hide console · Run on ▸ ·
+Edit… · Remove. While one of its forms is open the panel stays on that workspace, so a
+workspace switch can't unmount it mid-typing. A suspended workspace's stack shows too (read,
+edit, add; nothing starts).
 
-**Rollup dot on the workspace row**, batch semantics like the Claude indicator: green when
-every `auto_start` service is ready/running, amber (pulsing) while any is starting, amber
-hollow when some are up and some never started (`partial`), red if any is crashed, none when
-the stack is empty or fully stopped. `rollupStatus` in `stack/model.ts`, tested.
+**Dots on the workspace row** (`StackDots.svelte`): one per row the panel would show, in its
+order — green up, amber starting, red crashed, hollow stopped. From seven on they become a
+fixed-width bar with a segment each, so a big stack never widens the row and a crashed one
+still shows. The tooltip lists every row; a click shows that stack in the panel.
 
-**Workspace row menu** (right-click the row — no `⋯` glyph, the row is crowded enough): Start
-stack · Stop stack · Restart stack · Add service… · Import from project… (§8). This is how a
-workspace with an empty stack gets its first service; the section itself only renders once
-there is something in it (or the menu just asked for it).
+**Workspace row menu** (right-click the row): Stack ▸ Start stack · Stop stack · Restart stack ·
+Add service… · Import from project… (§8). This is how a workspace with an empty stack gets its
+first service; the panel only shows a workspace with something in it (or that the menu just
+asked to add to).
 
 **Tab strip — service tabs are not in it** (changed 2026-09-15; v1 shipped them as ordinary
 tabs and that was wrong). A service tab is created in the background (`createTab({

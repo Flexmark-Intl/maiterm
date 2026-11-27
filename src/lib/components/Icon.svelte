@@ -1,5 +1,5 @@
 <script lang="ts">
-  type IconName = 'trash' | 'notes' | 'eye' | 'eye-off' | 'pencil' | 'list' | 'lanes' | 'archive' | 'word-wrap' | 'settings' | 'help' | 'bug' | 'lightbulb' | 'pause' | 'bolt' | 'resume' | 'pdf' | 'image' | 'file' | 'diff' | 'restore' | 'close' | 'duplicate' | 'check' | 'cross' | 'warning' | 'circle' | 'circle-outline' | 'plus' | 'arrow-right' | 'search' | 'pin' | 'clock' | 'bell-off' | 'browser' | 'folder' | 'folder-open' | 'chevron' | 'new-file' | 'new-folder' | 'collapse-all' | 'refresh' | 'more' | 'terminal';
+  type IconName = 'trash' | 'notes' | 'eye' | 'eye-off' | 'pencil' | 'list' | 'lanes' | 'archive' | 'word-wrap' | 'settings' | 'help' | 'bug' | 'lightbulb' | 'pause' | 'bolt' | 'resume' | 'pdf' | 'image' | 'file' | 'diff' | 'restore' | 'close' | 'duplicate' | 'check' | 'cross' | 'warning' | 'circle' | 'circle-outline' | 'plus' | 'arrow-right' | 'search' | 'pin' | 'clock' | 'bell-off' | 'browser' | 'folder' | 'folder-open' | 'chevron' | 'new-file' | 'new-folder' | 'collapse-all' | 'refresh' | 'more' | 'terminal' | 'mesh' | 'mesh-linked' | 'hive';
 
   interface Props {
     name: IconName;
@@ -21,6 +21,15 @@
 {:else if name === 'bell-off'}
   <!-- A bell, struck through like eye-off: muted (docs/mute.md). -->
   <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11.5V7a4 4 0 0 1 8 0v4.5l1.5 1.5h-11L4 11.5Z"/><path d="M6.5 14.5a1.5 1.5 0 0 0 3 0"/><line x1="2" y1="14" x2="14" y2="2"/></svg>
+{:else if name === 'mesh'}
+  <!-- Three agents, each joined to the others: a mesh workspace. -->
+  <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h8l-4 7Z"/><circle cx="4" cy="5" r="1.7" fill="currentColor"/><circle cx="12" cy="5" r="1.7" fill="currentColor"/><circle cx="8" cy="12" r="1.7" fill="currentColor"/></svg>
+{:else if name === 'mesh-linked'}
+  <!-- The mesh, joined to a fourth (hollow) node: a mesh linked with another. -->
+  <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 5H9l-3.25 6.5Z"/><path d="M9 5l3.5 3.6"/><circle cx="2.5" cy="5" r="1.5" fill="currentColor"/><circle cx="9" cy="5" r="1.5" fill="currentColor"/><circle cx="5.75" cy="11.5" r="1.5" fill="currentColor"/><circle cx="13.5" cy="9.8" r="1.6"/></svg>
+{:else if name === 'hive'}
+  <!-- A honeycomb cell: a Hive workspace. -->
+  <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.8l5.4 3.1v6.2L8 14.2l-5.4-3.1V4.9Z"/></svg>
 {:else if name === 'browser'}
   <!-- A browser window: title bar and a page. The tab-strip mark for linked Chrome tabs. -->
   <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><line x1="1.5" y1="6" x2="14.5" y2="6"/><circle cx="3.75" cy="4.25" r="0.4" fill="currentColor"/><circle cx="5.5" cy="4.25" r="0.4" fill="currentColor"/></svg>
