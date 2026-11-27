@@ -85,6 +85,21 @@
       </div>
     </div>
 
+    {#if preview}
+      <div class="options">
+        <label class="check">
+          <input type="checkbox" bind:checked={deleteGallery} disabled={deleting} />
+          <span>Also delete the gallery ({preview.gallery_files} asset{preview.gallery_files === 1 ? '' : 's'}, {formatBytes(preview.gallery_bytes)})</span>
+        </label>
+        {#if preview.memory}
+          <label class="check">
+            <input type="checkbox" bind:checked={deleteMemory} disabled={deleting} />
+            <span>Also delete the shared memory ({preview.memory.files} file{preview.memory.files === 1 ? '' : 's'}, files you wrote there included)</span>
+          </label>
+        {/if}
+      </div>
+    {/if}
+
     <div class="body">
       {#if readError}
         <p class="error" role="alert">Couldn't read what the Hive holds: {readError}</p>
@@ -122,16 +137,6 @@
             <p class="quiet">Nothing: no worktree holds uncommitted or untracked work.</p>
           {/if}
         </section>
-        <label class="check">
-          <input type="checkbox" bind:checked={deleteGallery} disabled={deleting} />
-          <span>Also delete the gallery ({preview.gallery_files} asset{preview.gallery_files === 1 ? '' : 's'}, {formatBytes(preview.gallery_bytes)})</span>
-        </label>
-        {#if preview.memory}
-          <label class="check">
-            <input type="checkbox" bind:checked={deleteMemory} disabled={deleting} />
-            <span>Also delete the shared memory ({preview.memory.files} file{preview.memory.files === 1 ? '' : 's'}, files you wrote there included)</span>
-          </label>
-        {/if}
         {#if removed.length}
           <section>
             <h4>Removed</h4>
@@ -177,6 +182,7 @@
   .header { border-bottom: 1px solid var(--bg-light); padding: 12px 14px 10px; }
   .title { color: var(--fg); font-size: 1rem; font-weight: 600; overflow-wrap: anywhere; }
   .subtitle { color: var(--fg-dim); font-size: 0.8rem; line-height: 1.4; margin-top: 3px; }
+  .options { border-bottom: 1px solid var(--bg-light); display: flex; flex-direction: column; gap: 8px; padding: 10px 14px; }
 
   .body { display: flex; flex-direction: column; gap: 12px; overflow-y: auto; padding: 14px; }
   section { display: flex; flex-direction: column; gap: 4px; }
