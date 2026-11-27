@@ -348,6 +348,8 @@ pub(crate) fn apply_new_goal(h: &mut Hive, chapter: HiveChapter, spec: &NewGoalS
     h.criteria.clear();
     h.criteria_confirm = CRITERIA_NEEDED.to_string();
     h.criteria_key.clear();
+    // The new goal starts with no estimate: the old goal's 90% would read as this one's.
+    h.progress = None;
 }
 
 /// `chapters/<n>/chapter.json` and copies of the goal's brief: written first, and again on a

@@ -322,6 +322,7 @@ fn the_record_becomes_the_new_goal_and_keeps_the_rest() {
         h.criteria_key = "k".into();
         h.done_stale = "L-1/web".into();
         h.cap = 7;
+        h.progress = Some(crate::hive::record::HiveProgress { percent: 90, note: "almost".into(), at: 1 });
     });
     let before = rig.hive();
     rig.finish_record("2026-10-20T00:00:00.000Z", &[]);
@@ -341,6 +342,7 @@ fn the_record_becomes_the_new_goal_and_keeps_the_rest() {
     assert_eq!(h.status, STATUS_ACTIVE);
     assert!(h.done_at.is_none() && h.done_stale.is_empty() && h.paused_by.is_empty());
     assert!(h.criteria.is_empty() && h.criteria_key.is_empty());
+    assert_eq!(h.progress, None, "the old goal's estimate isn't this goal's");
     assert_eq!(h.criteria_confirm, CRITERIA_NEEDED);
     assert!(h.criteria_unconfirmed(), "no worker starts before the human confirms again");
     assert_eq!((h.cap, &h.folders, &h.slug), (7, &before.folders, &before.slug));

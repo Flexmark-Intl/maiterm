@@ -311,6 +311,30 @@ fn criteria_are_checked() {
     assert!(bad(json!({ "criteria": [3] })).contains("isn't text"));
 }
 
+// The progress tool lives in `progress.rs`; it is tested on this rig, which has the window.
+#[tokio::test]
+async fn set_progress_writes_the_record_tells_the_window_and_refuses_a_done_hive() {
+    use crate::hive::progress::set_tool;
+    let rig = Rig::new("progress");
+    let out = set_tool(&rig.ctx(ok_save), &rig.caller, &json!({ "percent": 40, "note": "Auth landed; payments next" })).await.unwrap();
+    assert_eq!((out["percent"].as_u64(), out.get("next")), (Some(40), None));
+    let p = rig.hive().progress.unwrap();
+    assert_eq!((p.percent, p.note.as_str()), (40, "Auth landed; payments next"));
+    assert!(p.at > 0, "stamped");
+    assert_eq!(rig.seen.lock().unwrap().changed.last().unwrap().progress.as_ref().map(|p| p.percent), Some(40), "the window's mirror follows");
+
+    let full = set_tool(&rig.ctx(ok_save), &rig.caller, &json!({ "percent": 100, "note": "All criteria met" })).await.unwrap();
+    assert!(full["next"].as_str().unwrap().contains("hiveFinish"), "100 points her at Done");
+
+    // A failed save takes it back.
+    assert!(set_tool(&rig.ctx(bad_save), &rig.caller, &json!({ "percent": 10, "note": "x" })).await.is_err());
+    assert_eq!(rig.hive().progress.unwrap().percent, 100);
+
+    rig.edit_hive(|h| h.status = STATUS_DONE.to_string());
+    let e = set_tool(&rig.ctx(ok_save), &rig.caller, &json!({ "percent": 50, "note": "x" })).await.unwrap_err();
+    assert!(e.contains("done"), "{e}");
+}
+
 #[tokio::test]
 async fn set_criteria_writes_the_record_logs_it_and_tells_the_window() {
     let rig = Rig::new("criteria");

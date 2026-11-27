@@ -36,7 +36,7 @@ pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// The Hive tools built so far: what `tools/list` offers each role and the handler answers.
 /// The rest of the coordinator's (settings' `COORDINATOR_MCP_TOOLS`) are refused as not yet here.
-pub const COORDINATOR_TOOLS: [&str; 20] = [
+pub const COORDINATOR_TOOLS: [&str; 21] = [
     "hiveSpawnWorker",
     "hiveListWorkers",
     "hiveMessageWorker",
@@ -53,6 +53,7 @@ pub const COORDINATOR_TOOLS: [&str; 20] = [
     "hiveRecordPrecedent",
     "hiveProposePlan",
     "hiveSetCriteria",
+    "hiveSetProgress",
     "hiveFinish",
     "hiveChangeSettings",
     "hiveApproveServe",
@@ -315,6 +316,7 @@ fn hive_tool_definitions(role: &str) -> Vec<Value> {
         super::precedents::record_tool_definition(&tab_id),
         super::plan::propose_tool_definition(&tab_id),
         super::finish::set_criteria_tool_definition(&tab_id),
+        super::progress::tool_definition(&tab_id),
         super::finish::finish_tool_definition(&tab_id),
         super::change::tool_definition(&tab_id),
         super::serve::approve_tool_definition(&tab_id),
@@ -479,6 +481,7 @@ pub async fn handle(tool: &str, args: &Value, state: &Arc<AppState>, handle: &ta
         "hiveRecordPrecedent" => super::precedents::record_tool(&ctx, &caller, args).await,
         "hiveProposePlan" => super::plan::propose_tool(&ctx, &caller, args).await,
         "hiveSetCriteria" => super::finish::set_criteria_tool(&ctx, &caller, args).await,
+        "hiveSetProgress" => super::progress::set_tool(&ctx, &caller, args).await,
         "hiveFinish" => super::finish::finish_tool(&ctx, &caller, args).await,
         "hiveChangeSettings" => super::change_plan::change_tool(&ctx, &caller, args).await,
         "hiveRequestCapability" => super::tool_setup::request_tool(&ctx, &caller, args).await,
@@ -504,11 +507,25 @@ pub async fn handle(tool: &str, args: &Value, state: &Arc<AppState>, handle: &ta
     // The coordinator is NOT ended after Done (Darryl, 2026-11-15): an idle agent costs no tokens,
     // and a relaunch to take the human's next message raced its session start (Claude, still
     // loading, took the CR after the typed wake as a newline). A wake types into her as she is.
+    // A milestone reminds the queen of her progress estimate while it's missing or old: a queen
+    // briefed before hiveSetProgress existed learns it here (docs/hive.md §4.1.1).
+    let mut res = res;
+    if let Ok(Value::Object(out)) = res.as_mut() {
+        if MILESTONE_TOOLS.contains(&tool) {
+            if let Some(line) = super::progress::reminder(&caller.hive, super::fuses::now_ms()) {
+                out.insert("progress".to_string(), json!(line));
+            }
+        }
+    }
     res.unwrap_or_else(|e| {
         log::info!("hive {}: {tool} refused: {e}", caller.hive.id);
         json!({ "error": e })
     })
 }
+
+/// The queen's tools that mark the goal moving (a plan, a land, an undo, a review settled): their
+/// results carry `progress::reminder`.
+const MILESTONE_TOOLS: [&str; 5] = ["hiveProposePlan", "hiveLand", "hiveLandBranch", "hiveUndoLand", "hiveResolve"];
 
 /// What a Done Hive's agents may still call: reads, and the two that refuse a Done Hive themselves.
 /// Everything else would change what the report proved (an undo, a land, a delivery) or cost.

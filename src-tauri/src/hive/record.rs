@@ -82,6 +82,11 @@ pub struct Hive {
     /// Done and the board.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub chapters: Vec<super::new_goal::HiveChapter>,
+    /// The queen's estimate of how far the current goal has come (`hiveSetProgress`), shown in
+    /// the Hive header as hers, with when she set it. `None` until she first sets it, and again
+    /// after New goal. Only Done says complete: 100 here is still her estimate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<HiveProgress>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -113,9 +118,22 @@ impl Default for Hive {
             slug: String::new(),
             created_at: String::new(),
             chapters: Vec::new(),
+            progress: None,
             extra: Map::new(),
         }
     }
+}
+
+/// The queen's progress estimate (docs/hive.md §4.1.1).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HiveProgress {
+    /// 0 to 100.
+    pub percent: u8,
+    /// One line on where the goal stands and what is next, for someone who hasn't read her chat.
+    pub note: String,
+    /// When she set it, epoch milliseconds.
+    pub at: i64,
 }
 
 impl Hive {

@@ -545,9 +545,15 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths, counts: &PrecedentCounts, config
              Don\u{2019}t guess the gaps.\n\
              3. Set the criteria with hiveSetCriteria. maiTerm asks your human to confirm them; their answer is typed to \
              you.\n\
-             4. Plan, and start workers once they confirm.\n\n",
+             4. Plan, set your first progress estimate with hiveSetProgress, and start workers once they confirm.\n\n",
         );
     }
+    b.push_str(
+        "## Progress\n\nYour human gauges the Hive by your progress estimate, a bar in the Hive header with your note and \
+         the time you set it. Set it with hiveSetProgress once you have a plan, and again whenever the work moves: a wave \
+         done, a big land, a setback (it may go down; say why). Weigh it by work landed and proven against the criteria, \
+         not by workers started. The note is one line that stands on its own: what is done and what is next.\n\n",
+    );
     if !hive.criteria.is_empty() {
         b.push_str("## Completion criteria\n\nhiveFinish addresses each by its number.\n\n");
         for (i, c) in hive.criteria.iter().enumerate() {

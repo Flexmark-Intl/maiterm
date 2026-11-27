@@ -88,6 +88,7 @@ pub mod paths;
 pub mod phone;
 pub mod plan;
 pub mod precedents;
+pub mod progress;
 pub mod pressure;
 pub mod prompts;
 // Ignored probes that run a sandboxed `claude -p` through `sh`: Unix only, as the sandbox is.

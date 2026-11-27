@@ -117,6 +117,7 @@ pub const COORDINATOR_MCP_TOOLS: &[&str] = &[
     "hiveResolve",
     "hiveFinish",
     "hiveSetCriteria",
+    "hiveSetProgress",
     "hiveChangeSettings",
     "hiveAnswerWorker",
     "hiveRunPriority",
