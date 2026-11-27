@@ -618,7 +618,15 @@
 
   /** The hold-to-delete confirmation, anchored under the row it deletes. */
   let deleteFor = $state<{ workspaceId: string; anchor: DOMRect } | null>(null);
+  /** A delete is running: no other confirmation opens until it ends, so its confirmation (and
+   *  the message it shows if it stops) stays on screen. */
+  let deleteRunning = $state(false);
   function askDelete(workspaceId: string) {
+    if (deleteRunning) {
+      void import('$lib/stores/notificationDispatch').then(({ dispatch }) =>
+        dispatch('A delete is still running', 'Wait for it to finish before deleting another workspace.', 'info'));
+      return;
+    }
     const row = workspaceListEl?.querySelector<HTMLElement>(`.workspace-item[data-workspace-id="${workspaceId}"]`);
     if (!row) return;
     deleteFor = { workspaceId, anchor: row.getBoundingClientRect() };
@@ -1047,7 +1055,8 @@
           children={childrenOf(target.id)}
           anchor={deleteFor.anchor}
           remove={doDeleteWorkspace}
-          onclose={() => { if (deleteFor?.workspaceId === target.id) deleteFor = null; }}
+          onclose={(id) => { if (deleteFor?.workspaceId === id) deleteFor = null; }}
+          onbusy={(b) => { deleteRunning = b; }}
         />
       {/key}
     {/if}

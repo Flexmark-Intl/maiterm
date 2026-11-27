@@ -154,7 +154,10 @@ Triggers watch your terminal output for patterns — Claude asking a question, a
 ### Workspace Sidebar
 - **Sort order** — default (drag and drop), alphabetical, or recent activity
 - **Tab count** — optional display of tab count after workspace names
-- **Recent workspaces** — collapsible section, toggleable
+- **Filter** — type to narrow the list; Enter opens the first match
+- **Stack panel** — one workspace's services at the foot of the sidebar; each row shows a dot per service
+- **Nesting** — show a workspace (a Hive) under its project with "Show under"; suspended workspaces wait in a group at the bottom
+- **Right-click a row** for everything else: rename, suspend, mute, Overlord exemption, stack and mesh, delete (hold to confirm)
 
 ## Keyboard Shortcuts
 

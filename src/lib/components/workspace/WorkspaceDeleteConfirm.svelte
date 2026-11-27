@@ -14,6 +14,7 @@
   import { isServiceTab, isStripHidden } from '$lib/workspace/hiddenTabs';
   import { deleteRefusal, keptLines } from '$lib/hive/delete';
   import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
+  import { untrack } from 'svelte';
 
   interface Props {
     workspace: Workspace;
@@ -23,10 +24,19 @@
     anchor: DOMRect;
     /** Delete one workspace that is already suspended. */
     remove: (workspaceId: string) => Promise<void>;
-    onclose: () => void;
+    /** Close THIS confirmation: names the workspace it was for, so a delete that finishes after
+     *  another confirmation has opened can't close that one. */
+    onclose: (workspaceId: string) => void;
+    /** A delete started or ended: the sidebar opens no other confirmation meanwhile. */
+    onbusy?: (busy: boolean) => void;
   }
 
-  let { workspace, children = [], anchor, remove, onclose }: Props = $props();
+  let { workspace, children = [], anchor, remove, onclose, onbusy }: Props = $props();
+  // The props are read through getters that follow the sidebar's CURRENT target, so nothing
+  // that runs after an await may read them: it would act on whichever workspace is named by
+  // then. Everything a delete touches is fixed here, once.
+  const id = untrack(() => workspace.id);
+  const close = () => onclose(id);
 
   const HOLD_MS = 1000;
   const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -95,24 +105,32 @@
   const canDelete = $derived(!reading && !refusal && !busy);
 
   async function perform() {
+    // Fixed before the first await (see `id` above). Children first: the parent's row is the
+    // anchor, and it goes last.
+    const doomed = [...children, workspace].map((w) => ({ id: w.id, hive: !!w.hive }));
+    if (doomed[doomed.length - 1]?.id !== id) return;
     busy = true;
     failure = null;
+    onbusy?.(true);
     try {
-      for (const h of hives) {
-        const r = await hiveDelete(h.id, true, true);
-        workspacesStore.applyHiveDeleted(h.id, r.active_tabs);
+      for (const d of doomed.filter((d) => d.hive)) {
+        const r = await hiveDelete(d.id, true, true);
+        workspacesStore.applyHiveDeleted(d.id, r.active_tabs);
       }
-      // Children first: the parent's row is the anchor, and it goes last.
-      for (const w of [...children, workspace]) {
-        if (!w.suspended) await workspacesStore.suspendWorkspace(w.id);
-        await remove(w.id);
-        logInfo(`workspace: deleted ${w.id.slice(0, 8)} from the sidebar`);
+      for (const d of doomed) {
+        const w = workspacesStore.workspaces.find((x) => x.id === d.id);
+        if (!w) continue;
+        if (!w.suspended) await workspacesStore.suspendWorkspace(d.id);
+        await remove(d.id);
+        logInfo(`workspace: deleted ${d.id.slice(0, 8)} from the sidebar`);
       }
-      onclose();
+      onbusy?.(false);
+      close();
     } catch (e) {
       busy = false;
+      onbusy?.(false);
       failure = `Nothing more was deleted: ${String(e).replace(/^Error: /, '')}`;
-      logError(`workspace: delete of ${workspace.id.slice(0, 8)} stopped: ${e}`);
+      logError(`workspace: delete of ${id.slice(0, 8)} stopped: ${e}`);
     }
   }
 
@@ -152,13 +170,13 @@
     return () => { cancelAnimationFrame(outer); cancelAnimationFrame(inner); };
   });
   $effect(() => {
-    const outside = (e: PointerEvent) => { if (!busy && el && !el.contains(e.target as Node)) onclose(); };
+    const outside = (e: PointerEvent) => { if (!busy && el && !el.contains(e.target as Node)) close(); };
     // Escape closes it wherever focus is: a terminal that took focus back must not leave it stuck.
     const escape = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || busy) return;
       e.preventDefault();
       e.stopPropagation();
-      onclose();
+      close();
     };
     document.addEventListener('pointerdown', outside, true);
     window.addEventListener('keydown', escape, true);
@@ -185,7 +203,7 @@
   {#if refusal}<p class="error" role="alert">{refusal}</p>{/if}
   {#if failure}<p class="error" role="alert">{failure}</p>{/if}
   <div class="buttons">
-    <button type="button" class="cancel" disabled={busy} onclick={onclose}>Cancel</button>
+    <button type="button" class="cancel" disabled={busy} onclick={close}>Cancel</button>
     <button
       type="button"
       class="hold"
