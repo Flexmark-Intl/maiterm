@@ -622,14 +622,16 @@ function createWorkspacesStore() {
     },
 
     async deleteWorkspace(workspaceId: string) {
-      const oldIndex = workspaces.findIndex(w => w.id === workspaceId);
       // Captured before, logged after: every live and archived tab goes with the workspace.
-      const doomed = workspaces[oldIndex];
+      const doomed = workspaces.find(w => w.id === workspaceId);
       await commands.deleteWorkspace(workspaceId);
       for (const t of [...(doomed?.panes.flatMap(p => p.tabs) ?? []), ...(doomed?.archived_tabs ?? [])]) {
         logDroppedFollowUps(t, 'removed with its workspace');
       }
-      workspaces.splice(oldIndex, 1);
+      // Looked up AFTER the await: a workspace created meanwhile (inserted after the active
+      // one) shifts the list, and an index saved before would drop the wrong row.
+      const oldIndex = workspaces.findIndex(w => w.id === workspaceId);
+      if (oldIndex >= 0) workspaces.splice(oldIndex, 1);
       if (lastSwitchedAt.has(workspaceId)) {
         const updated = new Map(lastSwitchedAt);
         updated.delete(workspaceId);
