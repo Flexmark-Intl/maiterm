@@ -493,7 +493,9 @@
   const workers = $derived(board?.workers.length ?? 0);
   /** The header's crew gauge (§4.1.1): four groups and words, whatever the crew's size. A quiet
    *  worker (idle past 10 minutes with nothing on its way) is named apart from a plain idle one. */
-  const crew = $derived(crewSummary(cards.map((c) => ({ state: c.state.state, quiet: c.activity.tone === 'stalled' }))));
+  const crew = $derived(
+    crewSummary(cards.map((c) => ({ state: c.state.state, quiet: c.activity.tone === 'stalled', suspect: c.state.qualifier === 'suspect' }))),
+  );
   /** The queen's estimate (docs/hive.md §4.1.1). Read against the clock on each board refresh, so
    *  an estimate she stopped keeping up turns stale without a timer of its own. */
   const progress = $derived.by(() => {
@@ -1528,10 +1530,11 @@
   .cseg[data-group='active'] { background: var(--accent); }
   .cseg[data-group='attention'] { background: var(--orange, #ff9e64); min-width: 6px; }
   .cseg[data-group='waiting'] { background: color-mix(in srgb, var(--fg-dim) 35%, transparent); }
+  .cseg[data-group='retired'] { background: transparent; box-shadow: inset 0 0 0 1px var(--fg-dim); }
   .crew-words { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; font-size: 12px; min-width: 0; }
   .crew-alert { font-weight: 600; white-space: nowrap; }
   .crew-alert[data-key='needs_you'] { color: var(--orange, #ff9e64); }
-  .crew-alert[data-key='failed'] { color: var(--red); }
+  .crew-alert[data-key='failed'], .crew-alert[data-key='suspect'] { color: var(--red); }
   .crew-alert[data-key='blocked'], .crew-alert[data-key='quiet'] { color: var(--yellow); }
   .crew-n { color: var(--fg-dim); white-space: nowrap; }
 

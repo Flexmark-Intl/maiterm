@@ -55,10 +55,25 @@ describe('crewSummary', () => {
     expect(s.line).toBe('');
   });
 
-  it('never counts a landed worker as quiet', () => {
-    const s = crewSummary(many('landed', 2, true));
+  it('never counts a landed or retired worker as quiet', () => {
+    const s = crewSummary([...many('landed', 2, true), ...many('retired', 1, true)]);
     expect(s.attention).toEqual([]);
-    expect(s.line).toBe('2 landed');
+    expect(s.line).toBe('2 landed · 1 retired');
+  });
+
+  it('never counts a retired worker as landed: it was given up on', () => {
+    const s = crewSummary([...many('landed', 2), ...many('retired', 10)]);
+    expect(s.segments).toEqual([
+      { group: 'landed', n: 2 },
+      { group: 'retired', n: 10 },
+    ]);
+    expect(s.line).toBe('2 landed · 10 retired');
+  });
+
+  it('names a suspect land as needing a look', () => {
+    const s = crewSummary([{ state: 'landed', quiet: false, suspect: true }, ...many('landed', 3)]);
+    expect(s.attention).toEqual([{ key: 'suspect', text: '1 suspect land' }]);
+    expect(s.line).toBe('3 landed');
   });
 
   it('is empty with no workers', () => {

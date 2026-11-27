@@ -41,11 +41,13 @@ export function progressView(progress: HiveProgress | null | undefined, status: 
 
 /** A card's place in the crew bar. `quiet` is a worker idle past 10 minutes with nothing on its way
  *  (the card's activity tone), whatever its state. */
-export type CrewGroup = 'landed' | 'active' | 'attention' | 'waiting';
+export type CrewGroup = 'landed' | 'active' | 'attention' | 'waiting' | 'retired';
 
+/** A retired worker never landed: the queen gave up on it (stopped, failed, waiting or reported,
+ *  `retire.rs` `RETIRABLE`), so it is its own group, never counted as landed. */
 const GROUP: Record<CardStateName, CrewGroup> = {
   landed: 'landed',
-  retired: 'landed',
+  retired: 'retired',
   working: 'active',
   starting: 'active',
   landing: 'active',
@@ -60,40 +62,47 @@ const GROUP: Record<CardStateName, CrewGroup> = {
 };
 
 /** The states named in words, in this order, because one of them among 180 is still news. */
-const ATTENTION: readonly { key: CardStateName | 'quiet'; label: string }[] = [
+export type CrewAlert = CardStateName | 'quiet' | 'suspect';
+
+const ATTENTION: readonly { key: CrewAlert; label: string }[] = [
   { key: 'needs_you', label: 'need you' },
   { key: 'failed', label: 'failed' },
+  { key: 'suspect', label: 'suspect lands' },
   { key: 'blocked', label: 'blocked' },
   { key: 'quiet', label: 'quiet' },
 ];
 
 export interface CrewSummary {
   total: number;
-  /** The bar, in order landed → active → attention → waiting; empty groups left out. */
+  /** The bar, in order landed → active → attention → waiting → retired; empty groups left out. */
   segments: { group: CrewGroup; n: number }[];
-  /** "4 landed · 6 in flight · 59 waiting" (empty groups left out). */
+  /** "4 landed · 6 in flight · 59 waiting · 2 retired" (empty groups left out). */
   line: string;
   /** "1 needs you", "2 failed"…: shown apart, coloured. */
-  attention: { key: CardStateName | 'quiet'; text: string }[];
+  attention: { key: CrewAlert; text: string }[];
 }
 
-/** The crew gauge from each worker's card state and whether it's quiet. */
-export function crewSummary(cards: readonly { state: CardStateName; quiet: boolean }[]): CrewSummary {
-  const groups: Record<CrewGroup, number> = { landed: 0, active: 0, attention: 0, waiting: 0 };
+/** The crew gauge from each worker's card state, whether it's quiet, and whether its land is
+ *  suspect (the card's `qualifier`: it sorts with Needs you, so it is named here too). */
+export function crewSummary(cards: readonly { state: CardStateName; quiet: boolean; suspect?: boolean }[]): CrewSummary {
+  const groups: Record<CrewGroup, number> = { landed: 0, active: 0, attention: 0, waiting: 0, retired: 0 };
   const named = new Map<string, number>();
   for (const c of cards) {
-    const key = c.quiet && GROUP[c.state] !== 'attention' && GROUP[c.state] !== 'landed' ? 'quiet' : c.state;
-    const group = key === 'quiet' ? 'attention' : GROUP[c.state];
+    const base = GROUP[c.state];
+    const key: CrewAlert =
+      c.state === 'landed' && c.suspect ? 'suspect' : c.quiet && (base === 'active' || base === 'waiting') ? 'quiet' : c.state;
+    const group = key === 'quiet' || key === 'suspect' ? 'attention' : base;
     groups[group] += 1;
     if (group === 'attention') named.set(key, (named.get(key) ?? 0) + 1);
   }
-  const order: CrewGroup[] = ['landed', 'active', 'attention', 'waiting'];
+  const order: CrewGroup[] = ['landed', 'active', 'attention', 'waiting', 'retired'];
   const segments = order.filter((g) => groups[g] > 0).map((group) => ({ group, n: groups[group] }));
-  const words: [CrewGroup, string][] = [['landed', 'landed'], ['active', 'in flight'], ['waiting', 'waiting']];
+  const words: [CrewGroup, string][] = [['landed', 'landed'], ['active', 'in flight'], ['waiting', 'waiting'], ['retired', 'retired']];
   const line = words.filter(([g]) => groups[g] > 0).map(([g, w]) => `${groups[g]} ${w}`).join(' · ');
   const attention = ATTENTION.filter((a) => named.get(a.key)).map((a) => {
     const n = named.get(a.key)!;
-    return { key: a.key, text: `${n} ${a.key === 'needs_you' && n === 1 ? 'needs you' : a.label}` };
+    const label = n !== 1 ? a.label : a.key === 'needs_you' ? 'needs you' : a.key === 'suspect' ? 'suspect land' : a.label;
+    return { key: a.key, text: `${n} ${label}` };
   });
   return { total: cards.length, segments, line, attention };
 }

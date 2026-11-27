@@ -596,9 +596,10 @@ spread to 180 workers, so the header carries two gauges (`lib/hive/progress.ts`)
     `hiveLand`, `hiveLandBranch`, `hiveUndoLand`, `hiveResolve`) carry a `progress` line while her
     estimate is missing or over 20 minutes old (`progress::reminder`).
   - Not on the phone yet: `Chat.hive` doesn't carry it (a maiLink wire change, a follow-up).
-- **The crew gauge**, in the top row: one bar in four groups (landed, in flight, needs a look,
-  waiting) and the words "4 landed · 6 in flight · 169 waiting". Anything that needs a look is
-  named apart in colour ("1 needs you", "2 failed", "3 blocked", "3 quiet"), with a minimum
+- **The crew gauge**, in the top row: one bar in five groups (landed, in flight, needs a look,
+  waiting, retired) and the words "4 landed · 6 in flight · 169 waiting · 2 retired". A retired
+  worker is never counted as landed: the queen gave it up. Anything that needs a look is named
+  apart in colour ("1 needs you", "2 failed", "1 suspect land", "3 blocked", "3 quiet"), with a minimum
   width on its bar segment, so one stuck worker among 180 is still seen. It replaced one tile per
   worker, which past a few dozen was a grid of grey (most of a big Hive is queued).
 
