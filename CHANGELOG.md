@@ -1,5 +1,46 @@
 # Changelog
 
+## v3.19.0
+
+A reworked sidebar: a filter box, one stack panel, Hives shown under their projects, and every action in the right-click menu. Plus a progress bar for each Hive, Codex's screen in Agent Defaults, and a run of Antigravity fixes.
+
+### Sidebar
+
+- **Type to find a workspace.** A filter box sits under the Workspaces header, and typing while a row has focus goes into it too. Enter opens the first match, Escape clears it. It replaces the Recent strip.
+- **One stack panel at the foot.** Stacks no longer open inline and push the list down. The panel shows the active workspace's stack, or the one whose dots you clicked. Each row carries a dot per service (a bar from seven services on), so a crashed service still shows red.
+- **Show a workspace under another**, such as a Hive under its project, from the right-click menu ("Show under ▸", and "Top level" to bring it back). Deleting a workspace deletes the ones shown under it too, and the confirmation names them.
+- **Rows line up.** Status, name, flags, stack dots and kind sit in fixed columns. The MESH and HIVE badges are now small icons, which gives the names their width back.
+- **Actions are in the right-click menu** (also Shift+F10): Rename, Suspend/Resume, Exempt from Overlord, Mute, and Stack and Mesh submenus. Nothing appears or moves under the pointer on hover any more.
+- **Delete a live workspace without suspending it first.** The confirmation says what will stop (tabs, agents, running services), and the button has to be held for a second. A Hive among what goes is deleted with its gallery and shared memory.
+- **Suspended workspaces are grouped at the bottom.**
+
+### Hive
+
+- **A progress bar for each Hive.** The Queen keeps an estimate of how far the goal has come, with a one-line note, shown under the goal as hers. It's marked stale after an hour, and only Done reads as complete.
+- **A crew gauge that reads at any size.** The tile per worker is now one bar: landed, in flight, needs a look, waiting, with retired workers and undone lands counted apart. Anything that needs a look is named in colour, so one stuck worker among 180 still shows.
+
+### Agents
+
+- **Codex's screen in Agent Defaults.** Codex runs fullscreen by default, so its conversation never reaches the terminal's history. Agent Defaults can now set it to Scrollback, here and on ssh hosts.
+- **Antigravity:**
+  - Permission prompts for shell commands and from custom status lines are recognised, so they reach the Loom and your phone.
+  - Two new Deshittification rules, off unless you switch them on: "Auto-allow all MCP tools" and "Auto-allow all terminal commands".
+  - The `/maiterm-statusline` skill sets up Antigravity's status line too.
+  - Move project carries Antigravity's per-project state.
+  - Its replies reach the phone and the Overlord in full.
+  - An Antigravity agent's plan steps show on the task board while the Overlord is on, as Claude Code's own list does.
+- **An agent that compacts while idle stays idle**, instead of reading as working until its next turn.
+
+### Tasks panel
+
+- **Active tasks sit in their own section at the top**, with a live indicator.
+
+### Fixes
+
+- **No "Command completed" toasts** from tabs you can't see in the tab strip, such as stack services and Hive agents.
+- **Window positions survive display sleep** and a change in the number of monitors.
+- **A Chrome tab group is named `<workspace>/<agent tab>`** for linked tabs (Chrome extension 0.2.5), and follows a rename or a move to another workspace.
+
 ## v3.18.1
 
 - **maiTerm's windows reopen where you left them.** A window that was minimized when maiTerm saved or quit no longer comes back off-screen or zero-sized. On Windows with monitors at different scaling, a window returns to the right monitor at the right size.
