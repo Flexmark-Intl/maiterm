@@ -20,7 +20,7 @@ const conns = new Map(HOSTS.map((h) => [h, { status: 'disconnected', pending: ne
 
 // ── links (chrome.storage.session: survives a service-worker restart, not the browser) ─────
 
-/** @returns {Promise<Array<{host, maitermTabId, maitermTabName, chromeTabId, handle, openedBy, title, url, purpose?, placement?}>>} */
+/** @returns {Promise<Array<{host, maitermTabId, maitermTabName, maitermWorkspaceName?, chromeTabId, handle, openedBy, title, url, purpose?, placement?}>>} */
 async function getLinks() {
   const { links } = await chrome.storage.session.get('links');
   return links ?? [];
@@ -340,6 +340,8 @@ async function link(host, maitermTab, chromeTab, openerChromeTabId) {
       host,
       maitermTabId: maitermTab.id,
       maitermTabName: maitermTab.name,
+      // The group's title is "<workspace>/<tab>" (marker.js).
+      maitermWorkspaceName: maitermTab.workspace,
       chromeTabId: chromeTab.id,
       handle: r?.handle ?? '',
       openedBy: opener?.handle,
@@ -395,7 +397,7 @@ chrome.webNavigation.onCreatedNavigationTarget.addListener(async ({ sourceTabId,
   await connect(opener.host).catch(() => {});
   for (let i = 0; i < 20 && conns.get(opener.host).status !== 'connected'; i++) await new Promise((r) => setTimeout(r, 100));
   if (!conns.get(opener.host).several) return;
-  await link(opener.host, { id: opener.maitermTabId, name: opener.maitermTabName }, tab, sourceTabId).catch(() => {});
+  await link(opener.host, { id: opener.maitermTabId, name: opener.maitermTabName, workspace: opener.maitermWorkspaceName }, tab, sourceTabId).catch(() => {});
 });
 
 // A tab that ends up in one of our groups without being linked to it (Chrome groups a tab opened

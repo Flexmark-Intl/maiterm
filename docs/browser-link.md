@@ -77,7 +77,8 @@ is versioned on its own (`chrome-extension/manifest.json`, tags `ext-v*`).
    link, so the extension joins nothing to it: a sign-in popup would take the human's tab.
 8. **A linked tab is marked in Chrome's own tab strip** (`chrome-extension/marker.js`), because
    Chrome's debugging bar shows in every tab and says nothing about which one is linked: each
-   agent's linked tabs share a tab group per window, "maiTerm · <agent tab>", in a colour fixed
+   agent's linked tabs share a tab group per window, "<workspace>/<agent tab>" (the human's choice,
+   2026-11-27; the tab name alone when the workspace is unknown), in a colour fixed
    per agent. Every way a link ends (unlink in the popup or maiTerm, Cancel on the bar, the
    feature off, the agent tab closed, a reconnect maiTerm doesn't accept) ungroups it and PUTS IT
    BACK after the tab it followed (else at its old index) — the human asked for exactly that.
@@ -88,7 +89,9 @@ is versioned on its own (`chrome-extension/manifest.json`, tags `ext-v*`).
    group), so: a joined tab already in the agent's group is recorded as `joined` (ungrouped in
    place at the end, never moved); any tab in one of our groups that isn't linked is taken out
    after 600 ms (checked on `onCreated` too — a tab created inside a group reports no change);
-   and at worker start a "maiTerm · " group no link owns is ungrouped, because
+   and at worker start a group no link owns is ungrouped if its title is one we gave a group
+   (`groupTitles` in `chrome.storage.local`, matched by title since a browser restart renumbers
+   groups; a group the human titled themselves is never touched) or the pre-0.2.5 "maiTerm · ", because
    `chrome.storage.session` (the links and their placements) is cleared by an extension reload or
    update and a browser restart while Chrome keeps the groups. Putting a tab back between two
    tabs still in the group would make Chrome regroup it, so it is then taken out to the group's

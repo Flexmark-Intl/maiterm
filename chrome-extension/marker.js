@@ -1,5 +1,5 @@
 // Which Chrome tab is linked? Chrome's own "debugging this browser" bar shows in EVERY tab, so it
-// can't say. A linked tab is put in a tab group per agent, "maiTerm · <agent tab>", and put back
+// can't say. A linked tab is put in a tab group per agent, "<workspace>/<agent tab>", and put back
 // where it was when the link ends, however it ends (docs/browser-link.md §1.8).
 //
 // A link carries its `placement`: the window, the tab that was just before it (its index as a
@@ -13,7 +13,11 @@
 // agent a tab that isn't its.
 
 const COLORS = ['blue', 'purple', 'cyan', 'green', 'orange', 'pink', 'yellow', 'red'];
-const PREFIX = 'maiTerm · ';
+/** How groups were titled before 0.2.5: still ours, and still swept. */
+const LEGACY_PREFIX = 'maiTerm · ';
+/** chrome.storage.local key: the titles of groups we made. The title no longer says a group is
+ *  ours, and session storage (the links) is cleared while Chrome keeps the groups (§1.8). */
+const TITLES = 'groupTitles';
 const NONE = -1; // chrome.tabGroups.TAB_GROUP_ID_NONE
 
 /** The same agent gets the same colour every time. */
@@ -24,7 +28,26 @@ function colorFor(maitermTabId) {
 }
 
 function titleFor(link) {
-  return `${PREFIX}${link.maitermTabName ?? 'agent'}`;
+  const tab = link.maitermTabName || 'agent';
+  return link.maitermWorkspaceName ? `${link.maitermWorkspaceName}/${tab}` : tab;
+}
+
+async function recordedTitles() {
+  const { [TITLES]: titles = [] } = await chrome.storage.local.get(TITLES);
+  return titles;
+}
+
+/** Remember a title we gave a group, so a sweep can tell it from one of the human's. */
+async function record(title) {
+  const titles = await recordedTitles();
+  if (!titles.includes(title)) await chrome.storage.local.set({ [TITLES]: [...titles, title] });
+}
+
+/** Title a group and remember it. */
+async function titleGroup(groupId, link, extra = {}) {
+  const title = titleFor(link);
+  await record(title);
+  await chrome.tabGroups.update(groupId, { title, ...extra });
 }
 
 /** The agent's live group in this window, from any of its other links. */
@@ -83,7 +106,7 @@ export async function mark(link, links, carried) {
       if (tab.groupId !== groupId) await retry(() => chrome.tabs.group({ groupId, tabIds: [tab.id] }));
     } else {
       groupId = await retry(() => chrome.tabs.group({ tabIds: [tab.id], createProperties: { windowId: tab.windowId } }));
-      await chrome.tabGroups.update(groupId, { title: titleFor(link), color: colorFor(link.maitermTabId) });
+      await titleGroup(groupId, link, { color: colorFor(link.maitermTabId) });
     }
     return { ...placement, groupId };
   } catch {
@@ -153,11 +176,16 @@ export async function releaseIfOurs(tab, links) {
 export async function sweepOrphans(links) {
   try {
     const owned = ourGroups(links);
+    // By title, not id: a browser restart gives the groups it restores new ids.
+    const ours = new Set(await recordedTitles());
     for (const g of await chrome.tabGroups.query({})) {
-      if (!g.title?.startsWith(PREFIX) || owned.has(g.id)) continue;
+      if (owned.has(g.id) || !(ours.has(g.title) || g.title?.startsWith(LEGACY_PREFIX))) continue;
       const tabs = await chrome.tabs.query({ groupId: g.id });
       if (tabs.length) await chrome.tabs.ungroup(tabs.map((t) => t.id));
     }
+    // Forget the titles no group has any more.
+    const live = new Set((await chrome.tabGroups.query({})).map((g) => g.title));
+    await chrome.storage.local.set({ [TITLES]: [...ours].filter((t) => live.has(t)) });
   } catch {
     // No tab groups here.
   }
@@ -167,5 +195,5 @@ export async function sweepOrphans(links) {
 export async function retitle(link) {
   const id = link.placement?.groupId;
   if (id == null) return;
-  await chrome.tabGroups.update(id, { title: titleFor(link) }).catch(() => {});
+  await titleGroup(id, link).catch(() => {});
 }

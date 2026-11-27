@@ -226,7 +226,7 @@ function drawGroups() {
 }
 
 async function doLink(host, maitermTab) {
-  const r = await ask({ type: 'link', host, maitermTab: { id: maitermTab.id, name: maitermTab.name }, chromeTab: { id: chromeTab.id, title: chromeTab.title, url: chromeTab.url } });
+  const r = await ask({ type: 'link', host, maitermTab: { id: maitermTab.id, name: maitermTab.name, workspace: maitermTab.workspace }, chromeTab: { id: chromeTab.id, title: chromeTab.title, url: chromeTab.url } });
   if (r?.error) return showError(r.error);
   justLinked = true;
   await render();
