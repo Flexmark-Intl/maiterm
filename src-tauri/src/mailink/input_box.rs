@@ -31,12 +31,15 @@ const AGY_PROMPT: char = '>';
 
 /// Text an agent puts in its empty input box at full brightness.
 /// - Claude Code 2.1.303: "Press up to edit queued messages" while a mid-turn message is queued.
-/// - Antigravity CLI (`agy` 1.5.13): mode hint shown in an empty box before typing.
+/// - Antigravity CLI (`agy`): mode hints shown in an empty box before typing.
 const PLACEHOLDERS: &[&str] = &[
     "Press up to edit queued messages",
     "Auto mode: edits & safe commands auto-approved (shift+tab to cycle)",
+    "Accept-edits mode: file edits auto-approved (shift+tab to cycle)",
     "Accept edits: file edits auto-approved (shift+tab to cycle)",
+    "Plan mode: research & plan only (shift+tab to cycle)",
     "Plan mode: read-only planning (shift+tab to cycle)",
+    "Best-of-N mode: parallel arms, /model to pick models (shift+tab to cycle)",
 ];
 
 /// A box rule: `─` from COLUMN 0. Never trimmed — Claude indents every line of a draft by two
@@ -279,6 +282,19 @@ mod tests {
             "? for shortcuts",
         ]);
         assert_eq!(parse(&placeholder), InputBox::Empty);
+
+        // Every mode hint shipped by `agy` must read Empty (undimmed, wrapped, or cursor-lit).
+        for hint in [
+            "Accept-edits mode: file edits auto-approved (shift+tab to cycle)",
+            "Plan mode: research & plan only (shift+tab to cycle)",
+            "Best-of-N mode: parallel arms, /model to pick models (shift+tab to cycle)",
+        ] {
+            let full = screen(&[RULE, &format!("> {hint}"), RULE, "? for shortcuts"]);
+            assert_eq!(parse(&full), InputBox::Empty, "hint should read Empty: {hint}");
+            let first = hint.chars().next().unwrap();
+            let undimmed = screen(&[RULE, &format!("> {first}"), RULE, "? for shortcuts"]);
+            assert_eq!(parse_screens(&undimmed, &full), InputBox::Empty, "cursor-lit hint: {hint}");
+        }
 
         // Narrow split pane (<68 cols): placeholder wraps across 2 lines or truncates — still Empty.
         let wrapped = screen(&[

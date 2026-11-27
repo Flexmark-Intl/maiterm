@@ -1314,21 +1314,42 @@ fn claude_meta_from_tail(tail: &str) -> Option<SessionMeta> {
     Some(SessionMeta { model_id, context_tokens: context_tokens?, context_window: None, effort })
 }
 
-/// The maiTerm tab id that most recently HOSTED a Claude session, read from the transcript
-/// itself: the SessionStart command hook echoes `Your maiTerm tab ID is $MAITERM_TAB_ID` into
-/// the session (lockfile.rs `build_our_hooks`) on every start/resume/compact, so the LAST
-/// occurrence names the tab the session last actually ran in. Used to resolve a CONTESTED
+/// Extract the most recent valid maiTerm tab id echoed by hook priming (`Your maiTerm tab ID is
+/// <uuid>.`) from a transcript tail. Walks backwards across occurrences so a bare mention of the
+/// marker literal in code/tool output does not shadow the real priming marker.
+fn extract_host_tab_from_tail(tail: &str) -> Option<String> {
+    const MARKER: &str = "maiTerm tab ID is ";
+    for (idx, _) in tail.rmatch_indices(MARKER) {
+        let id: String = tail[idx + MARKER.len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit() || *c == '-')
+            .collect();
+        if id.len() >= 8 {
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// The maiTerm tab id that most recently HOSTED a Claude or Antigravity (`agy`) session, read from
+/// the transcript itself: the SessionStart / PreInvocation hook echoes
+/// `Your maiTerm tab ID is $MAITERM_TAB_ID` into the session on every start/resume/compact, so the
+/// LAST occurrence names the tab the session last actually ran in. Used to resolve a CONTESTED
 /// session id (tab duplication copies the var on purpose — reload/fork workflows) to its one
 /// rightful renderer: ownership follows actual usage, and flips to the duplicate the moment it
 /// actually resumes the session there. `None` if the transcript can't be located or no marker
 /// falls within the scanned tail (a session that's run a long stretch since its last
 /// start/resume). (mtime, len)-cached — resolution paths hit this per ticker pass.
-pub(crate) fn claude_session_host_tab(session_id: &str) -> Option<String> {
+pub(crate) fn session_host_tab(rt: AgentRuntime, session_id: &str) -> Option<String> {
     static HOST_CACHE: std::sync::OnceLock<
         std::sync::Mutex<HashMap<PathBuf, (u64, u64, Option<String>)>>,
     > = std::sync::OnceLock::new();
 
-    let path = locate_jsonl(session_id)?;
+    let path = match rt {
+        AgentRuntime::Claude => locate_jsonl(session_id)?,
+        AgentRuntime::Gemini => locate_agy_jsonl(session_id)?,
+        _ => return None,
+    };
     let md = std::fs::metadata(&path).ok()?;
     let mtime_ms = md
         .modified()
@@ -1345,16 +1366,7 @@ pub(crate) fn claude_session_host_tab(session_id: &str) -> Option<String> {
             }
         }
     }
-    let host = (|| {
-        let tail = read_tail(&path, 4 * 1024 * 1024)?;
-        const MARKER: &str = "maiTerm tab ID is ";
-        let idx = tail.rfind(MARKER)?;
-        let id: String = tail[idx + MARKER.len()..]
-            .chars()
-            .take_while(|c| c.is_ascii_hexdigit() || *c == '-')
-            .collect();
-        (id.len() >= 8).then_some(id)
-    })();
+    let host = read_tail(&path, 4 * 1024 * 1024).and_then(|tail| extract_host_tab_from_tail(&tail));
     if let Ok(mut c) = cache.lock() {
         c.insert(path, (mtime_ms, len, host.clone()));
     }
@@ -2043,6 +2055,18 @@ fn push_agy_line_messages(line_no: u64, v: &Value, tools: ToolRender, out: &mut 
                 }
             }
         }
+        "CHECKPOINT" => {
+            let input = v.get("input_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+            let cache = v.get("cache_read_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+            let pre = input.saturating_add(cache);
+            let post = v.get("output_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+            let text = if pre > 0 && post > 0 {
+                format!("Context compacted · {} → {}", fmt_tokens_k(pre), fmt_tokens_k(post))
+            } else {
+                "Context compacted".to_string()
+            };
+            out.push(msg(format!("ag{line_no}"), "system", &text, ts));
+        }
         _ => {} // GENERIC (tool outputs), SYSTEM_MESSAGE, etc.
     }
 }
@@ -2062,12 +2086,54 @@ fn agy_tail_facts(tail: &str) -> TailFacts {
         last_turn_ts: agy_last_turn_from_tail(tail),
         meta: agy_meta_from_tail(tail),
         last_commit_ts: agy_last_commit_from_tail(tail),
+        last_compact_ts: agy_last_compact_from_tail(tail),
         ..TailFacts::default()
     }
 }
 
-fn agy_meta_from_tail(tail: &str) -> Option<SessionMeta> {
+fn agy_last_compact_from_tail(tail: &str) -> Option<u64> {
     for line in tail.lines().rev() {
+        if !line.contains("\"CHECKPOINT\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if v.get("type").and_then(|t| t.as_str()) != Some("CHECKPOINT") {
+            continue;
+        }
+        if let Some(ts) = v
+            .get("created_at")
+            .and_then(|t| t.as_str())
+            .map(rfc3339_to_ms)
+            .filter(|&t| t > 0)
+        {
+            return Some(ts as u64);
+        }
+    }
+    None
+}
+
+fn agy_meta_from_tail(tail: &str) -> Option<SessionMeta> {
+    let mut context_tokens: Option<u64> = None;
+    let mut model_id: Option<String> = None;
+    let mut effort: Option<String> = None;
+
+    for line in tail.lines().rev() {
+        if context_tokens.is_none() && line.contains("\"CHECKPOINT\"") {
+            if let Ok(v) = serde_json::from_str::<Value>(line) {
+                if v.get("type").and_then(|t| t.as_str()) == Some("CHECKPOINT") {
+                    // `agy` records compaction as a `CHECKPOINT` entry whose `input_tokens` +
+                    // `cache_read_tokens` are PRE-compaction tokens, while `output_tokens` is the
+                    // generated summary size. Use `output_tokens` as the post-compaction context
+                    // reading until a newer `PLANNER_RESPONSE` arrives, and keep scanning upward
+                    // for `model`/`effort` (mirrors `claude_meta_from_tail`).
+                    context_tokens = v
+                        .get("output_tokens")
+                        .and_then(|n| n.as_u64())
+                        .filter(|&n| n >= MIN_PLAUSIBLE_CONTEXT_TOKENS);
+                    continue;
+                }
+            }
+        }
         if !line.contains("\"PLANNER_RESPONSE\"") {
             continue;
         }
@@ -2075,26 +2141,39 @@ fn agy_meta_from_tail(tail: &str) -> Option<SessionMeta> {
         if v.get("type").and_then(|t| t.as_str()) != Some("PLANNER_RESPONSE") {
             continue;
         }
-        let input = v.get("input_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
-        let cache = v.get("cache_read_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
-        let used = input.saturating_add(cache);
-        if used < MIN_PLAUSIBLE_CONTEXT_TOKENS {
-            continue;
+        if context_tokens.is_none() {
+            let input = v.get("input_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+            let cache = v.get("cache_read_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+            let used = input.saturating_add(cache);
+            if used < MIN_PLAUSIBLE_CONTEXT_TOKENS {
+                continue;
+            }
+            context_tokens = Some(used);
         }
-        let model_id = v.get("model").and_then(|m| m.as_str()).filter(|s| !s.is_empty()).map(String::from);
-        let effort = model_id.as_deref().and_then(agy_effort_from_model);
-        let context_window = model_id
-            .as_deref()
-            .filter(|m| m.starts_with("gemini-"))
-            .map(|_| 1_000_000);
-        return Some(SessionMeta {
-            model_id,
-            context_tokens: used,
-            context_window,
-            effort,
-        });
+        if model_id.is_none() {
+            model_id = v
+                .get("model")
+                .and_then(|m| m.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            effort = model_id.as_deref().and_then(agy_effort_from_model);
+        }
+        if context_tokens.is_some() && model_id.is_some() {
+            break;
+        }
     }
-    None
+
+    let context_tokens = context_tokens?;
+    let context_window = model_id
+        .as_deref()
+        .filter(|m| m.starts_with("gemini-"))
+        .map(|_| 1_000_000);
+    Some(SessionMeta {
+        model_id,
+        context_tokens,
+        context_window,
+        effort,
+    })
 }
 
 fn agy_last_turn_from_tail(tail: &str) -> Option<u64> {
@@ -4182,5 +4261,85 @@ mod tests {
         assert_eq!(meta.effort.as_deref(), Some("high"));
         assert_eq!(facts.last_turn_ts, Some(rfc3339_to_ms("2026-11-20T16:36:15Z") as u64));
         assert_eq!(facts.last_commit_ts, Some(rfc3339_to_ms("2026-11-20T16:36:12Z") as u64));
+    }
+
+    #[test]
+    fn agy_checkpoint_updates_meta_last_compact_ts_and_renders_divider() {
+        let pre_turn = json!({
+            "step_index": 10,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "created_at": "2026-11-27T16:17:00Z",
+            "model": "gemini-4-neon-high",
+            "input_tokens": 11871,
+            "cache_read_tokens": 507618,
+            "output_tokens": 420,
+            "content": "Before compaction."
+        });
+        let checkpoint = json!({
+            "step_index": 11,
+            "source": "SYSTEM",
+            "type": "CHECKPOINT",
+            "status": "DONE",
+            "created_at": "2026-11-27T16:17:26Z",
+            "input_tokens": 11871,
+            "cache_read_tokens": 507618,
+            "output_tokens": 6293,
+            "content": "<summary>"
+        });
+
+        let tail_after_compact = format!(
+            "{}\n{}",
+            serde_json::to_string(&pre_turn).unwrap(),
+            serde_json::to_string(&checkpoint).unwrap()
+        );
+        let facts = agy_tail_facts(&tail_after_compact);
+        assert_eq!(facts.last_compact_ts, Some(rfc3339_to_ms("2026-11-27T16:17:26Z") as u64));
+        // CHECKPOINT must not advance last_turn_ts (compaction is not a conversation turn).
+        assert_eq!(facts.last_turn_ts, Some(rfc3339_to_ms("2026-11-27T16:17:00Z") as u64));
+        let meta = facts.meta.expect("meta after checkpoint");
+        assert_eq!(meta.context_tokens, 6293, "post-compaction tokens come from CHECKPOINT.output_tokens");
+        assert_eq!(meta.model_id.as_deref(), Some("gemini-4-neon-high"));
+        assert_eq!(meta.context_window, Some(1_000_000));
+        assert_eq!(meta.effort.as_deref(), Some("high"));
+
+        // A newer PLANNER_RESPONSE supersedes the CHECKPOINT estimate.
+        let post_turn = json!({
+            "step_index": 12,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "created_at": "2026-11-27T16:18:00Z",
+            "model": "gemini-4-neon-medium",
+            "input_tokens": 2000,
+            "cache_read_tokens": 28000,
+            "output_tokens": 150,
+            "content": "After compaction."
+        });
+        let tail_after_next = format!("{tail_after_compact}\n{}", serde_json::to_string(&post_turn).unwrap());
+        let facts2 = agy_tail_facts(&tail_after_next);
+        let meta2 = facts2.meta.expect("meta after next turn");
+        assert_eq!(meta2.context_tokens, 30_000);
+        assert_eq!(meta2.effort.as_deref(), Some("medium"));
+
+        // CHECKPOINT renders as a system divider turn.
+        let mut msgs = Vec::new();
+        push_agy_line_messages(100, &checkpoint, ToolRender::Marker, &mut msgs);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["text"], "Context compacted · 519k → 6k");
+    }
+
+    #[test]
+    fn extract_host_tab_skips_bare_marker_literals_and_returns_last_valid_id() {
+        let tail = concat!(
+            "SessionStart: Your maiTerm tab ID is 11111111-2222-3333-4444-555555555555.\n",
+            "SessionStart: Your maiTerm tab ID is 5a64552a-4cc2-4a93-b90e-151249157e0b.\n",
+            "read_file: const MARKER: &str = \"maiTerm tab ID is \";\n"
+        );
+        assert_eq!(
+            extract_host_tab_from_tail(tail).as_deref(),
+            Some("5a64552a-4cc2-4a93-b90e-151249157e0b")
+        );
+        assert_eq!(extract_host_tab_from_tail("const MARKER = \"maiTerm tab ID is \";"), None);
     }
 }

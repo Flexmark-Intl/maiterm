@@ -149,6 +149,9 @@ export interface OutstandingDirective {
   typedBusy?: boolean;
   /** The Overlord transcript baseline (`last_turn_ts`) when it was typed, for that search. */
   baseline?: number;
+  /** The tab's `last_compact_ts` when the directive was typed, so whole-second compaction
+   *  timestamps (`agy` `CHECKPOINT`) can distinguish a new compaction in the same second. */
+  baselineCompactTs?: number;
 }
 
 export interface OverlordProposal {
@@ -705,6 +708,9 @@ function createOverlordStore() {
      *  first as the cause every time, whichever had happened. */
     reads: number;
     readErrors: number;
+    /** Last wall-clock time we probed a same-second Gemini candidate (`ts === floor(baseline)`),
+     *  throttling reads on an untouched tab whose prior turn fell in the same whole second. */
+    sameSecProbedAt?: number;
   }
   const driveWatch = new Map<string, DriveWatch>();
   /** Give up harvesting after the same window driveTab's own directive cleanup uses. */
@@ -980,13 +986,16 @@ function createOverlordStore() {
     }
     if (live.agent_running) return `An agent is running in that tab but has not registered. ${UNREGISTERED}`;
     if (!live.ssh_foreground) return null;
-    // ssh is up; what runs on the far side is invisible from here. Claude draws its input box
-    // when it is running, so its absence means a remote shell — the agent exited.
-    if (runtime !== 'claude') {
+    // ssh is up; what runs on the far side is invisible from here. Claude and Antigravity
+    // draw their input box when running, so its absence means a remote shell — the agent exited.
+    if (runtime !== 'claude' && runtime !== 'gemini') {
       return 'That tab is over ssh, and whether its agent is still running on the far side cannot be seen from here. Nothing was typed; the human can relaunch it.';
     }
     const box = await commands.agentInputBox(tabId).catch(() => 'unknown' as const);
-    if (box !== 'unknown') return `Claude is on that tab's screen over ssh but has not registered. ${UNREGISTERED}`;
+    if (box !== 'unknown') {
+      const name = runtime === 'gemini' ? 'Antigravity' : 'Claude';
+      return `${name} is on that tab's screen over ssh but has not registered. ${UNREGISTERED}`;
+    }
     return null;
   }
 
@@ -1118,15 +1127,17 @@ function createOverlordStore() {
           // Typed into a busy agent: the running turn ending is not this step's answer, and
           // an `idle` before the queued step starts is exactly the gap that would read as one.
           // Wait for the step's own turn in the transcript, and for a turn after it to end.
-          // Without a readable transcript (an SSH Codex/Gemini tab) fall through to the
-          // state-based proof below.
+          // Without a readable transcript (an SSH Codex tab) fall through to the state-based
+          // proof below.
           if (directive.typedBusy && directive.baseline !== undefined) {
-            const ts = facts.get(run.tabId)?.last_turn_ts;
-            if (st === 'idle' && ts !== undefined && ts > directive.baseline) {
+            const f = facts.get(run.tabId);
+            const ts = f?.last_turn_ts;
+            const minTs = f?.runtime === 'gemini' ? Math.floor(directive.baseline / 1000) * 1000 : directive.baseline + 1;
+            if (st === 'idle' && ts !== undefined && ts >= minTs) {
               const read = await commands
                 .getAgentReplyAfterPrompt(run.tabId, directive.text, directive.baseline)
                 .catch(() => null);
-              if (read?.prompt_ts != null && ts > read.prompt_ts) return 'ok';
+              if (read?.prompt_ts != null && (read.has_response || ts > read.prompt_ts)) return 'ok';
             }
             break;
           }
@@ -1156,7 +1167,15 @@ function createOverlordStore() {
           // A fresh usage line only appears on the NEXT turn after /compact, so also
           // accept a compaction boundary newer than the injection as proof it landed.
           if (f?.context_pct !== undefined && f.context_pct < gate.pct) return 'ok';
-          if (f?.last_compact_ts !== undefined && f.last_compact_ts > directive.sentAt) return 'ok';
+          if (
+            f?.last_compact_ts !== undefined &&
+            (f.last_compact_ts > directive.sentAt ||
+              (f.runtime === 'gemini' &&
+                f.last_compact_ts >= Math.floor(directive.sentAt / 1000) * 1000 &&
+                f.last_compact_ts !== directive.baselineCompactTs))
+          ) {
+            return 'ok';
+          }
           break;
         }
         case 'idle_ms': {
@@ -2181,6 +2200,7 @@ function createOverlordStore() {
         // keystrokes-since-idle fallback aborted Codex rituals on a recalled-then-cleared line.
         const typedBusy = mappedState(tabId) === 'active';
         const baseline = facts.get(tabId)?.last_turn_ts;
+        const baselineCompactTs = facts.get(tabId)?.last_compact_ts;
         try {
           // And no dialog opened since the wait (read off the screen: the hooks lag it ~6 s).
           const via = await deliverPrompt(
@@ -2210,6 +2230,7 @@ function createOverlordStore() {
           acked: false,
           typedBusy,
           baseline,
+          baselineCompactTs,
         };
         if (step.await) setOutstanding(tabId, directive);
         run.stepIndex = i;
@@ -2979,7 +3000,7 @@ function createOverlordStore() {
         const why = !ts
           ? `This machine has no readable transcript for that tab, so no reply of any kind ` +
             `can be read from it. On an SSH tab the transcript lives on the remote host and ` +
-            `is mirrored here only for Claude, and only while that tab's bridge is up.`
+            `is mirrored here only for Claude and Antigravity, and only while that tab's bridge is up.`
           : w.reads === 0
             ? `Its transcript is readable here, and it has recorded no turn since the ` +
               `directive was typed — so the directive may never have landed in its input, ` +
@@ -3003,11 +3024,23 @@ function createOverlordStore() {
         );
         continue;
       }
-      const ts = facts.get(tabId)?.last_turn_ts;
-      if (!ts || ts <= w.baseline) continue;
+      const f = facts.get(tabId);
+      const ts = f?.last_turn_ts;
+      if (!ts) continue;
+      // Antigravity (`agy`) writes whole-second `created_at` timestamps (`.000Z`). A prompt +
+      // reply in the same whole second as `baseline` (either the prior turn's second, or a fresh
+      // tab's `Date.now()` fallback) leaves `ts === floor(w.baseline) <= w.baseline`. Allow
+      // anchored probing in that second so same-second `agy` replies are not missed.
+      const isGemini = f?.runtime === 'gemini';
+      const sameSecCandidate = isGemini && ts <= w.baseline && ts >= Math.floor(w.baseline / 1000) * 1000;
+      if (ts <= w.baseline && !sameSecCandidate) continue;
       // Mid-turn: the turn carrying the answer hasn't ended (harvesting now captures half a
       // thought). The directive may have been typed into this very turn — that is allowed now.
       if (st === 'active') continue;
+      if (sameSecCandidate) {
+        if (w.sameSecProbedAt !== undefined && now - w.sameSecProbedAt < 5_000) continue;
+        w.sameSecProbedAt = now;
+      }
 
       // Anchored on the directive's own turn, not on when it was typed: it can be typed into a
       // BUSY agent, and everything after the send would then begin with the end of whatever
@@ -3017,18 +3050,30 @@ function createOverlordStore() {
       // when a time-based read would have taken the previous task's conclusion for the reply.
       //
       // Typed at an idle agent there is nothing before it to mistake, so the plain read since the
-      // baseline is used, with the directive's turn standing in as the anchor.
-      let read: { prompt_ts: number | null; reply: string | null } | null = null;
-      w.reads++;
+      // baseline is used, with the directive's turn standing in as the anchor — except on a
+      // same-second Gemini candidate where timestamp ordering alone cannot separate turns.
+      let read: { prompt_ts: number | null; reply: string | null; has_response: boolean } | null = null;
+      const useAnchored = w.anchored || isGemini;
+      if (!sameSecCandidate) w.reads++;
       try {
-        read = w.anchored
-          ? await commands.getAgentReplyAfterPrompt(tabId, w.text, w.baseline)
-          : { prompt_ts: w.baseline, reply: await commands.getAgentReplySince(tabId, w.baseline) };
+        if (useAnchored) {
+          read = await commands.getAgentReplyAfterPrompt(tabId, w.text, w.baseline);
+          if (sameSecCandidate && read.prompt_ts !== null) w.reads++;
+          // Unanchored fallback when the runtime did not echo a matching user turn:
+          if (!w.anchored && read.prompt_ts === null && ts > w.baseline) {
+            const reply = await commands.getAgentReplySince(tabId, w.baseline);
+            read = { prompt_ts: w.baseline, reply, has_response: Boolean(reply?.trim()) };
+          }
+        } else {
+          const reply = await commands.getAgentReplySince(tabId, w.baseline);
+          read = { prompt_ts: w.baseline, reply, has_response: Boolean(reply?.trim()) };
+        }
       } catch (e) {
+        if (sameSecCandidate) w.reads++;
         w.readErrors++;
         logError(`overlord: reply read failed for ${tabId.slice(0, 8)}: ${e}`);
       }
-      if (!read || read.prompt_ts === null || ts <= read.prompt_ts) continue;
+      if (!read || read.prompt_ts === null || (!read.has_response && ts <= read.prompt_ts)) continue;
       // The turn that took the directive has run: the tab no longer owes it. Released here even
       // on an empty read, as the tick used to on any turn — the tick now leaves a watched
       // directive to this loop, because any turn after the SEND says nothing once a directive

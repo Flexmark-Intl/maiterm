@@ -79,7 +79,7 @@ pub async fn get_agent_reply_since(
 }
 
 /// The answer to a directive typed at `since_ms`, anchored on the directive's own turn in the
-/// transcript (`mailink::agent_reply_after_prompt`): `{prompt_ts, reply}`, both null until seen.
+/// transcript (`mailink::agent_reply_after_prompt`): `{prompt_ts, reply, has_response}`.
 #[tauri::command]
 pub async fn get_agent_reply_after_prompt(
     state: State<'_, Arc<AppState>>,
@@ -89,8 +89,9 @@ pub async fn get_agent_reply_after_prompt(
 ) -> Result<Value, String> {
     let app_state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let (prompt_ts, reply) = crate::mailink::agent_reply_after_prompt(&app_state, &tab_id, &prompt, since_ms);
-        serde_json::json!({ "prompt_ts": prompt_ts, "reply": reply })
+        let (prompt_ts, reply, has_response) =
+            crate::mailink::agent_reply_after_prompt(&app_state, &tab_id, &prompt, since_ms);
+        serde_json::json!({ "prompt_ts": prompt_ts, "reply": reply, "has_response": has_response })
     })
     .await
     .map_err(|e| format!("agent reply read failed to run: {}", e))

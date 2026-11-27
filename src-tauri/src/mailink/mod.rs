@@ -5524,15 +5524,15 @@ fn persisted_session_for_tab(app: &AppState, tab_id: &str) -> Option<(AgentRunti
     // duplicate + close original; fork = duplicate + branch), so two tabs claiming one sid is a
     // legitimate transient state — but only ONE of them may render the conversation, or both
     // tabs show the same (possibly someone else's) transcript. The transcript itself names its
-    // rightful renderer: the SessionStart hook echoes the hosting tab id into the JSONL on
-    // every start/resume/compact, so the last marker follows actual usage — the original keeps
-    // rendering until the duplicate actually resumes the session, then it flips. Unknown host
-    // (unlocatable transcript, marker out of tail range, non-Claude runtime) → None for every
-    // claimant: the snapshot fallback beats rendering someone else's conversation. A LIVE
+    // rightful renderer: the SessionStart / PreInvocation hook echoes the hosting tab id into the
+    // JSONL on every start/resume/compact, so the last marker follows actual usage — the original
+    // keeps rendering until the duplicate actually resumes the session, then it flips. Unknown
+    // host (unlocatable transcript, marker out of tail range, unsupported runtime) → None for
+    // every claimant: the snapshot fallback beats rendering someone else's conversation. A LIVE
     // registration (live_session_for_tab, tried before this fn) is unaffected.
     if data.session_id_claimants(&sid) > 1 {
-        let owns = rt == AgentRuntime::Claude
-            && transcript::claude_session_host_tab(&sid).as_deref() == Some(tab_id);
+        let owns = matches!(rt, AgentRuntime::Claude | AgentRuntime::Gemini)
+            && transcript::session_host_tab(rt, &sid).as_deref() == Some(tab_id);
         if !owns {
             return None;
         }
@@ -6267,9 +6267,12 @@ pub(crate) fn agent_reply_since(app: &AppState, tab_id: &str, since_ms: i64) -> 
     Some(parts.join("\n\n"))
 }
 
-/// The answer to a directive, anchored on the directive itself: `(prompt_ts, reply)`, where
-/// `prompt_ts` is when the directive shows up as a user turn at or after `since_ms` (`None`: not
-/// yet) and `reply` is everything the agent said after it.
+/// The answer to a directive, anchored on the directive itself: `(prompt_ts, reply, has_response)`,
+/// where `prompt_ts` is when the directive shows up as a user turn at or after `since_ms` (`None`:
+/// not yet), `reply` is everything the agent said after it, and `has_response` is true once any
+/// agent, tool, or outgoing peer turn appears after the directive (even when its whole-second
+/// timestamp ties `prompt_ts`, which happens routinely on Antigravity `agy` because `agy` stamps
+/// `created_at` with whole-second precision at step start).
 ///
 /// A directive is typed into a BUSY agent too, so "everything since it was sent" would hand back
 /// the end of whatever the agent was already doing. Claude records a message typed mid-turn either
@@ -6280,28 +6283,60 @@ pub(crate) fn agent_reply_after_prompt(
     tab_id: &str,
     prompt: &str,
     since_ms: i64,
-) -> (Option<i64>, Option<String>) {
-    let Some((rt, sid)) = resolved_session_for_tab(app, tab_id) else { return (None, None) };
+) -> (Option<i64>, Option<String>, bool) {
+    let Some((rt, sid)) = resolved_session_for_tab(app, tab_id) else {
+        return (None, None, false);
+    };
     // The whole cached window (`transcript::TURNS_KEEP`): a long reply after the directive must
     // not push the directive out of sight, or its answer is never found.
     let Some(turns) = transcript::turns_for(rt, &sid, 200, transcript::ToolRender::Marker) else {
-        return (None, None);
+        return (None, None, false);
     };
+    extract_reply_after_prompt(&turns, rt, prompt, since_ms)
+}
+
+fn extract_reply_after_prompt(
+    turns: &[Value],
+    rt: AgentRuntime,
+    prompt: &str,
+    since_ms: i64,
+) -> (Option<i64>, Option<String>, bool) {
     let ts = |t: &Value| t.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
     let text = |t: &Value| t.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    // `agy` writes whole-second `created_at` timestamps (`.000Z`), so a millisecond `since_ms`
+    // baseline (e.g. `Date.now()` fallback on a fresh tab) sits up to 999 ms ahead of a prompt
+    // written in the same second. Floor `since_ms` to whole seconds for Gemini.
+    let floor_ms = if rt == AgentRuntime::Gemini {
+        since_ms.div_euclid(1000) * 1000
+    } else {
+        since_ms
+    };
     // The LAST matching user turn: the same directive sent twice answers to the newer one.
     let Some(at) = turns.iter().rposition(|t| {
-        t.get("role").and_then(|r| r.as_str()) == Some("user") && ts(t) >= since_ms && prompt_matches(prompt, &text(t))
+        t.get("role").and_then(|r| r.as_str()) == Some("user")
+            && ts(t) >= floor_ms
+            && prompt_matches(prompt, &text(t))
     }) else {
-        return (None, None);
+        return (None, None, false);
     };
-    let parts: Vec<String> = turns[at + 1..]
+    let tail = &turns[at + 1..];
+    let has_response = tail.iter().any(|t| {
+        let role = t.get("role").and_then(|r| r.as_str());
+        matches!(role, Some("agent" | "tool"))
+            || (role == Some("system")
+                && t.get("kind").and_then(|k| k.as_str()) == Some("peer_message")
+                && t.get("peer")
+                    .and_then(|p| p.get("direction"))
+                    .and_then(|d| d.as_str())
+                    == Some("out"))
+    });
+    let parts: Vec<String> = tail
         .iter()
         .filter(|t| t.get("role").and_then(|r| r.as_str()) == Some("agent"))
         .map(text)
         .filter(|s| !s.trim().is_empty())
         .collect();
-    (Some(ts(&turns[at])), (!parts.is_empty()).then(|| parts.join("\n\n")))
+    (Some(ts(&turns[at])), (!parts.is_empty()).then(|| parts.join("\n\n")), has_response)
 }
 
 /// Is this user turn the directive that was typed? Compared on collapsed whitespace and the
@@ -8806,5 +8841,70 @@ mod tests {
         assert!(rank(AgentSessionState::Active) > rank(AgentSessionState::WaitingInput));
         assert!(rank(AgentSessionState::WaitingInput) > rank(AgentSessionState::Stopped));
         assert_eq!(runtime_key(AgentRuntime::Claude), "claude");
+    }
+
+    #[test]
+    fn agy_reply_after_prompt_handles_same_second_timestamps_and_ms_baseline() {
+        let prompt = "Give me a one-line status update.";
+        let sec = 1_795_796_246_000_i64;
+
+        // 1. Prompt + agent reply share the exact same whole second; since_ms has ms precision
+        //    from a fresh-tab `Date.now()` fallback (+450 ms).
+        let turns = vec![
+            json!({ "role": "user", "text": prompt, "ts": sec }),
+            json!({ "role": "agent", "text": "All tests pass.", "ts": sec }),
+        ];
+        assert_eq!(
+            extract_reply_after_prompt(&turns, AgentRuntime::Gemini, prompt, sec + 450),
+            (Some(sec), Some("All tests pass.".to_string()), true)
+        );
+        // Claude keeps strict ms comparison (its transcripts carry millisecond timestamps).
+        assert_eq!(
+            extract_reply_after_prompt(&turns, AgentRuntime::Claude, prompt, sec + 450),
+            (None, None, false)
+        );
+
+        // 2. Prompt landed alone (no response yet) -> has_response is false.
+        let prompt_only = vec![json!({ "role": "user", "text": prompt, "ts": sec })];
+        assert_eq!(
+            extract_reply_after_prompt(&prompt_only, AgentRuntime::Gemini, prompt, sec),
+            (Some(sec), None, false)
+        );
+
+        // 3. Compaction divider alone is not an agent response.
+        let with_divider = vec![
+            json!({ "role": "user", "text": prompt, "ts": sec }),
+            json!({ "role": "system", "text": "Context compacted · 500k → 6k", "ts": sec }),
+        ];
+        assert_eq!(
+            extract_reply_after_prompt(&with_divider, AgentRuntime::Gemini, prompt, sec),
+            (Some(sec), None, false)
+        );
+
+        // 4. Same-second tool-only response sets has_response=true with reply=None.
+        let tool_only = vec![
+            json!({ "role": "user", "text": prompt, "ts": sec }),
+            json!({ "role": "tool", "text": "replyToOverlord", "ts": sec }),
+        ];
+        assert_eq!(
+            extract_reply_after_prompt(&tool_only, AgentRuntime::Gemini, prompt, sec),
+            (Some(sec), None, true)
+        );
+
+        // 5. Same-second outgoing peer message also counts as a response.
+        let peer_out = vec![
+            json!({ "role": "user", "text": prompt, "ts": sec }),
+            json!({
+                "role": "system",
+                "kind": "peer_message",
+                "peer": { "direction": "out", "name": "QA" },
+                "text": "Done.",
+                "ts": sec
+            }),
+        ];
+        assert_eq!(
+            extract_reply_after_prompt(&peer_out, AgentRuntime::Gemini, prompt, sec),
+            (Some(sec), None, true)
+        );
     }
 }

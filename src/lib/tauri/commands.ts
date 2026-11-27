@@ -671,12 +671,13 @@ export async function getAgentReplySince(tabId: string, sinceMs: number): Promis
 
 /** The answer to a directive, anchored on the directive's own turn in the transcript (it may have
  *  been typed into a busy agent): `prompt_ts` null until it shows up, `reply` null until the agent
- *  says something after it. */
+ *  says something after it, `has_response` true once any agent/tool turn follows the directive
+ *  (even when its whole-second timestamp ties `prompt_ts`, as on Antigravity `agy`). */
 export async function getAgentReplyAfterPrompt(
   tabId: string,
   prompt: string,
   sinceMs: number,
-): Promise<{ prompt_ts: number | null; reply: string | null }> {
+): Promise<{ prompt_ts: number | null; reply: string | null; has_response: boolean }> {
   return invoke('get_agent_reply_after_prompt', { tabId, prompt, sinceMs });
 }
 
