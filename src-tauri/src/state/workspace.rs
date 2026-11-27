@@ -2001,8 +2001,6 @@ pub struct Preferences {
     pub migrate_tab_notes: bool,
     #[serde(default)]
     pub notes_scope: Option<String>,
-    #[serde(default = "default_true")]
-    pub show_recent_workspaces: bool,
     #[serde(default)]
     pub workspace_sort_order: String,
     #[serde(default)]
@@ -2497,7 +2495,6 @@ impl Default for Preferences {
             notification_volume: default_notification_volume(),
             migrate_tab_notes: true,
             notes_scope: None,
-            show_recent_workspaces: true,
             workspace_sort_order: String::new(),
             show_workspace_tab_count: false,
             tab_button_style: default_tab_button_style(),

@@ -1235,23 +1235,6 @@
       {:else if activeSection === 'workspace'}
         <h3 class="section-heading">Sidebar</h3>
 
-        <div class="setting" style="align-items: flex-start;">
-          <div>
-            <label for="show-recent">Show Recent Workspaces</label>
-            <p class="setting-hint">Shows recently visited workspaces at the top of the sidebar for quick access. Workspaces appear here for 30 minutes after switching away from them.</p>
-          </div>
-          <button
-            id="show-recent"
-            class="toggle"
-            class:active={preferencesStore.showRecentWorkspaces}
-            onclick={() => preferencesStore.setShowRecentWorkspaces(!preferencesStore.showRecentWorkspaces)}
-            aria-pressed={preferencesStore.showRecentWorkspaces}
-            aria-label="Toggle show recent workspaces"
-          >
-            <span class="toggle-knob"></span>
-          </button>
-        </div>
-
         <div class="setting">
           <div>
             <label for="show-tab-count">Show Tab Count</label>

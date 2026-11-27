@@ -1212,7 +1212,6 @@ fn preference_meta() -> Vec<(&'static str, PrefMeta)> {
         ("notes_width", PrefMeta { description: "Notes panel width in pixels", ptype: "number", category: "Notes", read_only: false }),
         ("notes_word_wrap", PrefMeta { description: "Wrap long lines in notes panel", ptype: "boolean", category: "Notes", read_only: false }),
         ("notes_scope", PrefMeta { description: "Default notes panel view (tab, workspace)", ptype: "string", category: "Notes", read_only: false }),
-        ("show_recent_workspaces", PrefMeta { description: "Show recently used workspaces section in sidebar", ptype: "boolean", category: "Workspace", read_only: false }),
         ("workspace_sort_order", PrefMeta { description: "Workspace list sort order (default, alphabetical, recent)", ptype: "string", category: "Workspace", read_only: false }),
         ("show_workspace_tab_count", PrefMeta { description: "Show tab count badges on workspace items", ptype: "boolean", category: "Workspace", read_only: false }),
         ("claude_ide", PrefMeta { description: "Enable Claude Code IDE integration (MCP server)", ptype: "boolean", category: "Integration", read_only: false }),

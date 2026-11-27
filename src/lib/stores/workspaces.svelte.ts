@@ -144,8 +144,6 @@ function pickNextActiveTab(allTabs: Tab[], closedIndex: number): string | null {
   return tabs[newIndex]?.id ?? null;
 }
 
-const RECENT_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
-
 /** Record follow-ups lost with a tab that is going away for good (docs/follow-ups.md §3). */
 function logDroppedFollowUps(tab: Tab | undefined, how: string) {
   const pending = tab?.follow_ups ?? [];
@@ -232,9 +230,6 @@ function createWorkspacesStore() {
   // workspaces un-suspended by load() (full-restore mode). Their pty_id was
   // cleared at suspend time, so buildRestoreList in +page needs this hint.
   const pendingWakeTabIds = new Set<string>();
-  // Tick counter to force re-evaluation of recentWorkspaces when entries expire
-  let _recentTick = $state(0);
-  let _recentTimer: ReturnType<typeof setInterval> | null = null;
 
   /** Find a tab by workspace/pane/tab IDs (helper for direct mutations). */
   function findTab(workspaceId: string, paneId: string, tabId: string) {
@@ -243,18 +238,6 @@ function createWorkspacesStore() {
     const tab = pane?.tabs.find(t => t.id === tabId);
     return { ws, pane, tab };
   }
-
-  const recentWorkspaces = $derived.by(() => {
-    void _recentTick; // subscribe to tick for expiry re-evaluation
-    const now = Date.now();
-    return workspaces.filter(w => {
-      if (w.id === activeWorkspaceId) return false;
-      if (w.suspended) return false;
-      if (w.overlord) return false; // Overlord workspace has its own accessor row
-      const ts = lastSwitchedAt.get(w.id);
-      return ts != null && (now - ts) < RECENT_WINDOW_MS;
-    });
-  });
 
   const activeWorkspace = $derived(
     workspaces.find(w => w.id === activeWorkspaceId && !w.suspended) ?? null
@@ -320,7 +303,6 @@ function createWorkspacesStore() {
     get sidebarCollapsed() { return sidebarCollapsed; },
     get fileTreeOpen() { return fileTreeOpen; },
     get fileTreeWidth() { return fileTreeWidth; },
-    get recentWorkspaces() { return recentWorkspaces; },
     get pendingWakeTabIds() { return pendingWakeTabIds; },
     get lastSwitchedAt() { return lastSwitchedAt; },
 
@@ -546,11 +528,6 @@ function createWorkspacesStore() {
       // Create default workspace if none exist
       if (workspaces.length === 0) {
         await this.createWorkspace('Default');
-      }
-
-      // Start periodic tick to expire recent workspaces
-      if (!_recentTimer) {
-        _recentTimer = setInterval(() => { _recentTick++; }, 60_000);
       }
 
       // Keep local tab.last_cwd in sync with live OSC state and persist to backend

@@ -46,7 +46,6 @@ function createPreferencesStore() {
   let notificationVolume = $state(50);
   let migrateTabNotes = $state(true);
   let notesScope = $state<'tab' | 'workspace'>('tab');
-  let showRecentWorkspaces = $state(true);
   let workspaceSortOrder = $state('default');
   let showWorkspaceTabCount = $state(false);
   let tabButtonStyle = $state('hover');
@@ -174,7 +173,6 @@ function createPreferencesStore() {
     get notificationVolume() { return notificationVolume; },
     get migrateTabNotes() { return migrateTabNotes; },
     get notesScope() { return notesScope; },
-    get showRecentWorkspaces() { return showRecentWorkspaces; },
     get workspaceSortOrder() { return workspaceSortOrder; },
     get showWorkspaceTabCount() { return showWorkspaceTabCount; },
     get tabButtonStyle() { return tabButtonStyle; },
@@ -328,7 +326,6 @@ function createPreferencesStore() {
       notificationVolume = prefs.notification_volume ?? 50;
       migrateTabNotes = prefs.migrate_tab_notes ?? true;
       notesScope = (prefs.notes_scope === 'workspace' ? 'workspace' : 'tab');
-      showRecentWorkspaces = prefs.show_recent_workspaces ?? true;
       workspaceSortOrder = prefs.workspace_sort_order || 'default';
       showWorkspaceTabCount = prefs.show_workspace_tab_count ?? false;
       tabButtonStyle = prefs.tab_button_style || 'hover';
@@ -595,11 +592,6 @@ function createPreferencesStore() {
 
     async setNotesScope(value: 'tab' | 'workspace') {
       notesScope = value;
-      await this.save();
-    },
-
-    async setShowRecentWorkspaces(value: boolean) {
-      showRecentWorkspaces = value;
       await this.save();
     },
 
@@ -1064,7 +1056,6 @@ function createPreferencesStore() {
       notificationVolume = prefs.notification_volume ?? 50;
       migrateTabNotes = prefs.migrate_tab_notes ?? true;
       notesScope = (prefs.notes_scope === 'workspace' ? 'workspace' : 'tab');
-      showRecentWorkspaces = prefs.show_recent_workspaces ?? true;
       workspaceSortOrder = prefs.workspace_sort_order || 'default';
       showWorkspaceTabCount = prefs.show_workspace_tab_count ?? false;
       tabButtonStyle = prefs.tab_button_style || 'hover';
@@ -1189,7 +1180,6 @@ function createPreferencesStore() {
         notification_volume: notificationVolume,
         migrate_tab_notes: migrateTabNotes,
         notes_scope: notesScope === 'workspace' ? 'workspace' : null,
-        show_recent_workspaces: showRecentWorkspaces,
         workspace_sort_order: workspaceSortOrder === 'default' ? '' : workspaceSortOrder,
         show_workspace_tab_count: showWorkspaceTabCount,
         tab_button_style: tabButtonStyle === 'hover' ? '' : tabButtonStyle,
