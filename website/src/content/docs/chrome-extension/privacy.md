@@ -65,7 +65,10 @@ In `chrome.storage.session`, which Chrome clears when the browser closes:
 Console and network logs are kept in memory only while a tab is linked (the last 200 console
 messages and 300 requests), and are discarded when the link ends.
 
-Nothing is kept in `chrome.storage.local` or synced storage.
+In `chrome.storage.local`, which survives a browser restart: the names of the tab groups it
+made (an agent's workspace and tab, such as "api/nova-agent"; the last 100), so it can tell its
+own groups from yours and ungroup ones a restart left behind. Nothing else is kept there, and
+nothing in synced storage.
 
 ## How it finds maiTerm
 
