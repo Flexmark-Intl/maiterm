@@ -89,7 +89,7 @@ Agents name their workstream as they go, by name rather than by id, so a job is 
 
 Press `Cmd+Shift+E` — or click the lanes icon in the tab bar — to open the task panel beside the terminal. It's the same dock as [notes](/features/workspaces/#per-tab-notes) (`Cmd+E`), per tab, and you can drag its left edge to resize it; the width is remembered.
 
-The panel answers one question — *what am I doing here* — so it shows **this tab's work**, grouped by workstream with a count on each heading. Everything else is a pointer: the header carries collapsed counts for `N unclaimed`, `N parked`, `N done` and `N dropped`, and a closing line says how many tasks are in flight on other tabs.
+The panel answers one question — *what am I doing here* — so it shows **this tab's work**. What's in flight sits at the top under **Active now**, with a spinner and the workstream each task belongs to; the rest is grouped by workstream with a count on each heading. Everything else is a pointer: the header carries collapsed counts for `N unclaimed`, `N parked`, `N done` and `N dropped`, and a closing line says how many tasks are in flight on other tabs.
 
 ![The task panel beside a terminal: the task active now at the top, then the Sign-in flow workstream's review and blocked tasks, each with its one-line note](/screenshots/tasks-panel.webp)
 
@@ -155,7 +155,7 @@ When *you* delete a row, the owning agent is told — otherwise it would restate
 
 Every agent tab is told about the list when its session starts, resumes, forks or compacts — including *if you already have a task or todo list for this project, move it here*. That clause matters because resume, fork and compaction are exactly when an agent is mid-project holding a live list: without it, adoption would wait for the agent's next multi-step job and everything already in flight would stay invisible. Finished items are left behind rather than migrated, so a fresh board doesn't fill with history.
 
-For Claude Code there's a second, free route: maiTerm reads that runtime's own task store one-way and mirrors it in, marked as imported. A Claude tab that never learns the tools still shows up. Nothing is ever written back, and an imported row is never allowed to overwrite work you or an agent edited directly.
+For Claude Code and Antigravity there's a second, free route while [Overlord](/features/overlord/) is on: maiTerm reads the runtime's own checklist (Claude Code's task list, Antigravity's plan steps) one-way and mirrors it in, marked as imported. A tab that never learns the tools still shows up. Nothing is ever written back, and an imported row is never allowed to overwrite work you or an agent edited directly.
 
 ## Archiving carries the work with the tab
 

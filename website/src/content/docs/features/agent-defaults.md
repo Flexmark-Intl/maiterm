@@ -16,10 +16,12 @@ There's a part per agent, headed with the file it edits. A part whose agent isn'
 | Agent | File | Settings |
 |-------|------|----------|
 | **Claude Code** | `~/.claude/settings.json` | **Advisor**, **Default model**, **Effort** (one row per model, since Claude keeps effort per model), **Keep transcripts (days)** |
-| **Codex** | `~/.codex/config.toml` | **Default model**, **Reasoning effort**, **Approvals reviewer** |
+| **Codex** | `~/.codex/config.toml` | **Default model**, **Reasoning effort**, **Approvals reviewer**, **Screen** |
 | **Antigravity** | `~/.gemini/antigravity-cli/settings.json` | **Agent mode**, **Thinking**, **Messages sent while it works** |
 
 Every control has **Agent's default**, which removes the setting from the file rather than writing today's default, so when the agent's own default changes, you get the new one. maiTerm touches only the keys this section offers; everything else in the file is kept, and a Codex `config.toml` keeps its layout and comments. Antigravity's model and effort aren't kept in its settings file, so they aren't offered.
+
+Codex's **Screen** is **Scrollback** or **Fullscreen** (`[tui] fullscreen_transcript`). Fullscreen, Codex's default, takes over the whole terminal on the alternate screen, so nothing of the conversation reaches the terminal's own history: you can't scroll back through it, search it or keep it across a restart. **Scrollback** runs Codex inline, so its conversation stays in the tab's history like any other output.
 
 With your own `CLAUDE_CONFIG_DIR` and no [managed accounts](/features/accounts/), the Claude part edits the `settings.json` your tabs actually read. With managed accounts, one file reaches every account.
 

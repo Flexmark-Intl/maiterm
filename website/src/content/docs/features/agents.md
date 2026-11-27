@@ -11,7 +11,7 @@ maiTerm integrates deeply with coding agents — **Claude Code**, **OpenAI Codex
 |-------|---------------|-------------|
 | **Claude Code** | Yes | MCP/IDE tools, hooks + the [maiTerm mod](#the-maiterm-mod-claude-code), auto-resume, Agent Bridge (fork or connect), SSH bridge, `/maiterm` skill + status line |
 | **Codex** | Yes | MCP/IDE tools, lifecycle hooks, auto-resume, Agent Bridge (connect, or fork — new), SSH bridge, `maiterm` prompt |
-| **Antigravity** (`agy`) — new | Yes | MCP/IDE tools, lifecycle hooks, auto-resume, Agent Bridge (connect), SSH bridge, a maiTerm plugin with the `maiterm` skill |
+| **Antigravity** (`agy`) — new | Yes | MCP/IDE tools, lifecycle hooks, auto-resume, Agent Bridge (connect), SSH bridge, a maiTerm plugin with the `maiterm` skill + status line |
 
 All three get the same core treatment: live state in the sidebar and footer, tab activity indicators, auto-resume after a crash or relaunch, and notifications — all driven through the same hooks pipeline. Integration is on by default for each; it only takes effect once you actually run that agent.
 
@@ -20,10 +20,12 @@ All three get the same core treatment: live state in the sidebar and footer, tab
 maiTerm treats an `agy` tab as a full agent, the way it treats Claude Code and Codex:
 
 - **It's in the Loom, the sidebar and on your phone**, with its chat, its model and how much of its context it has used. The [Loom](/features/loom/)'s model and effort menus work for it too.
-- **What it's stopped at reaches you.** Antigravity has no hook for its tool-permission prompt, so maiTerm reads the prompt off the screen and shows it as waiting for permission, answerable from the Loom, the Overlord or your [phone](/features/mailink/). Its workspace-trust dialog is treated the same way: maiTerm waits for you there rather than pressing a key.
+- **What it's stopped at reaches you.** Antigravity has no hook for its permission prompts, so maiTerm reads them off the screen — a tool's, and a shell command's **Run this command?**, under the default status bar, a custom status line or both — and shows the tab as waiting for permission, answerable from the Loom, the Overlord or your [phone](/features/mailink/). Its workspace-trust dialog is treated the same way: maiTerm waits for you there rather than pressing a key.
 - **It never types over your draft.** Messages maiTerm sends it — from the phone, the Loom, a peer or a follow-up — read its input box first, exactly as they do for Claude Code and Codex.
 - **Its subagents show in its chat**, with their progress.
 - **It resumes with its conversation** after a restart, through `agy --conversation …`.
+- **Its plan reaches the board.** Antigravity is told to keep multi-step work on the [task board](/features/tasks/); a plan it keeps in its own checklist instead is imported there while [Overlord](/features/overlord/) is on, the way Claude Code's is.
+- **Its replies reach your phone and the Overlord in full**, read from its own transcript.
 
 Antigravity sessions can't be forked, so a bridge to one connects to an existing tab.
 
@@ -349,7 +351,7 @@ You can also paste images from your clipboard (Cmd+V) into an agent session. mai
 
 For Claude Code, maiTerm installs a skill that gives your agent fast slash-command access to the most common tools — `/maiterm notes`, `/maiterm tabs`, `/maiterm diag`, and more — without making it hunt through every MCP tool. It's written on launch and removed on exit, and it works the same way over SSH on bridged remote hosts. Codex gets an equivalent `maiterm` prompt written to `~/.codex/prompts/`, and Antigravity gets the skill inside maiTerm's plugin, beside a short rules file it reads at the start of every session.
 
-It also ships a recommended **status line** for Claude Code. Run `/maiterm-statusline` (not Claude Code's own `/statusline`, which copies your shell prompt) and your agent installs a compact status line showing host · cwd · git branch · model · reasoning effort · context usage. The installer renders a live colored preview first, only writes to `~/.claude/statusline-command.sh` and your settings (it's idempotent — safe to re-run), and tells you if `jq` is missing instead of leaving a broken line. It works on local sessions and on SSH-bridged hosts.
+It also ships a recommended **status line** for Claude Code and Antigravity. Run `/maiterm-statusline` (not Claude Code's own `/statusline`, which copies your shell prompt) and your agent installs a compact status line showing host · cwd · git branch · model · reasoning effort · context usage. The installer renders a live colored preview first, only writes a `statusline-command.sh` and the `statusLine` setting for each agent it finds on the machine (`~/.claude/` for Claude Code, `~/.gemini/antigravity-cli/` for Antigravity) (it's idempotent — safe to re-run), and tells you if `jq` is missing instead of leaving a broken line. It works on local sessions and on SSH-bridged hosts.
 
 ## Dev/Production Isolation
 

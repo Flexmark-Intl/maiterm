@@ -5,7 +5,7 @@ description: Switch off the parts of a coding agent that serve its vendor rather
 
 Coding agents ship with behaviour that works for the vendor rather than for you: usage telemetry, uploaded error reports, in-session feedback surveys, Remote Control exposing your sessions to claude.ai and the mobile app, comments other people leave on your claude.ai artifacts arriving in your session as prompts, and a `Co-Authored-By: Claude` trailer stamped into your commit history — plus a permission prompt for every memory Claude Code writes, which it never meant to ask, and a fullscreen renderer new installs switch on by themselves that keeps a session out of your scrollback. **Preferences → Deshittification** switches those off — one rule at a time, or the whole group with a single toggle.
 
-There's one group today, **Claude Code**. maiTerm edits the agent's *own* configuration — `~/.claude/settings.json` and your global git config — so the rules hold in every terminal you run the agent in, not just maiTerm's. Claude Code picks them up on its next session. To pick values rather than switch things off — each agent's model, effort, advisor and how long it keeps transcripts — see [Agent Defaults](/features/agent-defaults/).
+There are two groups, **Claude Code** and **Antigravity (agy)**. maiTerm edits the agent's *own* configuration — `~/.claude/settings.json` and your global git config, or `~/.gemini/antigravity-cli/settings.json` — so the rules hold in every terminal you run the agent in, not just maiTerm's. Each agent picks them up on its next session. To pick values rather than switch things off — each agent's model, effort, advisor and how long it keeps transcripts — see [Agent Defaults](/features/agent-defaults/).
 
 ## The rules
 
@@ -24,6 +24,17 @@ There's one group today, **Claude Code**. maiTerm edits the agent's *own* config
 | **Strip agent credit at commit time** | A `commit-msg` hook deletes `Co-Authored-By: Claude` and `Generated with Claude Code` lines from your commit messages |
 
 The last two are deliberately a pair. The setting is Anthropic's to honour; the hook is yours, and it strips the trailers whether or not the setting is still respected.
+
+## Antigravity
+
+Antigravity asks before every MCP tool and every shell command it runs. Two rules, both **off** until you switch them on, add a wildcard to `permissions.allow` in its settings so it stops asking:
+
+| Rule | What it does |
+|------|--------------|
+| **Auto-allow all MCP tools** | Adds `mcp(*)`, so tools from every MCP server you configured run without a prompt. Switching it off removes only `mcp(*)`: maiTerm's own `mcp(maiterm/*)` rule and any rules you added for particular servers stay |
+| **Auto-allow all terminal commands** | Adds `command(*)`, so shell commands run without stopping at **Run this command?**, including ones that change things on remote services |
+
+Antigravity's precedence is Deny, then Ask, then Allow, so an `ask` or `deny` rule you set for a particular tool or command (with `/permissions`) still wins over either wildcard.
 
 ## The toggle *is* the state on disk
 
@@ -45,6 +56,8 @@ Two limits worth knowing:
 ## It travels to the hosts you bridge to
 
 An agent on a remote server gets the same treatment. The rules are applied on each [SSH bridge](/features/agents/#ssh-mcp-bridge) connect, so a host you work on through maiTerm matches your Mac. Your Mac is the source of truth in both directions: switch a rule off here and it's removed there on the next connect, so an undo actually travels.
+
+The Antigravity rules travel the same way, to `~/.gemini/antigravity-cli/settings.json` on the host.
 
 Deshittification never gates a bridge — a rule that can't be applied on a remote host doesn't stop the connection or fail the setup. A host you only ever `ssh` into by hand is never touched. A bridged host gets the default-on rules like your Mac does, and nothing else unless you switch it on. **Keep the classic terminal UI** writes `tui: "default"` on a host only where its `settings.json` has no `tui` setting yet, so a `/tui fullscreen` chosen there survives every connect; switching the rule off here removes only maiTerm's `"default"`.
 

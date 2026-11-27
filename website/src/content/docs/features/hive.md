@@ -36,6 +36,10 @@ A Hive replaces the workspace's terminals with its own view:
 
 Across the top: the goal on one line (**More** shows the rest), **Board**, **Needs you**, **Gallery** and **Memory** (`Cmd+Shift+Y` switches), the Hive's status with **Pause** and **Resume**, and a bar of readouts — slots in use, budget, criteria, where work lands, autonomy and the run queue. The ⋯ menu holds **New goal…**, **Earlier goals**, **Land log** and **Delete Hive…**.
 
+**How far it has come.** Under the goal is the Queen's own estimate: a bar, a percentage and a one-line note, labelled **Queen's estimate** with the time she set it. She's asked to set it once she has a plan and again as work lands or slips, weighed by what's landed and proven against the criteria rather than by how many workers are busy. It's her claim, not a measurement: an estimate she hasn't updated in an hour is shown dimmed, its time in yellow, and only a finished Hive reads **Complete**.
+
+**What the crew is doing.** Beside the status, one bar shows every worker in four groups — landed, in flight, needing a look, waiting — with retired workers and undone lands counted apart, never as landed. Anything that needs a look is named in words and colour (*1 needs you*, *2 failed*, *1 suspect land*, *3 blocked*, *1 quiet*), so one stuck worker among 180 still shows.
+
 The Hive's agents don't raise **Command completed** notifications: the Queen reports for her workers.
 
 | Shortcut | Action |
@@ -175,7 +179,7 @@ A finished Hive is **Done**, with the Queen's **Report**. Give a Done or paused 
 
 The Queen keeps running after Done. Write to her in the Hive's message box, or from your phone, and the Hive picks up again in the same session. Typing in her own terminal doesn't wake the Hive — her terminal says so while the Hive is Done — so use the message box.
 
-**Delete Hive…** lists what stops, which branches haven't landed, and what's kept. Clean copies are removed; anything holding work, the shared memory included, stays on disk, and no branch is ever deleted. The workers' Claude chats are deleted with the Hive — workers never clean up their own transcripts, and deleting is the point after which none is resumed or read back. The sheet lists them and the toast counts them; the Queen's chats are kept.
+**Delete Hive…** lists what stops, which branches haven't landed, and what's kept. Clean copies are removed; anything holding work, the gallery and the shared memory included, stays on disk unless you tick **Also delete the gallery** or **Also delete the shared memory**, and no branch is ever deleted. Deleting the Hive's whole [workspace](/features/workspaces/) from the sidebar deletes its gallery and shared memory too, and says so before you hold the button. The workers' Claude chats are deleted with the Hive — workers never clean up their own transcripts, and deleting is the point after which none is resumed or read back. The sheet lists them and the toast counts them; the Queen's chats are kept.
 
 ## An agent can offer you a Hive
 

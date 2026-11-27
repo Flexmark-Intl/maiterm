@@ -53,13 +53,13 @@ A few things stay put. Only terminal and editor tabs can cross to another window
 
 ### Moving a project folder
 
-Renaming or moving a project folder normally strands everything that knew it by path: tabs reopen in a folder that isn't there, and an agent resumed in the new location starts with none of its history, because Claude Code, Codex and Gemini all key their per-project state by the folder's path.
+Renaming or moving a project folder normally strands everything that knew it by path: tabs reopen in a folder that isn't there, and an agent resumed in the new location starts with none of its history, because Claude Code, Codex, Antigravity and Gemini all key their per-project state by the folder's path.
 
 Right-click a workspace and choose **Move project…**, then pick where the folder should go. Before anything happens, the dialog lists what will change: the folder renamed on disk, how many tabs and services will point at the new location, the agent state that will be carried, and which running tabs will be restarted — with any agent still mid-turn named, because it will be interrupted. Then:
 
 - **Agents in the folder are paused first, in every window.** A running agent keeps writing to the path it opened, and would recreate the old folder behind the move. Only once every window has confirmed is the folder moved; if any window doesn't answer, nothing moves and every paused tab is woken again.
 - **Everything that pointed at it follows** — tabs, open and archived, editor and diff tabs, [stack](/features/stack/) services, [follow-ups](/features/follow-ups/) and the watch-script approvals that go with them.
-- **So does each agent's own record of the project** — Claude Code's sessions, memory, folder trust and prompt history (for every [account](/features/accounts/)), Codex's trust and threads, Gemini's project registry and trust.
+- **So does each agent's own record of the project** — Claude Code's sessions, memory, folder trust and prompt history (for every [account](/features/accounts/)), Codex's trust and threads, Antigravity's folder trust and the conversations it lists for the folder, Gemini's project registry and trust.
 - **The paused tabs come back in the new folder**, each resuming its agent in the same session.
 
 The folder stays on the same disk: to move one to another volume, move it yourself and let maiTerm find it (below). SSH tabs and remote folders aren't covered, and neither are agents running in another terminal app, which keep writing under the old path.

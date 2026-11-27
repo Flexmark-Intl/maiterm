@@ -60,6 +60,18 @@ description: Complete list of maiTerm keyboard shortcuts.
 | `Cmd+/` | Help |
 | `Cmd+Q` | Quit |
 
+## Sidebar
+
+While a workspace row or the filter box has focus.
+
+| Shortcut | Action |
+|----------|--------|
+| Type | Filter the workspaces by name (from a focused row, typing goes into the filter box) |
+| `Enter` | In the filter: open the first match. On a row: open that workspace |
+| `↓` | From the filter: go to the first match |
+| `Escape` | Clear the filter |
+| `Shift+F10` or the menu key | Open the focused row's menu: rename, suspend, mute, stack, mesh, move, share, delete |
+
 ## Files
 
 While the [Files](/features/files/) tree has focus.

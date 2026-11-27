@@ -215,7 +215,7 @@ const EVERYTHING = [
     // and components/agentDefaults/AgentDefaultsPane.svelte. Only TICKED settings are managed;
     // hosts need python3 — don't promise "every machine" without the tick.
     title: 'Every agent’s defaults, one place',
-    body: 'Set what every session starts with — Claude Code’s model, effort and advisor, Codex’s model and reasoning effort, Antigravity’s mode — written into each agent’s own settings file. Tick a setting and every SSH host you bridge to follows it, removals included; an unticked one is never touched.',
+    body: 'Set what every session starts with — Claude Code’s model, effort and advisor, Codex’s model, reasoning effort and whether it keeps its conversation in your scrollback, Antigravity’s mode — written into each agent’s own settings file. Tick a setting and every SSH host you bridge to follows it, removals included; an unticked one is never touched.',
   },
   {
     // v3.18.0. Backed by features/apple-mail.md, checked against src-tauri/src/mail/ and
@@ -411,7 +411,7 @@ const EVERYTHING = [
         <div class="ln-card">
           <h3>Stopped? You see where</h3>
           <p>
-            Its permission prompt and its workspace-trust dialog are read off the screen and wait
+            Its permission prompts — for a tool or a shell command — and its workspace-trust dialog are read off the screen and wait
             for you, answerable from the Loom or your phone. Nothing maiTerm sends it is typed
             over a message you are still writing.
           </p>
@@ -465,8 +465,8 @@ const EVERYTHING = [
       </p>
       <p class="ln-lead">
         You confirm what <em>done</em> means before any worker starts, and watch the whole thing
-        on one screen: the Queen's chat, a board of workers with what each is doing right now,
-        and any worker's chat beside it.
+        on one screen: the Queen's chat, her running estimate of how far the goal has come, a
+        board of workers with what each is doing right now, and any worker's chat beside it.
       </p>
 
       <div class="ln-cards">
