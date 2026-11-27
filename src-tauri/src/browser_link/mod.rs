@@ -254,7 +254,7 @@ fn emit_changed(app: &AppHandle) {
 /// rename is remembered even when no link holds it now, for a link that is re-announced later.
 pub fn remap_tab(app: &AppHandle, from: &str, to: &str) {
     use tauri::Manager;
-    let names = app.try_state::<Arc<AppState>>().and_then(|s| tab_names(&s, to));
+    let names = app.try_state::<Arc<AppState>>().and_then(|s| group_names(&s, to));
     let mut reg = REG.lock();
     if reg.renamed.len() >= RENAMED_KEEP {
         reg.renamed.clear();
@@ -284,11 +284,12 @@ pub fn remap_tab(app: &AppHandle, from: &str, to: &str) {
     }
 }
 
-/// Tell the extension a link's maiTerm tab id or names: after a reload (a new id), a rename, or a
-/// move to another workspace. The extension re-titles the Chrome group from the names.
-fn notify_relinked(link: &mut Link, conns: &HashMap<String, Conn>, names: Option<&(String, String)>) {
-    if let Some((tab, ws)) = names {
-        link.told_label = label(tab, ws);
+/// Tell the extension a link's maiTerm tab id or names: after a reload (a new id), a rename the
+/// human made, or a move to another workspace. The extension re-titles the Chrome group from the
+/// names; a null name leaves it as it was.
+fn notify_relinked(link: &mut Link, conns: &HashMap<String, Conn>, names: Option<&GroupNames>) {
+    if let Some(n) = names {
+        link.told_label = n.label();
     }
     if let Some(c) = conns.get(&link.conn_id) {
         let frame = serde_json::json!({
@@ -296,17 +297,14 @@ fn notify_relinked(link: &mut Link, conns: &HashMap<String, Conn>, names: Option
             "params": {
                 "chromeTabId": link.chrome_tab_id,
                 "maitermTabId": link.maiterm_tab_id,
-                "maitermTabName": names.map(|n| &n.0),
-                "maitermWorkspaceName": names.map(|n| &n.1),
+                "maitermTabName": names.and_then(|n| n.tab.as_ref()),
+                "maitermWorkspaceName": names.map(|n| &n.workspace),
             },
         });
         let _ = c.tx.send(frame.to_string());
     }
 }
 
-fn label(tab: &str, ws: &str) -> String {
-    format!("{ws}/{tab}")
-}
 
 /// The live tab an id now names: itself, or where its reloads led. None for a closed tab.
 fn current_id(state: &Arc<AppState>, reg: &Registry, id: &str) -> Option<String> {
@@ -362,9 +360,9 @@ fn prune(state: &Arc<AppState>, app: &AppHandle) {
     for mut l in std::mem::take(&mut reg.links) {
         match current_id(state, &reg, &l.maiterm_tab_id) {
             Some(id) if id == l.maiterm_tab_id => {
-                // Renamed, or moved to another workspace: the group's title follows.
-                if let Some(names) = tab_names(state, &id) {
-                    if label(&names.0, &names.1) != l.told_label {
+                // Renamed by the human, or moved to another workspace: the group's title follows.
+                if let Some(names) = group_names(state, &id) {
+                    if names.label() != l.told_label {
                         notify_relinked(&mut l, &reg.conns, Some(&names));
                     }
                 }
@@ -373,7 +371,7 @@ fn prune(state: &Arc<AppState>, app: &AppHandle) {
             // Reloaded while this link missed the remap: follow it.
             Some(id) => {
                 l.maiterm_tab_id = id;
-                let names = tab_names(state, &l.maiterm_tab_id);
+                let names = group_names(state, &l.maiterm_tab_id);
                 notify_relinked(&mut l, &reg.conns, names.as_ref());
                 kept.push(l);
                 changed = true;
@@ -774,13 +772,34 @@ pub fn touch_window(state: &Arc<AppState>, label: &str) {
     }
 }
 
-/// A tab's name and its workspace's name.
-fn tab_names(state: &Arc<AppState>, tab_id: &str) -> Option<(String, String)> {
+/// The names a linked tab's Chrome group follows ("<workspace>/<tab>"): its workspace's, and the
+/// tab's only when it is one the human chose (or a Hive's "Queen"). An unrenamed tab's name is the
+/// terminal's live title, which an agent's spinner changes every second: None, and the extension
+/// keeps the name it linked with.
+fn group_names(state: &Arc<AppState>, tab_id: &str) -> Option<GroupNames> {
     let data = state.app_data.read();
     data.windows.iter().flat_map(|w| w.workspaces.iter()).find_map(|ws| {
         let t = ws.panes.iter().flat_map(|p| p.tabs.iter()).find(|t| t.id == tab_id)?;
-        Some((t.name.clone(), ws.name.clone()))
+        let tab = if t.hive_role.as_deref() == Some(crate::hive::ROLE_COORDINATOR) {
+            Some(crate::hive::create::COORDINATOR_TAB_NAME.to_string())
+        } else if t.custom_name {
+            Some(t.name.clone())
+        } else {
+            None
+        };
+        Some(GroupNames { tab, workspace: ws.name.clone() })
     })
+}
+
+struct GroupNames {
+    tab: Option<String>,
+    workspace: String,
+}
+
+impl GroupNames {
+    fn label(&self) -> String {
+        format!("{}/{}", self.workspace, self.tab.as_deref().unwrap_or(""))
+    }
 }
 
 fn tab_name(state: &Arc<AppState>, tab_id: &str) -> Option<String> {

@@ -63,7 +63,8 @@ Console and network logs are kept in memory only while a tab is linked (the last
 messages and 300 requests), and are discarded when the link ends.
 
 In `chrome.storage.local`, which survives a browser restart: the names of the tab groups it
-made (an agent's workspace and tab, such as "api/nova-agent"; the last 100), so it can tell its
+made (an agent's workspace and tab name as maiTerm showed them, such as "api/nova-agent"; the
+last 100), so it can tell its
 own groups from yours and ungroup ones a restart left behind. Nothing else is kept there, and
 nothing in synced storage.
 

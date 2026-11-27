@@ -135,7 +135,7 @@ async fn run(socket: WebSocket, state: Arc<AppState>, app: AppHandle) {
     {
         let reg = REG.lock();
         for l in &mut renamed {
-            let names = super::tab_names(&state, &l.maiterm_tab_id);
+            let names = super::group_names(&state, &l.maiterm_tab_id);
             super::notify_relinked(l, &reg.conns, names.as_ref());
         }
     }

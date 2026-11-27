@@ -156,7 +156,7 @@ maiTerm → extension:
 |---|---|---|
 | `command` | `{chromeTabId, action, args}` | action-specific, or `{error}` |
 | `unlinked` (notif) | `{chromeTabId, reason}` | maiTerm dropped a link: its tab closed (checked every 5 s while connected), the human unlinked it in maiTerm, or turned the feature off |
-| `relinked` (notif) | `{chromeTabId, maitermTabId, maitermTabName, maitermWorkspaceName}` | its maiTerm tab was reloaded under a new id (without this the next `hello` re-announces the old id and maiTerm refuses it as a closed tab), renamed, or moved to another workspace (the prune tick compares the names it last sent); the extension re-titles the group |
+| `relinked` (notif) | `{chromeTabId, maitermTabId, maitermTabName, maitermWorkspaceName}` | its maiTerm tab was reloaded under a new id (without this the next `hello` re-announces the old id and maiTerm refuses it as a closed tab), renamed by the human, or moved to another workspace (the prune tick compares the names it last sent). The tab name is sent only when the human chose it (or a Hive's "Queen"), else null and the extension keeps its own: an unrenamed tab's name is the terminal's live title, which an agent's spinner changes every second; the extension re-titles the group |
 
 Every change the extension makes to its stored links goes through one queue (`mutateLinks`): each
 is read → await → write, and two interleaved lost the newer write (a re-link racing maiTerm's
