@@ -1,5 +1,6 @@
 <script lang="ts">
-  /** The Stack section under a workspace row in the sidebar (docs/stack.md §7): one line
+  /** The stack panel at the foot of the sidebar (docs/stack.md §7): ONE workspace's stack at a
+   *  time, so opening a stack never pushes the workspace rows down under the pointer. One line
    *  per copy of each service (§14) — status dot, name and where it runs, port, uptime —
    *  click to show it in the console drawer (click again to hide), right-click for the verbs,
    *  Run on ▸ among them. The rows wrap rather than clip: real service names and ports share
@@ -28,9 +29,11 @@
     /** An add/import modal closed (saved or cancelled) — the sidebar uses it to drop the
      *  section it mounted for an empty stack if nothing was added. */
     onsettled?: () => void;
+    /** Set while the panel shows a workspace other than the active one: the way back. */
+    back?: { name: string; onclick: () => void } | null;
   }
 
-  let { workspace, expanded, ontoggle, onsettled }: Props = $props();
+  let { workspace, expanded, ontoggle, onsettled, back = null }: Props = $props();
 
   // A queued run's row is the run queue's, never a service here (it reaches the mirror only on
   // a window reload mid-run).
@@ -202,6 +205,25 @@
     return service.shared_from ? [] : stackStore.copies(workspace.id, service.id);
   }
 
+  /** "2 of 5 running", over the same rows the panel lists (a shared one by its source). */
+  const summary = $derived.by(() => {
+    let up = 0;
+    let all = 0;
+    const isUp = (s: string | undefined) => s === 'running' || s === 'ready';
+    for (const s of services) {
+      if (s.shared_from) {
+        all++;
+        if (isUp(stackStore.sharedStatus(s.id)?.status)) up++;
+        continue;
+      }
+      for (const c of rowsOf(s)) {
+        all++;
+        if (isUp(c.runtime.status)) up++;
+      }
+    }
+    return all ? `${up} of ${all} running` : 'No services';
+  });
+
   async function submit(input: ServiceInput) {
     const target = untrack(() => editing);
     try {
@@ -239,11 +261,19 @@
 </script>
 
 <div class="stack-section">
-  <button type="button" class="stack-head" onclick={ontoggle} aria-expanded={expanded}>
-    <span class="chev" class:open={expanded}>›</span>
-    <span class="stack-title">Stack</span>
-    <span class="stack-count">{services.length}</span>
-  </button>
+  <div class="stack-head">
+    <button type="button" class="stack-toggle" onclick={ontoggle} aria-expanded={expanded}>
+      <span class="chev" class:open={expanded}>›</span>
+      <span class="stack-title">{workspace.name}</span>
+      <span class="stack-summary">{summary}</span>
+    </button>
+    <Tooltip text="Add service…">
+      <button type="button" class="stack-add" aria-label="Add service" onclick={() => { adding = true; }}>+</button>
+    </Tooltip>
+  </div>
+  {#if back && expanded}
+    <button type="button" class="stack-back" onclick={back.onclick}>Back to {back.name}</button>
+  {/if}
 
   {#if leaseAsk}
     <LeaseHeldChoice ask={leaseAsk} onclose={() => { leaseAsk = null; }} />
@@ -307,10 +337,10 @@
           </div>
         {/each}
       {/each}
-      <button type="button" class="svc add" onclick={(e) => { e.stopPropagation(); adding = true; }}>
-        <span class="plus">+</span><span class="svc-name">Add service…</span>
-      </button>
       {#if services.length === 0}
+        <button type="button" class="svc add" onclick={(e) => { e.stopPropagation(); adding = true; }}>
+          <span class="plus">+</span><span class="svc-name">Add service…</span>
+        </button>
         <button type="button" class="svc add" onclick={(e) => { e.stopPropagation(); importing = true; }}>
           <span class="plus">↓</span><span class="svc-name">Import from project…</span>
         </button>
@@ -342,43 +372,97 @@
 {/if}
 
 <style>
+  /* The panel: sized to its rows, never more than ~40% of the sidebar, the rows scrolling
+     inside it so a big stack can't push the workspace list off the screen. */
   .stack-section {
-    padding: 0 8px 4px 24px;
+    border-top: 1px solid var(--bg-light);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    max-height: 40%;
+    min-height: 0;
+    padding: 4px 8px 6px;
   }
 
   .stack-head {
     align-items: center;
+    display: flex;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .stack-toggle {
+    align-items: baseline;
     background: none;
     border: none;
-    color: var(--fg-dim);
+    color: var(--fg);
     cursor: pointer;
     display: flex;
+    flex: 1;
     font-family: inherit;
-    font-size: 0.7rem;
-    font-weight: 600;
-    gap: 5px;
-    letter-spacing: 0.06em;
-    padding: 3px 4px;
-    text-transform: uppercase;
-    width: 100%;
+    gap: 6px;
+    min-width: 0;
+    overflow: hidden;
+    padding: 4px;
+    text-align: left;
   }
-  .stack-head:hover { color: var(--fg); }
+  .stack-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .stack-summary {
+    color: var(--fg-dim);
+    flex-shrink: 0;
+    font-size: 0.75rem;
+    white-space: nowrap;
+  }
+  .stack-toggle:hover .stack-summary { color: var(--fg); }
 
   .chev {
+    color: var(--fg-dim);
     display: inline-block;
+    flex-shrink: 0;
     transition: transform 0.12s;
     width: 8px;
   }
   .chev.open { transform: rotate(90deg); }
 
-  .stack-count {
-    background: var(--bg-light);
-    border-radius: 8px;
-    font-size: 0.65rem;
-    padding: 0 5px;
+  .stack-back {
+    align-self: flex-start;
+    background: none;
+    border: none;
+    color: var(--accent);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 0.75rem;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    padding: 0 4px 4px 18px;
+    text-align: left;
   }
+  .stack-back:hover { text-decoration: underline; }
 
-  .stack-rows { display: flex; flex-direction: column; }
+  .stack-add {
+    background: none;
+    border: none;
+    border-radius: 4px;
+    color: var(--fg-dim);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 1.05rem;
+    height: 20px;
+    line-height: 1;
+    padding: 0;
+    width: 20px;
+  }
+  .stack-add:hover { background: var(--bg-light); color: var(--fg); }
+  .stack-toggle:focus-visible, .stack-back:focus-visible, .stack-add:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+  .stack-rows { display: flex; flex-direction: column; min-height: 0; overflow-y: auto; padding-left: 10px; }
 
   .svc {
     align-items: center;

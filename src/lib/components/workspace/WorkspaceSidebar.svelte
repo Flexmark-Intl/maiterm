@@ -27,6 +27,7 @@
   import ShareExportModal from '$lib/components/share/ShareExportModal.svelte';
   import HiveCreateSheet from '$lib/components/hive/HiveCreateSheet.svelte';
   import StackSection from '$lib/components/stack/StackSection.svelte';
+  import StackDots from '$lib/components/stack/StackDots.svelte';
   import { stackStore } from '$lib/stores/stack.svelte';
   import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
   import { error as logError } from '@tauri-apps/plugin-log';
@@ -292,7 +293,9 @@
 
   // Pointer-based drag reordering (same pattern as TerminalTabs)
   let dragWorkspaceId = $state<string | null>(null);
-  let dropTargetIndex = $state<number | null>(null);
+  /** The ROW dropped on, by id: the list's order on screen (sort order, the suspended group,
+   *  nesting) is not the store's, so a screen index can't be used as a store index. */
+  let dropTargetId = $state<string | null>(null);
   let dropSide = $state<'before' | 'after'>('before');
 
   const DRAG_THRESHOLD = 5;
@@ -345,7 +348,7 @@
           e.clientY >= rect.top && e.clientY <= rect.bottom) {
         const midY = rect.top + rect.height / 2;
         dropSide = e.clientY < midY ? 'before' : 'after';
-        dropTargetIndex = i;
+        dropTargetId = wsEls[i].dataset.workspaceId ?? null;
         foundTarget = true;
         break;
       }
@@ -356,13 +359,13 @@
       const lastRect = wsEls[wsEls.length - 1].getBoundingClientRect();
       if (e.clientX >= listRect.left && e.clientX <= listRect.right &&
           e.clientY > lastRect.bottom && e.clientY <= listRect.bottom) {
-        dropTargetIndex = wsEls.length - 1;
+        dropTargetId = wsEls[wsEls.length - 1].dataset.workspaceId ?? null;
         dropSide = 'after';
         foundTarget = true;
       }
     }
     if (!foundTarget) {
-      dropTargetIndex = null;
+      dropTargetId = null;
     }
 
     lastPointerX = e.clientX;
@@ -392,14 +395,15 @@
   function handlePointerUp(e: PointerEvent) {
     (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
 
-    if (dragWorkspaceId && dropTargetIndex !== null) {
+    const targetIndex = dropTargetId ? workspacesStore.workspaces.findIndex(w => w.id === dropTargetId) : -1;
+    if (dragWorkspaceId && targetIndex !== -1) {
       const sourceId = dragWorkspaceId;
       const allWs = workspacesStore.workspaces;
       const fromIndex = allWs.findIndex(w => w.id === sourceId);
       const isCopy = e.altKey;
 
       // Compute the insertion position
-      let insertPos = dropSide === 'after' ? dropTargetIndex + 1 : dropTargetIndex;
+      let insertPos = dropSide === 'after' ? targetIndex + 1 : targetIndex;
 
       clearDragState();
 
@@ -449,7 +453,7 @@
     document.removeEventListener('keydown', handleDragKeyDown);
     document.removeEventListener('keyup', handleDragKeyUp);
     dragWorkspaceId = null;
-    dropTargetIndex = null;
+    dropTargetId = null;
     pendingDragWorkspaceId = null;
     if (ghost) {
       ghost.remove();
@@ -468,25 +472,35 @@
   // them here lit "1 item waiting on you" over a board with nothing on it and no way to
   // clear the badge — it only cleared when the AGENT next pulled its queue.
   // ── Stack (docs/stack.md §7) ──
-  // Which workspaces have their Stack section open. The active workspace opens by default
-  // the first time it is seen; everything else stays folded until clicked.
-  let expandedStacks = $state<Set<string>>(new Set());
-  let stackDefaulted = new Set<string>();
+  // ONE stack panel at the foot of the sidebar, showing the active workspace's stack, or the
+  // one whose row dots were clicked until the active workspace changes. Opening a stack
+  // inline under its row pushed every row below it down under the pointer.
+  let stackPanelFor = $state<string | null>(null);
+  let stackPanelOpen = $state(true);
   $effect(() => {
-    const id = workspacesStore.activeWorkspaceId;
-    if (!id || stackDefaulted.has(id)) return;
-    stackDefaulted.add(id);
-    untrack(() => { expandedStacks = new Set(expandedStacks).add(id); });
+    void workspacesStore.activeWorkspaceId;
+    untrack(() => { stackPanelFor = null; });
   });
-  function toggleStack(workspaceId: string) {
-    const next = new Set(expandedStacks);
-    if (next.has(workspaceId)) next.delete(workspaceId); else next.add(workspaceId);
-    expandedStacks = next;
-  }
-  let stackSections = $state<Record<string, StackSection>>({});
-  /** A workspace with an empty stack has no section to add from; the row's menu asks for
-   *  one here so the section mounts and can open its modal. */
+  let stackSection = $state<StackSection | null>(null);
+  /** A workspace with an empty stack has no panel to add from; the row's menu asks for
+   *  one here so the panel mounts and can open its modal. */
   let addingStackFor = $state<string | null>(null);
+  const stackPanelWorkspace = $derived.by(() => {
+    const id = stackPanelFor ?? workspacesStore.activeWorkspaceId;
+    const ws = workspacesStore.workspaces.find((w) => w.id === id);
+    if (!ws || ws.overlord || ws.suspended) return null;
+    return stackStore.services(ws.id).length > 0 || addingStackFor === ws.id ? ws : null;
+  });
+  /** Show a workspace's stack in the panel (its row's dots; the menu's Add / Import). */
+  function showStack(workspaceId: string) {
+    stackPanelFor = workspaceId === workspacesStore.activeWorkspaceId ? null : workspaceId;
+    stackPanelOpen = true;
+  }
+  function addToStack(workspaceId: string, how: 'add' | 'import') {
+    addingStackFor = workspaceId;
+    showStack(workspaceId);
+    requestAnimationFrame(() => { if (how === 'add') stackSection?.openAdd(); else stackSection?.openImport(); });
+  }
   let workspaceMenu = $state<{ x: number; y: number; workspaceId: string } | null>(null);
   /** The workspace the Share dialog is open for (docs/workspace-share.md §3). */
   let shareExportFor = $state<string | null>(null);
@@ -524,16 +538,8 @@
       { label: 'Stop stack', disabled: !anyLive, action: () => run('stop stack', stackStore.stopStack(workspaceId)) },
       { label: 'Restart stack', disabled: !anyLive, action: () => run('restart stack', stackStore.stopStack(workspaceId).then(() => stackStore.startStack(workspaceId))) },
       { label: '', separator: true, action: () => {} },
-      { label: 'Add service…', action: () => {
-        addingStackFor = workspaceId;
-        expandedStacks = new Set(expandedStacks).add(workspaceId);
-        requestAnimationFrame(() => stackSections[workspaceId]?.openAdd());
-      } },
-      { label: 'Import from project…', action: () => {
-        addingStackFor = workspaceId;
-        expandedStacks = new Set(expandedStacks).add(workspaceId);
-        requestAnimationFrame(() => stackSections[workspaceId]?.openImport());
-      } },
+      { label: 'Add service…', action: () => addToStack(workspaceId, 'add') },
+      { label: 'Import from project…', action: () => addToStack(workspaceId, 'import') },
       { label: '', separator: true, action: () => {} },
       workspacesStore.workspaces.find((w) => w.id === workspaceId)?.bridge_all
         ? { label: 'Disable mesh', action: () => run('disable mesh', agentMeshStore.setMeshEnabled(workspaceId, false)) }
@@ -635,6 +641,12 @@
     }
     return ws;
   });
+
+  /** Suspended workspaces sit in their own group at the bottom of the list; the active one
+   *  stays among the live ones even while it is suspended, so the row you're on never jumps. */
+  const liveWorkspaces = $derived(sortedWorkspaces.filter((w) => !w.suspended || w.id === workspacesStore.activeWorkspaceId));
+  const suspendedWorkspaces = $derived(sortedWorkspaces.filter((w) => w.suspended && w.id !== workspacesStore.activeWorkspaceId));
+  let suspendedOpen = $state(false);
 
   async function handleItemClick(workspaceId: string) {
     // Suppress click after a drag
@@ -742,15 +754,15 @@
   {/if}
 
   <div class="workspace-list" bind:this={workspaceListEl}>
-    {#each sortedWorkspaces as workspace, index (workspace.id)}
+    {#snippet wsRow(workspace: Workspace)}
       <div
         class="workspace-item"
         class:active={workspace.id === workspacesStore.activeWorkspaceId}
         class:suspended={!workspaceIsLive(workspace)}
         class:import-highlight={workspace.import_highlight}
         class:dragging={dragWorkspaceId === workspace.id}
-        class:drop-before={dropTargetIndex === index && dropSide === 'before' && dragWorkspaceId !== workspace.id}
-        class:drop-after={dropTargetIndex === index && dropSide === 'after' && dragWorkspaceId !== workspace.id}
+        class:drop-before={dropTargetId === workspace.id && dropSide === 'before' && dragWorkspaceId !== workspace.id}
+        class:drop-after={dropTargetId === workspace.id && dropSide === 'after' && dragWorkspaceId !== workspace.id}
         data-workspace-id={workspace.id}
         onclick={() => handleItemClick(workspace.id)}
         oncontextmenu={(e) => openWorkspaceMenu(e, workspace.id)}
@@ -808,18 +820,11 @@
                 <span class="ws-muted"><Icon name="bell-off" size={11} /></span>
               </Tooltip>
             {/if}
-            {#if stackStore.rollup(workspace.id)}
-              {@const roll = stackStore.rollup(workspace.id)}
-              <!-- Stack rollup (docs/stack.md §7): batch semantics like the Claude dot —
-                   green only when every auto-start service is up, amber while any starts or
-                   when only some are up, red if any crashed. -->
-              <StatusDot
-                color={roll === 'crashed' ? 'red' : roll === 'ready' ? 'green' : 'yellow'}
-                pulse={roll === 'starting'}
-                hollow={roll === 'partial'}
-                tooltip={roll === 'crashed' ? 'A service crashed' : roll === 'starting' ? 'Stack starting' : roll === 'partial' ? 'Stack partly up' : 'Stack up'}
-              />
-            {/if}
+            <StackDots
+              {workspace}
+              shown={stackPanelOpen && stackPanelWorkspace?.id === workspace.id}
+              onclick={() => showStack(workspace.id)}
+            />
             {#if workspace.bridge_all}
               <button
                 class="mesh-badge"
@@ -874,17 +879,48 @@
           {/if}
         {/if}
       </div>
-      {#if (workspace.stack?.length ?? 0) > 0 || addingStackFor === workspace.id}
-        <StackSection
-          bind:this={stackSections[workspace.id]}
-          {workspace}
-          expanded={expandedStacks.has(workspace.id)}
-          ontoggle={() => toggleStack(workspace.id)}
-          onsettled={() => { if (addingStackFor === workspace.id) addingStackFor = null; }}
-        />
-      {/if}
+    {/snippet}
+    {#each liveWorkspaces as workspace (workspace.id)}
+      {@render wsRow(workspace)}
     {/each}
+    {#if suspendedWorkspaces.length}
+      <!-- Suspended workspaces wait at the bottom, named while the group is closed. -->
+      <button
+        type="button"
+        class="suspended-group"
+        aria-expanded={suspendedOpen}
+        onclick={() => { suspendedOpen = !suspendedOpen; }}
+      >
+        <span class="chev" class:open={suspendedOpen}>›</span>
+        <span class="suspended-label">Suspended ({suspendedWorkspaces.length})</span>
+        {#if !suspendedOpen}
+          <span class="suspended-names">{suspendedWorkspaces.map((w) => w.name).join(', ')}</span>
+        {/if}
+      </button>
+      {#if suspendedOpen}
+        {#each suspendedWorkspaces as workspace (workspace.id)}
+          {@render wsRow(workspace)}
+        {/each}
+      {/if}
+    {/if}
   </div>
+
+  {#if stackPanelWorkspace}
+    {@const panelWs = stackPanelWorkspace}
+    {@const activeWs = workspacesStore.activeWorkspace}
+    {#key panelWs.id}
+      <StackSection
+        bind:this={stackSection}
+        workspace={panelWs}
+        expanded={stackPanelOpen}
+        ontoggle={() => { stackPanelOpen = !stackPanelOpen; }}
+        onsettled={() => { if (addingStackFor === panelWs.id) addingStackFor = null; }}
+        back={stackPanelFor && activeWs && !activeWs.overlord && stackStore.services(activeWs.id).length > 0
+          ? { name: activeWs.name, onclick: () => { stackPanelFor = null; } }
+          : null}
+      />
+    {/key}
+  {/if}
 
   {#if workspaceMenu}
     <ContextMenu items={workspaceMenuItems(workspaceMenu.workspaceId)} x={workspaceMenu.x} y={workspaceMenu.y} onclose={() => (workspaceMenu = null)} />
@@ -1209,6 +1245,43 @@
     flex: 1;
     overflow-y: auto;
     padding: 8px 0;
+  }
+
+  .suspended-group {
+    align-items: baseline;
+    background: none;
+    border: none;
+    border-top: 1px solid var(--bg-light);
+    color: var(--fg-dim);
+    cursor: pointer;
+    display: flex;
+    font-family: inherit;
+    font-size: 0.8rem;
+    gap: 6px;
+    margin-top: 6px;
+    min-width: 0;
+    padding: 8px 16px;
+    text-align: left;
+    width: 100%;
+  }
+  .suspended-group:hover { color: var(--fg); }
+  .suspended-group:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .suspended-group .chev {
+    display: inline-block;
+    flex-shrink: 0;
+    transition: transform 0.12s;
+    width: 8px;
+  }
+  .suspended-group .chev.open { transform: rotate(90deg); }
+  .suspended-label { flex-shrink: 0; }
+  /* One line, ellipsised: the full list is one click away, and a wrapped list of names here
+     would read as rows. */
+  .suspended-names {
+    min-width: 0;
+    opacity: 0.7;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .workspace-item {
