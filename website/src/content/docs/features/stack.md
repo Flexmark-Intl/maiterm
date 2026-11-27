@@ -15,7 +15,7 @@ What it *doesn't* get is a slot in your tab strip. A service tab isn't in the st
 
 ## Declaring what a project runs
 
-Right-click a workspace row and choose **Import from project…**. maiTerm reads what the directory already declares and offers it as a checklist:
+Right-click a workspace row and choose **Stack › Import from project…**. maiTerm reads what the directory already declares and offers it as a checklist:
 
 | Source | What it offers |
 |--------|----------------|
@@ -30,7 +30,7 @@ The obviously-dev ones — `dev`, `start`, `serve`, `up` — come pre-ticked; th
 
 ## The sidebar
 
-Services live in the **stack panel** at the foot of the sidebar. It shows the active workspace's stack — or another workspace's, when you click that workspace's dots, with **Back to** to return — and its header says how many are running. Each line carries a status dot, the service's name, its last known address, and how long it's been up:
+Services live in the **stack panel** at the foot of the sidebar. It shows the active workspace's stack — or another workspace's, when you click that workspace's dots, until you switch workspace (or click **Back to**, shown when your active workspace has a stack of its own) — and its header says how many are running. Each line carries a status dot, the service's name, its last known address, and how long it's been up:
 
 | Status | Means |
 |--------|-------|
